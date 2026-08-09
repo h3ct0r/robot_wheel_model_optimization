@@ -131,6 +131,40 @@ class WheelParams:
         return self.spoke_thickness_mm * self.claw_taper_ratio
 
     @property
+    def effective_thickness_mm(self) -> float:
+        """Thickness of the **uniform** spoke that bends like this tapered one, millimetres.
+
+        The section a slenderness proxy should read, and the answer to ``docs/plan/TODO.md``
+        #21. Reading the root understates slenderness — the root is the stiffest section — and
+        errs toward accepting a claw that buckles; reading the tip overstates it by as much.
+
+        Derived, not fitted. A cantilever tapering linearly from ``t0`` at the root to
+        ``r·t0`` at the tip has tip compliance ``∫₀ᴸ (L-x)²/(E I(x)) dx`` with ``I ∝ t(x)³``.
+        The integral is elementary and gives ``L³/(3 E I₀) · Φ(r)`` with
+
+            Φ(r) = 3[-ln r + 2r - 3/2 - r²/2] / (1 - r)³
+
+        so the uniform spoke of equal tip deflection has ``t_eff = t₀ / Φ(r)^(1/3)``. ``Φ → 1``
+        as ``r → 1`` — the expression is 0/0 there and the limit is taken explicitly below,
+        because the naive form returns a NaN for the uniform strut that is most of the design
+        space.
+
+        **Measured against the alternative that sounds more correct.** The Rayleigh quotient
+        for a fixed-free Euler mode is the buckling-theoretic answer and gives a *different*
+        effective thickness (7.11 mm against 7.08 at ``r = 0.6``, 6.71 against 6.47 at 0.4).
+        On the frictionless claw-sector plate sweep of 2026-08-09 the compliance form collapses
+        the taper dependence of the measured plateau load better — a 10% spread across
+        ``r = 1.0 → 0.4`` against Rayleigh's 20% and the root's **110%** — so the closed form
+        is both cheaper and, on this data, more faithful. The likely reason is that a claw on a
+        plate is not an axially loaded column: its tip slides and rotates, so the tip-load
+        weighting is nearer the truth than the buckling mode's.
+        """
+        r = self.claw_taper_ratio
+        if r <= 0.0:
+            return 0.0
+        return self.spoke_thickness_mm / _taper_compliance_factor(r) ** (1.0 / 3.0)
+
+    @property
     def is_claw(self) -> bool:
         """Whether this is a tapered free-tip claw rather than a uniform strut.
 
@@ -157,6 +191,28 @@ class WheelParams:
     @property
     def spoke_pitch_angle_rad(self) -> float:
         return 2.0 * math.pi / self.n_spokes
+
+    @property
+    def polygon_drop_mm(self) -> float:
+        """Ride-height drop of this wheel **treated as rigid**, over one spoke pitch.
+
+        ``R(1 - cos(π/n))``. Only meaningful without a shear band, where the running surface
+        is ``n_spokes`` discrete tips and the wheel is therefore a regular polygon: the axle
+        rides at ``R`` with a tip straight down and falls to ``R cos(π/n)`` midway between
+        two, ``n`` times a revolution.
+
+        **Half the pitch, not the whole one** — the neighbouring ``R(1 - cos(2π/n))`` is the
+        second-claw *engagement* threshold, a different question with a similar formula.
+
+        **It is not a bound on the real ripple**, in either direction. A stiff claw rides
+        smoother than this because it deflects into the gap; a very soft one rides *rougher*,
+        because at deflections of a fifth of the radius the phase changes how many claws carry
+        the load and that swamps the geometry — measured at 4x this value on an R 85 mm,
+        8-claw, 3.7 N/mm design. The honest number needs the fitted law:
+        :func:`wheelopt.rom.ring.ride_height_ripple_m`. This one is here because it costs
+        nothing, needs no FEA, and is the right thing for a millisecond pre-filter to report.
+        """
+        return self.outer_radius_mm * (1.0 - math.cos(math.pi / self.n_spokes))
 
     @property
     def spoke_sagitta_mm(self) -> float:
@@ -213,6 +269,31 @@ class WheelParams:
         return hashlib.sha256(blob.encode()).hexdigest()[:16]
 
 
+def _taper_compliance_factor(r: float) -> float:
+    """``Φ(r) = 3[-ln r + 2r - 3/2 - r²/2] / (1 - r)³`` — by how much a taper softens a
+    cantilever's tip. ``Φ(1) = 1``; ``Φ(0.25) = 2.525``.
+
+    Two branches, and the second is not a nicety. The bracket is
+    ``k³/3 + k⁴/4 + k⁵/5 + …`` with ``k = 1 - r``, assembled by cancelling four terms of order
+    one — so near ``r = 1`` it is catastrophic cancellation. At ``r = 0.999999`` the true value
+    is 3e-19 and the direct form returns a small **negative** number, whose cube root in Python
+    is *complex*. An untapered spoke is most of this design space, and a complex effective
+    thickness propagates into a comparison that raises somewhere else entirely.
+
+    So the series is used for ``k ≤ 0.1``, where 30 terms reach full double precision, and the
+    closed form beyond it, where it is good to 1e-13. The two agree to 1e-14 across the join.
+    """
+    k = 1.0 - r
+    if abs(k) <= 0.1:
+        # Φ = 1 + Σ_{n≥1} 3 kⁿ/(n+3), the series of the bracket divided by k³/3.
+        total, power = 1.0, 1.0
+        for n in range(1, 31):
+            power *= k
+            total += 3.0 * power / (n + 3)
+        return total
+    return 3.0 * (-math.log(r) + 2.0 * r - 1.5 - 0.5 * r * r) / (k * k * k)
+
+
 #: Search bounds, mirroring ``docs/plan/04-design-space.md``. Kept here so the constraint
 #: pre-filter and the optimiser read the same numbers.
 #:
@@ -226,6 +307,15 @@ PARAM_BOUNDS: dict[str, tuple[float, float]] = {
     "outer_radius_mm": (60.0, 100.0),
     "width_mm": (30.0, 70.0),
     "rim_thickness_mm": (1.2, 8.0),
+    # Unchanged by TODO #19, deliberately, and the reason is worth recording because the
+    # item expected to *widen* it: a `T7` claw wheel wants **more** claws than a banded one,
+    # not fewer. Measured 2026-08-09 — a passive claw wheel unloads a claw completely once
+    # per pitch below about 12 tips, whatever the claw's stiffness, so 6 is already generous
+    # for that family and 4 (the PaTS-Wheel letter's row) is only reachable because those
+    # claws are gear-driven rather than passive springs. Six stays because it is right for
+    # the **banded** `T3` comparator, which has a running surface between its spokes; the
+    # claw-specific limit is a WARNING from `constraints.claw_ride_harshness`, which fires
+    # only when there is no band.
     "n_spokes": (6, 36),
     # The lower bound sits *below* the minimum printable TPU wall (1.6 mm) on purpose, so
     # that `spoke_min_wall` stays a live check rather than being made unreachable by the

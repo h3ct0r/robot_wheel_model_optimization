@@ -46,25 +46,37 @@ from itertools import pairwise
 import numpy as np
 
 from ..rom.mjcf import (
+    EXPLICIT_STABILITY_LIMIT,
     HUB_MASS_KG,
     SEGMENT_MASS_KG,
     MissingMuJoCo,
+    TangentialElement,
     coupling_tendons,
+    hinge_arm_m,
+    resolve_tangential_element,
     ring_bodies,
+    stable_timestep_s,
+    tangential_damping,
 )
 from ..rom.ring import (
     RadialLaw,
     RingSpec,
+    TipEquivalentLaw,
     solve_equilibrium,
     symmetric_force_n,
 )
 
 __all__ = [
+    # Re-exported from `wheelopt.rom.mjcf`, where they now live: the bound is a property of
+    # driving a joint through `qfrc_applied`, not of this scenario. Kept importable here
+    # because this is where it was found and where the rig reads it.
+    "EXPLICIT_STABILITY_LIMIT",
     "TPU_LOSS_FACTOR",
     "RigSpec",
     "Signature",
     "StepResult",
     "build_scenario_mjcf",
+    "default_step_heights_m",
     "highest_step_climbed",
     "judge_signatures",
     "loaded_radius_table",
@@ -72,6 +84,7 @@ __all__ = [
     "run_flat",
     "run_step",
     "segment_damping_n_s_per_m",
+    "stable_timestep_s",
 ]
 
 #: Loss factor (tan δ) of printed TPU at room temperature and rolling frequencies.
@@ -166,47 +179,6 @@ class StepResult:
     history: np.ndarray = field(default_factory=lambda: np.empty(0))
 
 
-#: Largest ``ω·h`` at which a segment force law applied through ``qfrc_applied`` integrates
-#: stably. **Measured**, not derived: on the bandless R 60 mm claw ring at k = 19.76 kN/m and
-#: 2 g segments (ω = 3143 rad/s), ω·h = 0.251 and below run clean for 0.6 s while 0.314 and
-#: above diverge inside 5 ms. 0.2 sits about 25% under the observed boundary.
-#:
-#: The bound exists because ``qfrc_applied`` is an **external** force: ``implicitfast``
-#: integrates a joint's own ``damping`` attribute implicitly but not this, so a stiff segment
-#: spring is integrated explicitly and has a stability limit the rest of the model does not.
-EXPLICIT_STABILITY_LIMIT = 0.2
-
-
-def stable_timestep_s(laws: Sequence[RadialLaw], segment_mass_kg: float,
-                      requested_s: float) -> float:
-    """Largest timestep at or below ``requested_s`` that integrates these laws stably.
-
-    Why this is not optional, and why it is not a fudge. The radial-only rig has been running
-    at ω·h = 0.63 on the bandless claw design — well past the boundary above — and has been
-    stable, but **by luck rather than by design**: an out-of-contact radial segment sits at
-    exactly ``u = 0`` where the law returns exactly zero, so nothing excites the mode. A
-    tangential joint has no such luck. Its axis sweeps through gravity as the wheel turns, so
-    every segment is driven at its own natural frequency for the whole run, and the marginal
-    mode grows until the joint limits fire and the solver gives up.
-
-    The remedy is the timestep, deliberately, in preference to the two alternatives that also
-    work. **Native joint damping** (``c ≥ 5 N·s/m`` measured) is dissipation that no material
-    supplied — the loss factor is already the damping model, and cost of transport is one of
-    the five signatures, so numerical damping there would be answering a physics question with
-    a solver setting. **Heavier segments** (``≥ 20 g`` measured, against 2 g) would change the
-    ring's mass, which the rigid comparator matches, so it would move both wheels to fix one.
-    A smaller timestep costs time and changes no answer.
-    """
-    omega = max(
-        (float(np.sqrt(max(law.stiffness_n_per_m(0.0), 0.0) / segment_mass_kg))
-         for law in laws if law is not None),
-        default=0.0,
-    )
-    if omega <= 0.0:
-        return requested_s
-    return min(requested_s, EXPLICIT_STABILITY_LIMIT / omega)
-
-
 def segment_damping_n_s_per_m(law: RadialLaw, spec: RingSpec, payload_kg: float,
                               loss_factor: float) -> float:
     """Viscous damping per segment equivalent to a hysteretic loss factor, N·s/m.
@@ -220,6 +192,22 @@ def segment_damping_n_s_per_m(law: RadialLaw, spec: RingSpec, payload_kg: float,
 
     Derived from the fitted law and the actual payload, so it moves when either does
     (invariant 2). It is not a tuning knob and must not be used as one.
+
+    **On a softening law this is ambiguous, and the ambiguity is worth about 8% of cost of
+    transport** (measured 2026-08-09, ``TODO.md`` #23). The equivalence ``c = η k / ω`` wants a
+    *storage* stiffness, and a segment on a negative-tangent branch has none: the tangent at
+    the operating point is the wrong sign. Two defensible readings remain — the tangent at
+    ``u = 0``, used here, and the secant at the static deflection — and on the tiny design's
+    hand-softened tables they differ by up to 40%, moving cost of transport by −7.4% and −9.2%.
+
+    The tangent at zero stays, for two reasons. It is the only reading that is defined without
+    knowing the operating point, and the disagreement is an order of magnitude below the loss
+    factor's own: ``TPU_LOSS_FACTOR`` is a literature midpoint on a 0.05–0.30 span, a factor of
+    six, and every cost-of-transport number is already a statement about *that*.
+
+    What is **not** an option, though ``TODO.md`` #23 proposed it, is reading the *minimum*
+    tangent. On a softening law that is negative — −0.687 N/mm on the sharpest case tested — so
+    ``η k / ω`` comes out negative and the damper injects energy.
     """
     if payload_kg <= 0:
         raise ValueError("payload_kg must be positive")
@@ -265,7 +253,9 @@ def ring_axle_inertia_kg_m2(spec: RingSpec, segment_half_width_m: float,
 def build_scenario_mjcf(spec: RingSpec, rig: RigSpec, *, rigid: bool,
                         segment_half_width_m: float = 0.015,
                         segment_mass_kg: float = 0.002,
-                        tangential: bool = False) -> str:
+                        tangential: TangentialElement | None = None,
+                        radial_damping: float = 0.0,
+                        tangential_damping_c: float = 0.0) -> str:
     """MJCF for one wheel on the rig. ``rigid=True`` swaps the ring for a cylinder.
 
     The rigid wheel is given the ring's **total** mass, not a nominal one, so the pair differ
@@ -356,7 +346,8 @@ def build_scenario_mjcf(spec: RingSpec, rig: RigSpec, *, rigid: bool,
         # hit the floor and the step. Neighbour interaction must arrive through the band.
         parts += ring_bodies(spec, segment_half_width_m=segment_half_width_m,
                              segment_mass_kg=segment_mass_kg, tangential=tangential,
-                             indent=8)
+                             radial_damping=radial_damping,
+                             tangential_damping_c=tangential_damping_c, indent=8)
 
     parts += ["      </body>", "    </body>", "  </worldbody>"]
     if not rigid:
@@ -370,7 +361,8 @@ def build_scenario_mjcf(spec: RingSpec, rig: RigSpec, *, rigid: bool,
     return "\n".join(parts)
 
 
-def _simulate(spec, law, rig, *, rigid, fit_max_m, tangential_law=None, settle_s=0.6):
+def _simulate(spec, law, rig, *, rigid, fit_max_m, tangential_law=None,
+              tangential_element=None, settle_s=0.6):
     """Shared integration loop. Returns the per-step history and the model handles."""
     try:
         import mujoco
@@ -380,27 +372,43 @@ def _simulate(spec, law, rig, *, rigid, fit_max_m, tangential_law=None, settle_s
     # A rigid wheel has no segments, so it cannot have a tangential freedom either. Silently
     # honouring the argument there would build a cylinder and claim it had claw compliance.
     tangential_law = None if rigid else tangential_law
+    element = resolve_tangential_element(tangential_law, tangential_element)
+    # A hinge's coordinate is an angle, so every rule below — the timestep bound and the
+    # hysteretic damping equivalence — is applied to the law referred to the tip, and the
+    # damping is referred back. Doing it any other way means writing both rules twice in two
+    # unit systems, which is a second chance to lose a factor of the moment arm.
+    arm = hinge_arm_m(spec) if element == "hinge" else 0.0
+    equivalent_law = (TipEquivalentLaw(tangential_law, arm) if element == "hinge"
+                      else tangential_law)
     # Tighten the timestep if the segment laws need it, before the model is built — `rig`
     # carries the timestep into the MJCF. A rigid wheel has no segment laws and keeps the
     # requested step, so the pair are compared at whatever each one needs to be correct
     # rather than at whatever the softer one can survive.
     if not rigid:
         rig = replace(rig, timestep_s=stable_timestep_s(
-            [law, tangential_law], SEGMENT_MASS_KG, rig.timestep_s))
-    model = mujoco.MjModel.from_xml_string(
-        build_scenario_mjcf(spec, rig, rigid=rigid, tangential=tangential_law is not None,
-                            segment_mass_kg=SEGMENT_MASS_KG)
-    )
-    data = mujoco.MjData(model)
+            [law, equivalent_law], SEGMENT_MASS_KG, rig.timestep_s))
     damping = 0.0 if rigid else segment_damping_n_s_per_m(
         law, spec, rig.payload_kg, rig.loss_factor
     )
-    # The tangential mode is 134x softer on a claw, so its bounce frequency and therefore its
-    # equivalent viscous damping are different numbers. Derived from the tangential law by the
-    # same rule rather than reusing the radial one, which would over-damp it by ~sqrt(134).
-    tangential_damping = 0.0 if tangential_law is None else segment_damping_n_s_per_m(
-        tangential_law, spec, rig.payload_kg, rig.loss_factor
+    # The tangential mode is far softer than the radial one on a claw, so its bounce frequency
+    # and therefore its equivalent viscous damping are different numbers. Derived from the
+    # tangential law by the same rule rather than reusing the radial one, which would
+    # over-damp it by the square root of the stiffness ratio.
+    tan_damping = 0.0 if tangential_law is None else tangential_damping(
+        spec, element,
+        segment_damping_n_s_per_m(equivalent_law, spec, rig.payload_kg, rig.loss_factor),
     )
+    # Both go into the MJCF as native joint damping, not into `qfrc_applied`. The loss factor
+    # is physics and stays; how it is *integrated* is not, and explicitly is wrong here --
+    # `implicitfast` handles native damping implicitly, and the effective inertia of a segment
+    # joint is two orders below the segment mass, so the explicit form blew up on round-off in
+    # free flight. See `wheelopt.rom.mjcf.ring_bodies`.
+    model = mujoco.MjModel.from_xml_string(
+        build_scenario_mjcf(spec, rig, rigid=rigid, tangential=element,
+                            segment_mass_kg=SEGMENT_MASS_KG,
+                            radial_damping=damping, tangential_damping_c=tan_damping)
+    )
+    data = mujoco.MjData(model)
 
     def joint_addr(prefix: str) -> tuple[np.ndarray, np.ndarray]:
         ids = [mujoco.mj_name2id(model, mujoco.mjtObj.mjOBJ_JOINT, f"{prefix}{i}")
@@ -425,18 +433,15 @@ def _simulate(spec, law, rig, *, rigid, fit_max_m, tangential_law=None, settle_s
     for k in range(n_steps):
         if not rigid:
             compression = -data.qpos[segment_qpos]
-            data.qfrc_applied[segment_dofs] = (
-                law.force_n(compression) - damping * data.qvel[segment_dofs]
-            )
+            data.qfrc_applied[segment_dofs] = law.force_n(compression)
             if tangential_law is not None:
                 # Symmetric: a claw bends the same either way, so the restoring force is
                 # sign(v)*f(|v|). Passing `v` straight to `force_n` would make one direction
                 # free and the other doubled, and the wheel would drift in the rolling
                 # direction under load.
                 splay = data.qpos[tangential_qpos]
-                data.qfrc_applied[tangential_dofs] = (
-                    -symmetric_force_n(tangential_law, splay)
-                    - tangential_damping * data.qvel[tangential_dofs]
+                data.qfrc_applied[tangential_dofs] = -symmetric_force_n(
+                    tangential_law, splay
                 )
         # Torque only after the wheel has settled onto the ground, so the run measures rolling
         # rather than the transient of a wheel dropped onto a plane while being spun.
@@ -532,20 +537,26 @@ def _summarise(spec, rig, history, settle_steps, fit_max_m, rigid) -> StepResult
 
 def run_step(spec: RingSpec, law: RadialLaw, rig: RigSpec, *, rigid: bool = False,
              fit_max_m: float = float("inf"),
-             tangential_law: RadialLaw | None = None) -> StepResult:
+             tangential_law: RadialLaw | None = None,
+             tangential_element: TangentialElement | None = None) -> StepResult:
     """Drive one wheel at the step. Returns a typed result; does not raise (invariant 4).
 
     Args:
         fit_max_m: the deepest indentation the spring law was fitted at. Used only to report
             :attr:`StepResult.fraction_beyond_fit`; it does not clamp anything, because a
             silently clamped force law is a worse lie than an extrapolated one.
-        tangential_law: if given, every segment also gets the in-plane perpendicular freedom
+        tangential_law: if given, every segment also gets a second in-plane freedom
             (TODO #20). Ignored for ``rigid=True``, which has no segments. Default None keeps
-            the radial-only wheel every earlier result was measured on.
+            the radial-only wheel every earlier result was measured on. **The units follow
+            the element**: N/m against a slide, N·m/rad against a hinge.
+        tangential_element: ``"slide"`` or ``"hinge"``, defaulting to the hinge whenever a law
+            is given — see :func:`~wheelopt.rom.mjcf.resolve_tangential_element`. A driven
+            wheel wants the hinge; the slide is here to be compared against, not used.
     """
     try:
         _model, _data, history, settle = _simulate(
-            spec, law, rig, rigid=rigid, fit_max_m=fit_max_m, tangential_law=tangential_law
+            spec, law, rig, rigid=rigid, fit_max_m=fit_max_m, tangential_law=tangential_law,
+            tangential_element=tangential_element,
         )
     except MissingMuJoCo as exc:
         return StepResult(ok=False, message=str(exc))
@@ -558,30 +569,60 @@ def run_step(spec: RingSpec, law: RadialLaw, rig: RigSpec, *, rigid: bool = Fals
 
 def run_flat(spec: RingSpec, law: RadialLaw, rig: RigSpec, *, rigid: bool = False,
              fit_max_m: float = float("inf"),
-             tangential_law: RadialLaw | None = None) -> StepResult:
+             tangential_law: RadialLaw | None = None,
+             tangential_element: TangentialElement | None = None) -> StepResult:
     """The same run with no step, for cost of transport and the flat contact patch."""
     return run_step(spec, law, replace(rig, step_height_m=1e-6, step_x_m=1e3),
-                    rigid=rigid, fit_max_m=fit_max_m, tangential_law=tangential_law)
+                    rigid=rigid, fit_max_m=fit_max_m, tangential_law=tangential_law,
+                    tangential_element=tangential_element)
+
+
+def default_step_heights_m(spec: RingSpec) -> np.ndarray:
+    """The heights :func:`highest_step_climbed` sweeps by default, metres.
+
+    Public so a caller can tell a climb from a **censored** one: a sweep that ends at its own
+    ceiling is reporting the ceiling, not the wheel. It ran to ``1.01 R`` until 2026-08-09,
+    which is a ceiling a good claw wheel reaches — the R 60 mm claw clears exactly 60 mm — so
+    the answer would have been pinned at ``R`` for anything better without a word. It now
+    reaches ``1.5 R``, and the claw fails at 70 mm, so the bound is no longer active on the
+    design that found it.
+
+    Not open-ended, because a wheel that climbs its own diameter is a result to be doubted
+    rather than to be measured more finely, and every extra height costs a run.
+    """
+    return np.arange(0.01, 1.5 * spec.radius_m + 1e-12, 0.01)
 
 
 def highest_step_climbed(spec: RingSpec, law: RadialLaw, rig: RigSpec, *,
                          rigid: bool = False, fit_max_m: float = float("inf"),
                          heights_m: np.ndarray | None = None,
-                         tangential_law: RadialLaw | None = None) -> float:
+                         tangential_law: RadialLaw | None = None,
+                         tangential_element: TangentialElement | None = None) -> float:
     """Tallest step this wheel gets over, metres. The "climbs better" signature.
 
     A sweep rather than a bisection: the climb is not guaranteed monotone in step height —
     a wheel can bounce over an obstacle it cannot roll over — and bisecting a non-monotone
     predicate silently returns whichever side it happened to land on. The sweep returns the
     tallest height that succeeded, and its cost is a handful of seconds per point.
+
+    **Compare the answer against the top of the swept range before quoting it.** Returning the
+    last height in ``heights_m`` means the sweep ran out, not that the wheel did; see
+    :func:`default_step_heights_m`. ``scripts/run_step.py`` prints a warning in that case.
+
+    Resolution is 10 mm, and it is coarse enough to matter: on the R 60 mm claw a **1%** change
+    in the fitted radial law — the difference the #12 contact floor makes, 0.3% in peak force
+    and 1.2% in ``k(0)`` — moves the answer one whole bucket, 50 mm to 60 mm. Quote the number
+    to one bucket, not to the millimetre, and do not read a one-bucket difference between two
+    designs as a ranking.
     """
     if heights_m is None:
-        heights_m = np.arange(0.01, 1.01 * spec.radius_m, 0.01)
+        heights_m = default_step_heights_m(spec)
     best = 0.0
     for height in heights_m:
         result = run_step(spec, law, replace(rig, step_height_m=float(height)),
                           rigid=rigid, fit_max_m=fit_max_m,
-                          tangential_law=tangential_law)
+                          tangential_law=tangential_law,
+                          tangential_element=tangential_element)
         if result.ok and result.climbed:
             best = float(height)
     return best

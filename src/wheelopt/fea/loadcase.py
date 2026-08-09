@@ -350,17 +350,36 @@ class SolverSpec:
     #: hard-coded contact stiffness would violate invariant 2 in a particularly sneaky way,
     #: since it would make soft and stiff designs contact differently.
     #:
-    #: It scales as ``factor * E / element_size``, so **a finer mesh gets a stiffer penalty**
-    #: and conditions the tangential problem worse. Measured 2026-08-08 on the plane-strain
-    #: tier, whose 1.6 mm elements give five times the contact stiffness of the 3-D tier's
-    #: 8 mm ones: at ``factor = 20`` a frictional run diverges, at 5 and 2 it converges. The
-    #: answer barely moves across that range — 3.85 to 3.90 N over a 10x span — so the
-    #: penalty is not polluting the result; it is only conditioning. Lower it before
-    #: concluding that a frictional contact problem is unsolvable.
+    #: It scales as ``factor * E / max(element_size, contact_length_floor_m)``.
+    #:
+    #: **The default was 20 until 2026-08-09** (``TODO.md`` #12). Measured on both tiers
+    #: before it moved: on plane strain 20/5/2 give 3.90/3.88/3.86 N, and on 3-D C3D10 the
+    #: same ladder gives 4.29/4.26/4.18 N frictionless and 4.35/4.31/4.22 N at ``mu = 0.6``.
+    #: So 20 to 5 costs **0.7-0.8%** of the answer on the reference tier and buys real
+    #: conditioning — the frictional 3-D run goes from 60 increments with 3 cutbacks to 50
+    #: with none, and a diverged frictional 2-D run converges. Going on to 2 is a different
+    #: matter and was rejected: the answer moves 2.6-2.9% and the contact patch grows from
+    #: 34.2 to 39.0 mm, which is penetration being reported as conformity.
     #:
     #: In the cache key, because it changes the answer. It was not, until a run at one
     #: factor was served another factor's cached result.
-    contact_stiffness_factor: float = 20.0
+    contact_stiffness_factor: float = 5.0
+    #: Smallest element size the penalty is allowed to see, metres. **This is the cap the
+    #: scaling above needs**, and without it the factor alone cannot buy convergence on a fine
+    #: mesh.
+    #:
+    #: Measured 2026-08-09 on the tiny design at ``mu = 0.6``, holding the *factor* at 5 and
+    #: refining: 4.0 mm converges, 2.5 mm and 1.5 mm both diverge — and they diverge at
+    #: ``factor = 20`` too, so lowering the factor is not the remedy. Holding the *penalty*
+    #: instead, at the value a 4 mm element gives (``5 E / 0.004``, i.e. 1250 E per metre),
+    #: every one of those meshes converges, and the two finest agree on the peak force to
+    #: **0.02%** — 3.8898 against 3.8905 N. The divergence therefore tracks the absolute
+    #: penalty, not the factor, and 4 mm is where this design's threshold sits.
+    #:
+    #: Calibrated, not derived: one design, one material, one load case. Re-check it before
+    #: trusting it on a much larger wheel, where 4 mm is a relatively finer element. Set it to
+    #: zero to recover the uncapped scaling.
+    contact_length_floor_m: float = 0.004
 
     def __post_init__(self) -> None:
         if self.timeout_s <= 0:
@@ -369,3 +388,7 @@ class SolverSpec:
             raise ValueError("n_threads must be at least 1")
         if not 0 < self.min_increment <= self.initial_increment <= self.max_increment:
             raise ValueError("require 0 < min <= initial <= max increment")
+        if self.contact_stiffness_factor <= 0:
+            raise ValueError("contact_stiffness_factor must be positive")
+        if self.contact_length_floor_m < 0:
+            raise ValueError("contact_length_floor_m must be non-negative")

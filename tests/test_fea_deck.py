@@ -186,6 +186,77 @@ class TestUnits(unittest.TestCase):
         self.assertIn("2.100000000e+11", deck)  # rigid indenter E
 
 
+class TestContactPenalty(unittest.TestCase):
+    """``TODO.md`` #12: the penalty scales with the mesh, and the scaling is capped."""
+
+    @staticmethod
+    def penalty(text: str) -> float:
+        """The ``K`` on the line after ``*SURFACE INTERACTION``'s overclosure card."""
+        lines = text.splitlines()
+        i = next(k for k, line in enumerate(lines)
+                 if line.startswith("*SURFACE BEHAVIOR"))
+        return float(lines[i + 1].split(",")[0])
+
+    def _mesh_scaled(self, scale: float) -> FeaMesh:
+        """The fixture mesh with every coordinate multiplied, so the elements change size."""
+        mesh = fixture_mesh()
+        return FeaMesh(
+            nodes_m=mesh.nodes_m * scale,
+            elements=mesh.elements,
+            element_type=mesh.element_type,
+            node_sets=mesh.node_sets,
+            element_sets=mesh.element_sets,
+        )
+
+    def test_the_penalty_is_proportional_to_the_factor(self):
+        one = self.penalty(build().text)
+        solver = SolverSpec(contact_stiffness_factor=2.0 * SolverSpec()
+                            .contact_stiffness_factor)
+        two = self.penalty(build_deck(
+            fixture_mesh(),
+            build_indenter(LoadCaseKind.RADIAL_FLAT, LoadCase().indenter,
+                           PARAMS.outer_radius_mm * 1e-3, PARAMS.width_mm * 1e-3),
+            PARAMS, MATERIAL, HYPER, LoadCase(), solver,
+            design_hash="deadbeef", cache_key="cafe1234",
+        ).text)
+        self.assertAlmostEqual(two / one, 2.0, places=6)
+
+    def test_a_coarse_mesh_is_below_the_floor_and_still_scales(self):
+        """Above the floor the penalty must still track the element size, or the cap has
+        replaced the scaling instead of bounding it — and a soft design would then contact
+        like a stiff one, which is invariant 2."""
+        coarse = self.penalty(build(mesh=self._mesh_scaled(4.0)).text)
+        coarser = self.penalty(build(mesh=self._mesh_scaled(8.0)).text)
+        self.assertAlmostEqual(coarse / coarser, 2.0, places=6)
+
+    def test_refining_past_the_floor_stops_stiffening_the_penalty(self):
+        """The cap itself. Unfloored these two differ by 4x, and the finer one diverges:
+        measured 2026-08-09, factor 5 converges at a 4 mm element and does not at 2.5 or
+        1.5 mm, while holding the penalty at the 4 mm value converges at all three."""
+        fine = self.penalty(build(mesh=self._mesh_scaled(0.5)).text)
+        finer = self.penalty(build(mesh=self._mesh_scaled(0.125)).text)
+        self.assertEqual(fine, finer)
+
+    def test_the_floor_can_be_switched_off(self):
+        solver = SolverSpec(contact_length_floor_m=0.0)
+        def penalty_at(scale: float) -> float:
+            return self.penalty(build_deck(
+                self._mesh_scaled(scale),
+                build_indenter(LoadCaseKind.RADIAL_FLAT, LoadCase().indenter,
+                               PARAMS.outer_radius_mm * 1e-3, PARAMS.width_mm * 1e-3),
+                PARAMS, MATERIAL, HYPER, LoadCase(), solver,
+                design_hash="deadbeef", cache_key="cafe1234",
+            ).text)
+        self.assertAlmostEqual(penalty_at(0.125) / penalty_at(0.5), 4.0, places=6)
+
+    def test_the_default_is_the_softened_penalty(self):
+        """A regression guard on the decision, not on the number: #12 moved the default from
+        20 to 5 because 20 diverged on the fine section mesh. A silent drift back would
+        reintroduce a failure that reads as "this contact problem is unsolvable"."""
+        self.assertEqual(SolverSpec().contact_stiffness_factor, 5.0)
+        self.assertGreater(SolverSpec().contact_length_floor_m, 0.0)
+
+
 class TestDeterminism(unittest.TestCase):
     def test_identical_inputs_give_byte_identical_output(self):
         """If this fails, the cache is serving results for a deck it did not produce."""

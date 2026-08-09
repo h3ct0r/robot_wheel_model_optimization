@@ -355,17 +355,50 @@ def check_design(
                 "depends on spoke_phase_deg; the ring ROM has no shear-band stiffness to fit",
             )
         )
+        # How rough that discrete contact is, as a number. TODO #19 asked for the claw-count
+        # lower bound to be re-derived from the load case rather than inherited from a banded
+        # wheel's range, and the answer came out the *opposite* way to the one anticipated:
+        # a passive claw wheel wants **more** claws, not fewer.
+        #
+        # Measured 2026-08-09 on R 85 mm at the platform's 24.5 N, two claws an order of
+        # magnitude apart in stiffness (3.7 and 13.5 N/mm): the axle's peak-to-peak movement
+        # over one pitch reaches the wheel's own static deflection — i.e. the trailing claw
+        # leaves the ground entirely once per pitch — at **n = 10 to 12** on both, and needs
+        # n >= 12 (stiff claw) or n >= 24 (soft claw) to fall to half of it. The PaTS-Wheel
+        # letter's four-claw row is not a counter-example: that row is gear-driven and the
+        # wheel transforms, so its claws are not carrying the load as passive springs.
+        #
+        # n >= 12 on any radius is polygon_drop <= 3.4% of R, which is the threshold below.
+        # A WARNING and not infeasible, on purpose: the real criterion needs the fitted law
+        # (`wheelopt.rom.ring.ride_height_ripple_m`) and a pre-filter does not have one, so
+        # this flags the geometry that cannot be rescued by any stiffness rather than
+        # pretending to judge the ride.
+        drop_fraction = params.polygon_drop_mm / max(params.outer_radius_mm, 1e-9)
+        if drop_fraction > 0.035:
+            v.append(
+                _violation(
+                    "claw_ride_harshness",
+                    Severity.WARNING,
+                    drop_fraction,
+                    0.035,
+                    f"{params.n_spokes} tips on R {params.outer_radius_mm:.0f} mm drop the "
+                    f"axle {params.polygon_drop_mm:.1f} mm ({drop_fraction:.1%} of R) between "
+                    "tips; measured, a wheel this coarse unloads a claw completely once a "
+                    "pitch. Confirm with ride_height_ripple_m before believing any ride "
+                    "metric from it",
+                    lower_bound=False,
+                )
+            )
 
     # Slenderness. Very slender spokes are dominated by buckling rather than bending, and
     # sit outside the range the ring ROM is fitted over.
     #
-    # KNOWN GAP for tapered claws: this reads the root, which for a taper is the *stiffest*
-    # section, so the proxy understates slenderness and errs toward accepting a claw that
-    # buckles. The correct effective section for a tapered cantilever is not obviously the
-    # root, the tip or the mean, and picking one here would be inventing buckling physics in
-    # a pre-filter. Left reading the root deliberately, flagged, and left for FEA to arbitrate
-    # -- which it can, since `detect_buckling` runs on every radial sweep. See the task list.
-    slenderness = params.spoke_span_mm / max(params.spoke_thickness_mm, 1e-9)
+    # Reads `effective_thickness_mm`, not the root, since TODO #21 closed on 2026-08-09. The
+    # root is the *stiffest* section of a tapered claw, so it understated slenderness and
+    # erred toward accepting a claw that buckles -- non-conservatively. The effective
+    # thickness is the uniform spoke of equal tip compliance, derived in closed form on
+    # `WheelParams`, and it is 13% below the root at taper 0.6 and 36% below at 0.25.
+    slenderness = params.spoke_span_mm / max(params.effective_thickness_mm, 1e-9)
     if slenderness > 40.0:
         v.append(
             _violation(
@@ -373,8 +406,9 @@ def check_design(
                 Severity.WARNING,
                 slenderness,
                 40.0,
-                f"spoke slenderness {slenderness:.0f} is buckling-dominated; ROM fit "
-                "may be poor",
+                f"spoke slenderness {slenderness:.0f} (on an effective thickness of "
+                f"{params.effective_thickness_mm:.2f} mm against a {params.spoke_thickness_mm:.2f} "
+                "mm root) is buckling-dominated; ROM fit may be poor",
                 lower_bound=False,
             )
         )

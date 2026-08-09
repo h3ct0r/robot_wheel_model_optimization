@@ -24,8 +24,9 @@ Full statement and sub-questions: `docs/plan/02-research-questions.md`
 - **Active work:** ROM feasibility spike, `docs/plan/16-first-week.md`.
   Steps 2 (CAD generator) and 3 (CalculiX radial compression) are **done and verified** —
   `scripts/verify_cad.py` 48/48, `scripts/verify_fea.py --full` 30/30 against CalculiX 2.23.
-  **Step 4 (the segmented ring) is done, band included** (`rom-0.4.0`): `wheelopt.rom` fits
-  a ring to the FEA `k_r(δ)` at **0.68% RMS on 24 segments**, and the MuJoCo realisation
+  **Step 4 (the segmented ring) is done, band included** (`rom-0.5.0`): `wheelopt.rom` fits
+  a ring to the FEA `k_r(δ)` at **0.59% RMS on 24 segments** (0.68% before #12 softened the
+  contact penalty; the fit moved, the gap below did not), and the MuJoCo realisation
   tracks the analytic ring to **0.03–0.05%** below 4 mm (4.0–4.8% at 5–6 mm — contact
   discretisation, MuJoCo's round capsules bridge the scallops and touch on more segments
   than the analytic active set; it was 6.1–6.6% before #26). The shear band is two derived
@@ -45,7 +46,8 @@ Full statement and sub-questions: `docs/plan/02-research-questions.md`
   `sim.step_climb.TPU_LOSS_FACTOR` (0.15, literature midpoint, 0.05–0.30 span, no DMA), and
   it had not been run on the nominal design — the spring law could not fit it, which is now
   addressed (next bullet). `run_step.py --law table` re-runs the whole rig off a tabulated
-  law: 5/5 on `--tiny`. Step 1 is
+  law: 5/5 on `--tiny`. **That 50-vs-20 is a banded `T3` and does not transfer to claws**; the
+  claw number is 60-vs-20, three bullets down. Step 1 is
   mostly closed: `wheelopt.platform.load_platform()` reads `configs/robot.yaml` and
   `tests/test_platform.py` asserts it agrees with `PlatformLimits` / `PARAM_BOUNDS` /
   `LoadCase.nominal_load_n`. Screening still reads the dataclass defaults on purpose
@@ -91,50 +93,66 @@ Full statement and sub-questions: `docs/plan/02-research-questions.md`
   The 5–6 mm MuJoCo gap fell from 6.1–6.6% to 4.0–4.8% and the rest is the contact
   discretisation it was first attributed to; sub-4 mm is unchanged at 0.03–0.05%, as it must be.
   Step-climb re-run across the re-fit: still **5/5**.
-- **A bandless ring can splay, analytically and in MuJoCo — and under drive the wheel folds
-  flat** (2026-08-09, `solve_equilibrium_2dof` + `ring_bodies(tangential=True)`). Second DOF
-  per segment; a banded spec is **refused** in both, because `coupling_tendons` couples only
-  the radial joints and a banded ring with tangential slides would shear for free. The two
-  agree per segment to **1e-9** on both KKT conditions in the static press. **Exactly inert
-  until a second claw engages** at `R(1−cos 2π/n)` — note `2π/n`, the segment pitch; the
-  formula recorded here as `π/n` was wrong, though the 11.4 mm for 12 claws is right. Then
-  **11.7% softer at 12 mm, 48.4% at 18 mm, 57.9% at 25 mm** (an earlier "3% / 17%" does not
-  reproduce and predates the `_invert` sign fix). Design load is δ ≈ 1 mm, so the flat-plate
-  fit is unchanged.
-  **The driven rig still cannot use it — see the next bullet, which is the reason.** The five
-  step-climb signatures are **still the radial-only ones**, and `TODO.md` #20 is now blocked
-  behind #27.
-- **The ring's tangential element is a slide and must be a hinge at the claw root**
-  (2026-08-09, `TODO.md` **#27**, highest priority in the claw direction). A two-slide segment
-  translates its tip on a straight line, so its distance from the hub centre is `√(R² + v²)`
-  and **grows** with splay; a hinged claw's tip swings on an arc and it **shrinks**. Error on
-  the R 60 claw: +2.1% of R at 10 mm of splay, +8.4% at 20 mm, **+30.1% at 36 mm** — and
-  outward is the destabilising sign, since a segment pressing harder into the ground splays
-  further. A property of the element, so no timestep or joint range touches it. The measured
-  `TIP_TANGENTIAL` curve is already the moment-rotation curve of exactly that hinge.
-  **Flat-plate work survives**: 0.0% of R at δ = 12 mm, 1.5% at 18 mm, 6.4% at 25 mm. The
-  static MuJoCo-vs-analytic agreement at 1e-9 is untouched and was never evidence about this —
-  both models share the same kinematics, which is *why* they agreed.
-- **A claw stiffens 3.6× by one claw length, so a single `k_t` is only its first 10 mm**
-  (2026-08-09). Pushed to 40 mm the R 60 claw's tangential secant rises 3.6× and its tangent
-  **13×**, because it rotates toward the load and carries it axially rather than in bending; it
-  passes the platform's 21.3 N at ~36 mm, not the 93.5 mm a linear law predicts. So
-  `run_step.py --tangential` **measures** the law by a `TIP_TANGENTIAL` sweep on the design's
-  own claw sector and tabulates it (`rom.fit.law_from_claw_curve`), rather than taking a
-  stiffness. Small-deflection stiffnesses on that claw: `k_r` **17.20 N/mm** against `EA/L`
-  = 17.03, `k_t` **0.2277 N/mm** against `12EI/L³` = 0.2453, ratio **75.5×** — and
-  `k_r/k_t = (L/t)²` exactly for a rectangle (69.4 predicted, the gap being the taper), which
-  is a real tension in the claw family but a *small-deflection* statement, so it does not
-  settle the design. The nominal claw's 134× does not transfer to other tapers.
+- **The ring's second freedom is a hinge at the claw root, and the FEA settled it**
+  (2026-08-09, `rom-0.5.0`, `TODO.md` #27 closed). `solve_equilibrium_hinge` +
+  `ring_bodies(tangential="hinge")`; `RingSpec.root_radius_m` is new and comes from
+  `hub_radius_mm`. A tangential *slide* moves a claw's tip **outward** as it splays; a root
+  hinge moves it **inward**, and the `TIP_TANGENTIAL` sweep measures that for free because it
+  leaves the tread's radial DOF loose. Measured on the R 60 claw: at 36 mm of tip travel the
+  FEA tip comes in **+19.673 mm**, the hinge predicts **+22.564** and the slide predicts
+  **−13.9**. That is the check from outside the model the watch list demands, and it is the
+  reason to prefer the hinge — not the rig, which runs on either now. Per segment against
+  MuJoCo, both KKT conditions hold to **1e-10** (moment residual over contact force = 6.1e-11 m
+  on a 40 mm claw). One correction inside it: the MJCF pivot sits one **capsule radius**
+  inboard of the true root, because contact is under the capsule's centre and pivoting at the
+  root would shorten the moment arm by 9.8% at 24 segments — in the flattering direction. The
+  solve is one bisection on the contact angle `ψ = θ + φ`, not a nested one on the force:
+  0.96 s against >100 s, and the rigid limit is exact to 4e-8 instead of 4e-5.
+  **Force barely moves, geometry does**: against the slide at the same tip stiffness the
+  vertical reaction differs 0.013% / 0.66% / 1.43% at δ = 12/18/25 mm, so every flat-plate fit
+  taken with the slide stands. `solve_equilibrium_2dof` and `tangential="slide"` are kept, as
+  the thing the hinge is compared against.
+- **The rig was never folding because of the element — it was the damper** (2026-08-09). The
+  loss-factor damping was applied through `qfrc_applied`, which `implicitfast` integrates
+  **explicitly**, and it had been scaled by the segment mass. That is not the inertia the joint
+  presents: every hinge axis is parallel to the axle and the axle is free, so one claw's torque
+  is reacted by the other eleven and the carriage. Measured, unit force in and `qacc` out:
+  hinge `dof_M0` 3.26e-6 kg·m² against an **effective 3.03e-7**, slide 2.0e-3 kg against
+  **3.61e-4**, and the collective twelve-claw mode lower again — about **120×** below the mass
+  used, giving `c·h/I ≈ 9` and −8.18 growth per step from round-off, in free flight, with
+  `ncon == 0`. Eliminated first, by measurement: the softening radial law, friction, solver
+  iterations, noslip, segment mass (2→20 g barely moves it) and contact itself. **Fix: emit the
+  same damping as the joints' native `damping` attribute**, which `implicitfast` integrates
+  implicitly. Not the "dissipation no material supplied" rejected earlier — that was damping
+  *added* on top; this is the same number integrated differently. The springs stay explicit and
+  `stable_timestep_s` still bounds them at `ω·h ≤ 0.2`; it now lives in `rom/mjcf.py` and the
+  **static press asks it too**, having had the same latent bug.
+- **The claw wheel clears 60 mm against the rigid wheel's 20** (2026-08-09, re-measured after
+  #12) — R 60, 12 claws, taper 0.6, bandless, `run_step.py --tangential hinge --sweep`,
+  **5/5 signatures**, matched mass, radius and rotational inertia. The project's first
+  end-to-end claw climb number. **It is not the spike's 50-vs-20**, which was a banded `T3`
+  and does not transfer.
+  **Quote it as a bucket.** The sweep steps in 10 mm, and a **1%** change in the fitted law
+  moves the answer a whole bucket — measured: #12's contact floor moves the law 0.3% in peak
+  force and 1.2% in `k(0)`, and the sweep answers 60 mm with it and 50 mm without. A
+  one-bucket gap between two designs is not a ranking. An earlier record said 30-vs-20; that
+  is not reproducible from today's code at either penalty and the 2026-08-09 log entry
+  supersedes it.
+  Three further caveats: 14% of loaded samples run past the fitted range (peak 8.60 mm against
+  a 6 mm fit), the step-edge patch is the signature most exposed to the element (hinge against
+  slide), and the hinge law is a rigid-bar idealisation good to 2% mid-range and 13% at a full
+  claw length. The climb profile is monotone — clears 10-60 mm, fails 70-90 — so 60 is a climb
+  and not a bounce.
 - **A stiff segment law needs a smaller timestep than the rig's default** (2026-08-09,
-  `sim.step_climb.stable_timestep_s`). `qfrc_applied` is an *external* force, so `implicitfast`
-  integrates it explicitly: measured, `ω·h ≥ 0.314` diverges inside 5 ms and `≤ 0.251` runs
-  clean, so the bound is `ω·h ≤ 0.2` and the step is tightened automatically. **The radial-only
-  rig had been running at 0.63 by luck** — an out-of-contact radial segment sits at exactly
-  `u = 0` with exactly zero force, so nothing excites it; a tangential axis sweeps through
-  gravity every revolution. Native joint damping and heavier segments also fix it and were
-  rejected: the first is dissipation no material supplied (cost of transport is a signature),
-  the second moves the rigid comparator too.
+  `rom.mjcf.stable_timestep_s`, re-exported from `sim.step_climb`). `qfrc_applied` is an
+  *external* force, so `implicitfast` integrates it explicitly: measured, `ω·h ≥ 0.314`
+  diverges inside 5 ms and `≤ 0.251` runs clean, so the bound is `ω·h ≤ 0.2` and the step is
+  tightened automatically. **The radial-only rig had been running at 0.63 by luck** — an
+  out-of-contact radial segment sits at exactly `u = 0` with exactly zero force, so nothing
+  excites it. Heavier segments were rejected (they move the rigid comparator too) and, on the
+  claw design, do not work anyway: 2→20 g barely delays the divergence. **This bound covers
+  the springs only** — the damping is a separate problem with a separate answer, two bullets
+  up.
 - **Two FEA tiers.** 3-D (`MeshSpec.dimension=3`, C3D10) is the reference and is
   **unaffordable at full size**: the nominal design is 50 779 elements / 279 k DOF at ~23 min
   per increment, ≈20 h per sweep, and coarsening does not help because the 3 mm band, 7 mm
@@ -144,10 +162,20 @@ Full statement and sub-questions: `docs/plan/02-research-questions.md`
   against 279 k on the nominal. Measured against 3-D at matched frictionless settings —
   force ratio 0.90, `k_r` ratio 0.86, patch length 0.95 (`verify_fea.py` section 6, which
   asserts ±25% rather than assuming 1). It cannot see lateral spoke buckling at all, so it
-  screens and the 3-D tier decides. **Frictional 2-D needs `--contact-stiffness 5`** — the
-  penalty is `factor × E / element_size`, so the fine section mesh over-stiffens contact and
-  diverges at the default 20; the answer only moves 1.3% across a tenfold change. Do not use
+  screens and the 3-D tier decides. Do not use
   first-order elements as a speed knob: C3D4 locks and reports a plausible, too-high `k_r`.
+- **The contact penalty: default 5, and a floor under the element size** (2026-08-09,
+  `TODO.md` #12 closed). It is `factor × E / max(element_size, contact_length_floor_m)`, and
+  **both halves are now needed**. The factor moved 20 → 5 because the 3-D tier says it costs
+  **0.7–0.8%** of the answer (4.29 → 4.26 N frictionless, 4.35 → 4.31 at μ=0.6) and buys the
+  conditioning outright — the frictional run goes from 60 increments with 3 cutbacks to 50 with
+  none. **2 was rejected**: −2.6 to −2.9% *and* the patch jumps 34.2 → 39.0 mm, which is
+  penetration reported as conformity. The floor is the part that was not expected to matter:
+  holding the factor at 5 and refining, 4 mm converges and **2.5 and 1.5 mm do not — at either
+  factor** — so lowering the factor never bought fine-mesh robustness. Holding the *penalty* at
+  the 4 mm value converges at all three, and the two finest agree to **0.02%**. Calibrated on
+  one design; re-check on a 150 mm wheel. Both fields are in the cache key. `--plane-strain` no
+  longer needs `--contact-stiffness 5`; there is one penalty for both tiers.
 - **Direction, 2026-08-08: every future design is bandless, and the family is `T7`, the
   compliant claw** — tapered free-tip fingers cantilevered off the hub, the tips themselves
   the running surface. Shape borrowed from the "Linear Claw" row of Table I in the PaTS-Wheel
@@ -162,9 +190,12 @@ Full statement and sub-questions: `docs/plan/02-research-questions.md`
   See `docs/plan/04-design-space.md` §Direction. **The band work of 2026-08-08 is now dormant
   by design** — bandless means both band stiffnesses are 0, `is_coupled` is False, and the
   ring takes the closed-form path, which is numerically what it did before coupling existed.
-  **Read this bullet with #27 above**: "the tips themselves the running surface" is the part
-  under question, because a tip-loaded slender claw cannot carry the tractive load. The
-  redirection is not withdrawn — it is unverified at the point that matters.
+  **The redirection now has a number** (2026-08-09): with the root hinge of #27 a claw wheel
+  clears 60 mm against a rigid wheel's 20 at matched mass, radius and inertia, 5/5 signatures.
+  The earlier worry that "the tips themselves the running surface" could not carry the tractive
+  load was based on a rig that was diverging for an unrelated reason. What is still unverified
+  is the *contact*: the ROM loads a claw at its tip, a real claw beds onto its side as it
+  folds, and nothing here models that.
 - **Segments are claws** (2026-08-08, `rom-0.3.0`). `MeshSpec.claw_sector` meshes **one claw
   and the hub** instead of the wheel (`fea/section2d.mesh_claw_sector`); the load case is still
   an ordinary flat plate, so nothing in `deck.py` / `runner.py` / `extract.py` changed.
@@ -289,10 +320,10 @@ python scripts/run_fea.py --dry-run --tiny --case flat --case step_edge
 # FEA: solve, and write a vector PDF of the design and the extracted metrics.
 python scripts/run_fea.py --tiny --case flat --case step_edge --plot-pdf
 
-# FEA: the plane-strain screening tier. Seconds, not hours. Frictional contact on the
-# fine section mesh needs a softened penalty; the default 20 diverges.
+# FEA: the plane-strain screening tier. Seconds, not hours. The softened contact penalty it
+# used to need by hand is the default since #12, so there is no --contact-stiffness here.
 python scripts/run_fea.py --plane-strain --size-spoke 0.0025 --size-rim 0.003 \
-    --size-hub 0.002 --contact-stiffness 5 --case flat
+    --size-hub 0.002 --case flat
 
 # FEA verification battery. --full adds the wheel sweeps (tens of minutes uncached).
 python scripts/verify_fea.py --full
@@ -303,6 +334,11 @@ python scripts/run_rom.py --tiny --mujoco
 # Steps 5-6: drive the fitted ring at a step beside a rigid wheel and judge the five
 # signatures. --sweep adds the tallest step each clears (~20 extra runs, a few minutes).
 python scripts/run_step.py --tiny --sweep
+
+# The claw wheel, with the root hinge. Bandless designs only.
+python scripts/run_step.py --radius 60 --rim-thickness 0 --spokes 12 --thickness 6 \
+    --claw-taper 0.6 --spoke-phase -90 --plane-strain --segments 12 --law table \
+    --tangential hinge --sweep
 
 # The manual playground: one design (or several) through the whole chain, into one
 # self-contained HTML page. This is the thing to reach for when turning a knob by hand.

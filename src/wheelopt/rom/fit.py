@@ -62,6 +62,8 @@ __all__ = [
     "RingFit",
     "fit_spring_law",
     "fit_tabulated_law",
+    "hinge_kinematics_check",
+    "hinge_law_from_tip_curve",
     "law_from_claw_curve",
     "nnls",
     "ring_from_claw_curve",
@@ -155,7 +157,7 @@ def _levenberg_marquardt(
     x0: np.ndarray,
     max_iterations: int,
     tol: float,
-    project: Callable[[np.ndarray], np.ndarray] | None = None,
+    non_negative: bool = False,
 ) -> tuple[np.ndarray, int, bool]:
     """Damped Gauss-Newton on ``x``. Returns ``(x, iterations, converged)``.
 
@@ -164,11 +166,25 @@ def _levenberg_marquardt(
     (:func:`fit_tabulated_law`). One optimiser, one set of damping rules, one place where the
     convergence criterion lives.
 
-    ``project`` clamps a trial point onto the feasible set — used for the table, whose slopes
-    must stay non-negative. It is applied to the *trial* before the cost is measured, so an
-    infeasible Gauss-Newton step is evaluated at the point actually taken and accepted only if
-    that point is genuinely better. Nothing enforces feasibility of ``x0``; the callers seed
-    from a feasible point.
+    ``non_negative`` constrains ``x >= 0`` — the table's parameters, which are knot forces or
+    slopes and cannot be negative. It does **two** things, and the second is what closed
+    ``TODO.md`` #22. Trial points are clamped, so an infeasible step is evaluated where it
+    actually lands. *And* the step itself is solved on the **free block only**: a parameter
+    sitting at zero whose gradient pushes it further negative is dropped from the normal
+    equations for that iteration.
+
+    Clamping alone is not enough, and the failure it produces looks like slow convergence
+    rather than a bug. A pinned parameter's Jacobian column is not zero — perturbing it
+    *upward* does move the residual — so leaving it in mixes a direction the projection will
+    immediately undo into the step computed for every other parameter. Measured on the nominal
+    at 24 segments with 8 intervals, where three of the eight parameters pin at zero: clamping
+    alone ran 400 iterations and 4004 residual evaluations without ever satisfying the
+    convergence test, while the free-block step converged in **4 iterations and 37
+    evaluations**. Both reach the same answer, 14.54% against 14.55% — so what was broken was
+    the cost and the ``converged`` flag, not the fit. Raising the damping faster or slower, and
+    coarsening the finite difference, changed nothing; those two suspects are refuted.
+
+    Nothing enforces feasibility of ``x0``; the callers seed from a feasible point.
 
     The caller is responsible for scaling: this compares ``|Δx|`` against ``|x|``
     componentwise, which is meaningless if the components carry different units and differ by
@@ -194,7 +210,9 @@ def _levenberg_marquardt(
     that is the term that would otherwise make a plain Gauss-Newton overshoot at a kink.
 
     """
-    keep = project if project is not None else (lambda x: x)
+    def keep(v: np.ndarray) -> np.ndarray:
+        return np.maximum(v, 0.0) if non_negative else v
+
     x = keep(np.asarray(x0, dtype=np.float64).copy())
     residual = residual_at(x)
     cost = float(residual @ residual)
@@ -210,10 +228,19 @@ def _levenberg_marquardt(
             jacobian[:, column] = (residual_at(probe) - residual) / step
         normal = jacobian.T @ jacobian
         gradient = jacobian.T @ residual
+        # The projected-gradient active set: at zero, with the gradient pushing further
+        # negative, this parameter is not going anywhere this iteration and must not
+        # contaminate the step for the others. `gradient` is J.T r, so descent is -gradient
+        # and a *positive* entry is the one pushing a pinned parameter down.
+        free = ~((x <= 0.0) & (gradient > 0.0)) if non_negative else np.ones(n, dtype=bool)
 
         for _ in range(_MAX_DAMPING_STEPS):
             damped = normal + damping * np.diag(np.maximum(np.diag(normal), 1e-12))
-            delta = np.linalg.lstsq(damped, -gradient, rcond=None)[0]
+            delta = np.zeros(n, dtype=np.float64)
+            if np.any(free):
+                delta[free] = np.linalg.lstsq(
+                    damped[np.ix_(free, free)], -gradient[free], rcond=None
+                )[0]
             trial = keep(x + delta)
             trial_residual = residual_at(trial)
             trial_cost = float(trial_residual @ trial_residual)
@@ -495,7 +522,7 @@ def fit_tabulated_law(
             return ring_force_n(spec, law_at(probe), d) - f
 
         x, iterations, converged = _levenberg_marquardt(
-            residual_at, x, max_iterations, tol, project=lambda p: np.maximum(p, 0.0),
+            residual_at, x, max_iterations, tol, non_negative=True,
         )
         if not all(solve_equilibrium(spec, law_at(x), float(delta)).converged for delta in d):
             converged = False
@@ -546,7 +573,8 @@ def ring_from_claw_curve(
             f"through it and one claw's curve is not a segment law. rim_thickness_mm is "
             f"{params.rim_thickness_mm:g}"
         )
-    spec = RingSpec(radius_m=params.outer_radius_mm * 1e-3, n_segments=params.n_spokes)
+    spec = RingSpec(radius_m=params.outer_radius_mm * 1e-3, n_segments=params.n_spokes,
+                    root_radius_m=params.hub_radius_mm * 1e-3)
     return spec, law_from_claw_curve(delta_m, force_n)
 
 
@@ -586,6 +614,118 @@ def law_from_claw_curve(delta_m: np.ndarray, force_n: np.ndarray) -> TabulatedLa
     knots = np.concatenate([[0.0], d])
     forces = np.concatenate([[0.0], f])
     return TabulatedLaw.from_forces(knots, forces)
+
+
+def hinge_law_from_tip_curve(
+    delta_m: np.ndarray, force_n: np.ndarray, claw_length_m: float
+) -> TabulatedLaw:
+    """A measured ``TIP_TANGENTIAL`` curve, as the **moment-rotation law of a root hinge**.
+
+    The other half of ``TODO.md`` #27. :func:`law_from_claw_curve` turns the same measurement
+    into a tangential *slide* law, and that element is wrong past small deflection because it
+    lengthens the claw; this turns it into the rotation the claw actually does. No new FEA and
+    no fit — the two laws are the same eleven numbers in different coordinates.
+
+    The change of variables. Idealise the claw as a rigid bar of length ``L`` on a rotational
+    spring at its root. Its tip is then at ``L(cos φ, sin φ)`` from the root, and the sweep
+    pushes that tip a measured ``s`` along the tangential direction with a measured force
+    ``F``. So
+
+        φ = arcsin(s / L),        M(φ) = F · L cos φ
+
+    — the arcsine because the tip travels on an arc rather than a straight line, and the
+    ``cos φ`` because the moment arm of a *fixed-direction* force shortens as the bar turns
+    into it. Both corrections are second order and both matter here: at one claw length of
+    travel on the R 60 mm claw, ``s/L = 0.9``, ``φ = 64°`` and ``cos φ = 0.44``.
+
+    What this is **not**. The FEA tip is a rigid body whose rotation is fixed
+    (``*RIGID BODY`` with a held ``ROT NODE``), so the real claw bends in double curvature and
+    its tip stays parallel to itself; the hinge turns its tip through the full ``φ``. The
+    equivalence claimed here is therefore of the *tip trajectory under load*, not of the
+    deformed shape, and it is the trajectory the ring needs. The bar's radial shortening
+    ``L(1 - cos φ)`` is a falsifiable consequence of the idealisation and the sweep measures it
+    independently — DOF 2 is left free — so compare them with
+    :func:`hinge_kinematics_check` before believing the law.
+
+    Args:
+        delta_m: tangential tip deflection, metres, strictly ascending and positive.
+        force_n: the tangential reaction at each deflection, newtons.
+        claw_length_m: root-to-tip length, ``RingSpec.claw_length_m``.
+
+    Raises:
+        FitFailure: on a non-positive claw length, a badly shaped curve, or a deflection
+            beyond the claw's own length — where ``arcsin`` has no answer and the rigid-bar
+            idealisation has already failed, so clamping it would invent a rotation.
+    """
+    if claw_length_m <= 0.0:
+        raise FitFailure(f"claw_length_m must be positive; got {claw_length_m}")
+    d = np.asarray(delta_m, dtype=np.float64).ravel()
+    f = np.asarray(force_n, dtype=np.float64).ravel()
+    if d.shape != f.shape:
+        raise FitFailure(f"delta and force have different shapes: {d.shape} vs {f.shape}")
+    keep = d > 0.0
+    d, f = d[keep], f[keep]
+    if len(d) < 1:
+        raise FitFailure("no positive deflection in the tip curve")
+    if np.any(np.diff(d) <= 0.0):
+        raise FitFailure("tip deflections must be strictly ascending; sort the curve first")
+    if np.any(f < 0.0):
+        raise FitFailure("the tip curve pulls; check the sign convention, not the claw")
+    if d[-1] >= claw_length_m:
+        raise FitFailure(
+            f"the sweep reaches {d[-1] * 1e3:.1f} mm on a claw {claw_length_m * 1e3:.1f} mm "
+            "long, so the tip has travelled further tangentially than the claw can swing. "
+            "A rigid bar cannot do that and arcsin has no answer; shorten the sweep"
+        )
+    phi = np.arcsin(d / claw_length_m)
+    moment = f * claw_length_m * np.cos(phi)
+    # Through the origin for the same reason as the radial law: an unrotated claw carries no
+    # moment. Units here are radians and N·m, not metres and newtons — TabulatedLaw is
+    # indifferent, and `solve_equilibrium_hinge` is the only intended consumer.
+    return TabulatedLaw.from_forces(
+        np.concatenate([[0.0], phi]), np.concatenate([[0.0], moment])
+    )
+
+
+def hinge_kinematics_check(
+    delta_m: np.ndarray, cross_delta_m: np.ndarray, claw_length_m: float
+) -> tuple[np.ndarray, np.ndarray]:
+    """Does the measured tip come *inward* as it splays, and by how much a hinge predicts?
+
+    The check from outside the model that ``TODO.md`` #27 turns on, and the CLAUDE.md rule it
+    answers: the ring's two candidate elements make **opposite** predictions about a quantity
+    the FEA measures for free, so the argument does not have to be settled by reasoning.
+
+    - a **root hinge** shortens the tip's reach by ``L(1 - cos φ)``, ``φ = arcsin(s/L)``;
+    - a **tangential slide** lengthens it by ``√(L² + s²) - L``.
+
+    Both are positive numbers here; they differ in sign as displacements. The sweep leaves the
+    radial DOF free and reports where the tip went, so whichever of the two matches is the
+    element the ring should have.
+
+    Args:
+        delta_m: tangential tip deflection, metres.
+        cross_delta_m: the reference node's displacement along the *undriven* axis, metres,
+            signed positive **inward** (toward the hub).
+        claw_length_m: root-to-tip length.
+
+    Returns:
+        ``(measured_inward_m, hinge_predicted_inward_m)``, aligned with ``delta_m``. The slide
+        prediction is the negative of ``√(L² + s²) - L`` and is not returned, because it has
+        the wrong sign by construction and a caller comparing three curves invites a
+        transcription error; compute it if you want to plot it.
+    """
+    if claw_length_m <= 0.0:
+        raise FitFailure(f"claw_length_m must be positive; got {claw_length_m}")
+    d = np.asarray(delta_m, dtype=np.float64).ravel()
+    measured = np.asarray(cross_delta_m, dtype=np.float64).ravel()
+    if d.shape != measured.shape:
+        raise FitFailure(
+            f"delta and cross-displacement have different shapes: {d.shape} vs "
+            f"{measured.shape}"
+        )
+    phi = np.arcsin(np.clip(d / claw_length_m, -1.0, 1.0))
+    return measured, claw_length_m * (1.0 - np.cos(phi))
 
 
 def _clean(delta_m: np.ndarray, force_n: np.ndarray, n_parameters: int,

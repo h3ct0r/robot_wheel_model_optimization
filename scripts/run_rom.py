@@ -84,19 +84,20 @@ def main(argv: list[str] | None = None) -> int:
     material = material_from_args(args)
     segments = args.segments or [12, 24, 36, 48]
 
-    if args.plane_strain:
-        mesh = MeshSpec(dimension=2, size_spoke_m=0.0025, size_rim_m=0.003, size_hub_m=0.002)
-        factor = 5.0
-    else:
-        mesh = MeshSpec(size_spoke_m=0.008, size_rim_m=0.010, size_hub_m=0.010)
-        factor = SolverSpec().contact_stiffness_factor
+    # One contact penalty for both tiers since #12 (2026-08-09): the plane-strain tier used
+    # to need a hand-softened factor of 5 where the 3-D tier ran at the default 20, and 5 is
+    # now the default because it costs 0.7-0.8% of the answer on the 3-D tier and buys the
+    # conditioning outright. Only the mesh differs.
+    mesh = (MeshSpec(dimension=2, size_spoke_m=0.0025, size_rim_m=0.003, size_hub_m=0.002)
+            if args.plane_strain
+            else MeshSpec(size_spoke_m=0.008, size_rim_m=0.010, size_hub_m=0.010))
 
     from wheelopt.fea.runner import run_load_case
 
     kind = LoadCaseKind.RADIAL_FLAT if args.case == "flat" else LoadCaseKind.RADIAL_STEP_EDGE
     case = LoadCase(kind=kind, delta_max_m=args.delta_max,
                     n_points_per_branch=args.n_points, friction_mu=args.friction)
-    solver = SolverSpec(n_threads=args.threads, contact_stiffness_factor=factor)
+    solver = SolverSpec(n_threads=args.threads)
 
     print(f"FEA: {'plane strain' if args.plane_strain else '3-D solid'}, {args.case}, "
           f"mu={args.friction}")

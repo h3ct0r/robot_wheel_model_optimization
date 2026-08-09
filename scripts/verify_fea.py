@@ -357,13 +357,21 @@ def section_calibration(params, spec3d, solver, args) -> None:
     record("both tiers stiffen", bool(k2[-1] > k2[1] and k3[-1] > k3[1]))
 
     # Friction, which the tier could not do until the contact penalty was softened. Kept as
-    # a check rather than a note because the failure was conditioning, not physics: at the
-    # default factor of 20 this diverges, and the fine section mesh is why.
-    soft = replace(solver, contact_stiffness_factor=5.0)
+    # a check rather than a note because the failure was conditioning, not physics. The
+    # softening is now the default (#12, 2026-08-09) and this asserts it stayed that way:
+    # `stiff` is the old default of 20, and the pair says the tier converges where it used
+    # to diverge. Asserting only the default would pass on any future default whatever.
+    stiff = replace(solver, contact_stiffness_factor=20.0, contact_length_floor_m=0.0)
     frictional = run_load_case(params, TPU95A, replace(case, friction_mu=0.8),
-                               mesh_spec=spec2d, solver=soft, cache_root=args.cache)
-    if record("plane-strain converges with friction at a softened contact", frictional.ok,
-              f"{frictional.status.value}, mu=0.8, contact factor 5"):
+                               mesh_spec=spec2d, solver=solver, cache_root=args.cache)
+    harsh = run_load_case(params, TPU95A, replace(case, friction_mu=0.8),
+                          mesh_spec=spec2d, solver=stiff, cache_root=args.cache)
+    record("the old uncapped factor-20 penalty is what diverged", not harsh.ok,
+           f"{harsh.status.value} at factor 20, uncapped")
+    if record("plane-strain converges with friction at the default contact penalty",
+              frictional.ok,
+              f"{frictional.status.value}, mu=0.8, factor "
+              f"{solver.contact_stiffness_factor:g}"):
         k_mu = frictional.curve.tangent_stiffness_n_per_m()[-1]
         record("friction changes the answer by less than 10%",
                abs(k_mu - k2[-1]) <= 0.10 * k2[-1],

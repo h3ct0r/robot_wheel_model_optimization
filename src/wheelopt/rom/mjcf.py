@@ -26,25 +26,52 @@ contaminating a stiffness this project is trying to measure.
 from __future__ import annotations
 
 from dataclasses import dataclass, field
+from typing import Literal
 
 import numpy as np
 
 from .ring import (
     RadialLaw,
     RingSpec,
+    TipEquivalentLaw,
     curvature_operator,
     segment_angles,
     symmetric_force_n,
 )
 
 __all__ = [
+    "EXPLICIT_STABILITY_LIMIT",
+    "STATIC_TIMESTEP_S",
+    "TANGENTIAL_ELEMENTS",
     "MissingMuJoCo",
     "RingModel",
+    "TangentialElement",
     "build_mjcf",
     "coupling_tendons",
+    "hinge_arm_m",
+    "hinge_pivot_radius_m",
+    "resolve_tangential_element",
     "ring_bodies",
+    "segment_body_radius_m",
+    "stable_timestep_s",
     "static_load_deflection",
+    "tangential_damping",
 ]
+
+#: Which second freedom a segment gets, if any.
+#:
+#: ``"slide"`` is the tip translating along the in-plane perpendicular — the element of
+#: :func:`~wheelopt.rom.ring.solve_equilibrium_2dof`. It is **wrong past small deflection**: a
+#: sliding tip moves *outward* as it splays, by 30% of the wheel radius at one claw length,
+#: and that is a positive feedback against the ground. Kept because the static press and the
+#: flat-plate sweeps stay well inside where it is valid, and because retiring it silently
+#: would erase the comparison that settled ``TODO.md`` #27.
+#:
+#: ``"hinge"`` is the claw rotating about its root — :func:`~wheelopt.rom.ring.
+#: solve_equilibrium_hinge`. Keeps the claw's length fixed by construction, so use it for
+#: anything driven.
+TangentialElement = Literal["slide", "hinge"]
+TANGENTIAL_ELEMENTS: tuple[str, ...] = ("slide", "hinge")
 
 #: Segment body mass, kg. The comparison below is quasi-static — driven slowly, gravity off —
 #: so this affects only the solver's conditioning, not the answer. Kept small and uniform
@@ -53,6 +80,70 @@ __all__ = [
 #: that obviously is not.
 SEGMENT_MASS_KG = 0.002
 HUB_MASS_KG = 0.05
+
+#: Largest ``ω·h`` at which a segment force law applied through ``qfrc_applied`` integrates
+#: stably. **Measured**, not derived: on the bandless R 60 mm claw ring at k = 19.76 kN/m and
+#: 2 g segments (ω = 3143 rad/s), ω·h = 0.251 and below run clean for 0.6 s while 0.314 and
+#: above diverge inside 5 ms. 0.2 sits about 25% under the observed boundary.
+#:
+#: The bound exists because ``qfrc_applied`` is an **external** force: ``implicitfast``
+#: integrates a joint's own ``damping`` attribute implicitly but not this, so a stiff segment
+#: spring is integrated explicitly and has a stability limit the rest of the model does not.
+#: It is therefore a fact about *this file's* modelling choice — the compliance is a joint
+#: force law (invariant 8) — and not about any one scenario, which is why it lives here rather
+#: than beside the rolling rig that first hit it.
+EXPLICIT_STABILITY_LIMIT = 0.2
+
+#: Timestep for the static press, seconds, before the stability bound above is applied.
+STATIC_TIMESTEP_S = 0.0005
+
+
+def stable_timestep_s(laws, segment_mass_kg: float, requested_s: float) -> float:
+    """Largest timestep at or below ``requested_s`` that integrates these laws stably.
+
+    Why this is not optional, and why it is not a fudge. The radial-only rolling rig ran at
+    ω·h = 0.63 on the bandless claw design — well past the boundary above — and was stable,
+    but **by luck rather than by design**: an out-of-contact radial segment sits at exactly
+    ``u = 0`` where the law returns exactly zero, so nothing excites the mode. A second
+    freedom has no such luck. Its axis sweeps through gravity as the wheel turns, so every
+    segment is driven at its own natural frequency for the whole run, and the marginal mode
+    grows until the joint limits fire and the solver gives up.
+
+    The same luck held for the **static press**, and for the same reason, until the hinge
+    arrived: a segment pressed straight onto a plate has nothing to excite its neighbours'
+    radial modes either. With a second freedom the press diverged at δ = 18 mm on 24 and 48
+    segments, at the fixed 0.5 ms it had always used — measured 2026-08-09, and the reason
+    :func:`static_load_deflection` now asks this function too.
+
+    The remedy is the timestep, deliberately, in preference to the two alternatives that also
+    work. **Extra joint damping** (``c ≥ 5 N·s/m`` measured, over and above the loss factor's)
+    is dissipation that no material supplied — the loss factor is already the damping model,
+    and cost of transport is one of the five signatures, so damping *added* there would be
+    answering a physics question with a solver setting. **Heavier segments** (``≥ 20 g``
+    measured, against 2 g) would change the ring's mass, which the rigid comparator matches, so
+    it would move both wheels to fix one. A smaller timestep costs time and changes no answer.
+
+    **This bound covers the springs only.** The loss factor's damping is a different problem
+    with a different answer: it goes into the joints' own ``damping`` attribute, which
+    ``implicitfast`` integrates implicitly and unconditionally, because bounding it explicitly
+    would need the joints' *effective* inertia rather than the segment mass — a quantity two
+    orders of magnitude smaller here. See :func:`ring_bodies`.
+
+    Args:
+        laws: the laws driven through ``qfrc_applied``; ``None`` entries are skipped. A hinge
+            law must be passed as a :class:`~wheelopt.rom.ring.TipEquivalentLaw`, because the
+            bound is on ``sqrt(k/m)`` and a moment over a rotation is neither.
+        segment_mass_kg: the mass those laws accelerate.
+        requested_s: the timestep the caller wanted. Never increased.
+    """
+    omega = max(
+        (float(np.sqrt(max(law.stiffness_n_per_m(0.0), 0.0) / segment_mass_kg))
+         for law in laws if law is not None),
+        default=0.0,
+    )
+    if omega <= 0.0:
+        return requested_s
+    return min(requested_s, EXPLICIT_STABILITY_LIMIT / omega)
 
 
 class MissingMuJoCo(ImportError):
@@ -68,13 +159,18 @@ class RingModel:
     segment_joints: np.ndarray
     spec: RingSpec
     law: RadialLaw
-    #: Joint ids of the tangential slides, in segment order. Empty when the model was built
-    #: without a tangential law — empty rather than absent, so a caller that indexes it gets
-    #: no forces rather than an attribute error, and a radial-only ring stays radial-only.
+    #: Joint ids of the second freedom, in segment order — slides or hinges according to
+    #: :attr:`tangential_element`. Empty when the model was built without one: empty rather
+    #: than absent, so a caller that indexes it gets no forces rather than an attribute error,
+    #: and a radial-only ring stays radial-only.
     tangential_joints: np.ndarray = field(
         default_factory=lambda: np.empty(0, dtype=np.int64)
     )
+    #: The law resisting that freedom. **Newtons per metre for a slide, N·m per radian for a
+    #: hinge** — the unit follows :attr:`tangential_element`, and driving a hinge with a slide
+    #: law would apply a torque numerically equal to a force, which is not a small error.
     tangential_law: RadialLaw | None = None
+    tangential_element: TangentialElement | None = None
 
 
 def build_mjcf(
@@ -83,7 +179,10 @@ def build_mjcf(
     *,
     segment_half_width_m: float = 0.015,
     indentation_m: float = 0.0,
-    tangential: bool = False,
+    tangential: TangentialElement | None = None,
+    timestep_s: float = STATIC_TIMESTEP_S,
+    radial_damping: float = 0.0,
+    tangential_damping_c: float = 0.0,
 ) -> str:
     """Emit the MJCF for one ring.
 
@@ -105,7 +204,8 @@ def build_mjcf(
         '<mujoco model="wheel_ring">',
         '  <compiler angle="radian"/>',
         # No gravity: the sweep is displacement-controlled, exactly as the FEA was.
-        '  <option gravity="0 0 0" integrator="implicitfast" timestep="0.0005"/>',
+        ('  <option gravity="0 0 0" integrator="implicitfast" '
+         f'timestep="{timestep_s:.9g}"/>'),
         "  <default>",
         # solref/solimp here are a numerical regulariser for the *floor* contact only, and
         # are deliberately stiff. The wheel's compliance is the joint force law. See ADR-0001.
@@ -120,7 +220,8 @@ def build_mjcf(
     ]
 
     parts += ring_bodies(spec, segment_half_width_m=segment_half_width_m,
-                         tangential=tangential, indent=6)
+                         tangential=tangential, radial_damping=radial_damping,
+                         tangential_damping_c=tangential_damping_c, indent=6)
     parts += ["    </body>", "  </worldbody>"]
     parts += coupling_tendons(spec)
     parts += ["</mujoco>"]
@@ -134,7 +235,9 @@ def ring_bodies(
     segment_mass_kg: float = SEGMENT_MASS_KG,
     contype: int = 1,
     conaffinity: int = 0,
-    tangential: bool = False,
+    tangential: TangentialElement | None = None,
+    radial_damping: float = 0.0,
+    tangential_damping_c: float = 0.0,
     indent: int = 6,
 ) -> list[str]:
     """The ``N`` segment bodies, to be nested inside whatever carries the hub.
@@ -144,39 +247,75 @@ def ring_bodies(
     to the FEA and not a second one that has drifted. Everything positional is relative to
     the parent body's origin, which is the hub centre.
 
-    ``tangential`` adds a **second slide per segment**, along ``(cos θ, 0, sin θ)`` — the
-    in-plane perpendicular to the segment's own radius, which is the freedom
-    :func:`~wheelopt.rom.ring.solve_equilibrium_2dof` calls ``v``.
+    ``tangential`` selects the second freedom; see :data:`TangentialElement`. ``None`` — the
+    default — emits exactly the XML this function emitted before either freedom existed, so
+    nothing that predates them has silently become a two-freedom result. Whoever adds the
+    joint must also drive it: MuJoCo gets no force law from the XML, only from
+    ``qfrc_applied`` (invariant 8).
 
-    **A slide is the wrong element past small ``v``, and a driven wheel is not small ``v``.**
-    See :func:`~wheelopt.rom.ring.solve_equilibrium_2dof` for the measurement: a sliding tip
-    moves *outward* as it splays where a hinged one moves inward, by 30% of the wheel radius
-    at one claw length of deflection, and that is a positive feedback against the ground. Use
-    this for static presses and small-splay work; a rolling wheel under drive torque needs the
-    root hinge of ``TODO.md`` #27 instead. The axis is chosen so the
-    two models are the same model: moving a segment by ``v`` along it raises its tip by
-    ``v sin θ``, exactly the term in the analytic height equation. A claw's tangential
-    stiffness is 134× below its radial one (2026-08-08), so this is not a refinement for the
-    claw topology — it is the compliance a step edge actually loads.
+    ``"slide"`` adds a second slide along ``(cos θ, 0, sin θ)``, the in-plane perpendicular to
+    the segment's own radius — the freedom :func:`~wheelopt.rom.ring.solve_equilibrium_2dof`
+    calls ``v``. Moving a segment by ``v`` along it raises the tip by ``v sin θ``, exactly the
+    term in that function's height equation, so the two are the same model. **Small ``v``
+    only**; see :data:`TangentialElement`.
 
-    Off by default, and off means *absent* rather than locked: a ring built without it is the
-    same XML it was before the joint existed, so nothing that predates this has silently
-    become a two-freedom result. Whoever adds the joint must also drive it — MuJoCo gets no
-    force law from the XML, only from ``qfrc_applied`` (invariant 8).
+    ``"hinge"`` re-seats the whole body. Instead of sitting at the tread, the body's origin
+    moves to the claw's pivot near the hub (:func:`hinge_pivot_radius_m` — one capsule radius
+    inboard of ``root_radius_m``, for the reason argued there), gets a hinge about the
+    out-of-plane axis, and carries the capsule out to the tread on an offset. So the running
+    surface is where it always was and only the pivot is new. The radial slide stays, and stays
+    listed *after* the hinge, because MuJoCo composes a body's joints in order: the slide's
+    axis is carried round by the rotation, so it remains the claw's own axis rather than a
+    fixed direction in the hub frame. (Verified against ``mj_kinematics``: at ``φ = 90°`` a
+    positive slide moves the tip along ``+x``, the rotated radial, and the root-to-tip
+    distance is unchanged by the rotation.) That ordering is the entire realisation of
+    ``TODO.md`` #27 — get it backwards and the model is the slide again, wearing a hinge.
 
-    **Refused on a banded spec**, matching
-    :func:`~wheelopt.rom.ring.solve_equilibrium_2dof`. The refusal is not a limitation of the
-    solver here — MuJoCo would happily integrate it — it is that the model would be wrong.
-    :func:`coupling_tendons` couples the *radial* joints only, because the analytic band is an
-    energy in the compressions; give the segments a tangential freedom as well and they can
-    shear past each other with **nothing resisting**, which is the one deformation a shear
+    The hinge axis is ``(0, -1, 0)`` for every segment, not a per-segment vector: the wheel
+    lies in the x-z plane, so ``-ĵ × e_r = e_t`` identically, and a positive rotation carries
+    every tip toward its own ``+e_t``. The rotational inertia about that hinge is whatever the
+    offset capsule gives — derived from the mass and the geometry, never chosen (invariant 2).
+
+    **Refused on a banded spec**, matching the analytic solvers. The refusal is not a
+    limitation of MuJoCo — it would happily integrate it — it is that the model would be
+    wrong. :func:`coupling_tendons` couples the *radial* joints only, because the analytic
+    band is an energy in the compressions; give the segments a second freedom as well and they
+    can shear past each other with **nothing resisting**, which is the one deformation a shear
     band exists to carry. A silently softer ring is exactly the failure this project keeps
     finding, so it raises instead.
+
+    ``radial_damping`` and ``tangential_damping_c`` become the joints' own ``damping``
+    attributes, in that joint's units. **They must arrive here and not through
+    ``qfrc_applied``**, and the difference is not stylistic: ``implicitfast`` folds a joint's
+    native damping into the implicit velocity step and integrates an applied force explicitly.
+    A dashpot integrated explicitly is stable only while ``c·h < 2·I_eff``, and ``I_eff`` for
+    these joints is **not** the segment mass. Measured 2026-08-09 on the 12-claw R 60 mm ring:
+    the hinge's composite inertia is 3.26e-6 kg·m² but its effective inertia — one unit torque
+    in, ``qacc`` out, everything else free to react — is 3.03e-7, and the collective mode
+    across twelve claws whose axes are all parallel to the axle is a further order down. The
+    physically derived loss-factor damping then blew up at ``c·h/I ≈ 9``, from round-off, in
+    free flight, before the wheel had touched anything. Passing the *same* number as native
+    damping is not the "dissipation no material supplied" that
+    :func:`stable_timestep_s` rejects — it is the same dissipation, integrated stably.
+
+    Raises:
+        ValueError: on an unknown element name, on a banded spec, or — for ``"hinge"`` — on a
+            spec with no ``root_radius_m``.
     """
-    if tangential and spec.is_coupled:
+    if tangential is not None and tangential not in TANGENTIAL_ELEMENTS:
+        raise ValueError(
+            f"unknown tangential element {tangential!r}; expected one of "
+            f"{TANGENTIAL_ELEMENTS} or None"
+        )
+    if tangential is not None and spec.is_coupled:
         raise ValueError(
             "a tangential freedom needs a band that shears; coupling_tendons couples only "
-            "the radial joints, so a banded ring with tangential slides would shear for free"
+            "the radial joints, so a banded ring with a second freedom would shear for free"
+        )
+    if tangential == "hinge" and spec.root_radius_m <= 0.0:
+        raise ValueError(
+            "a root hinge needs a root: RingSpec.root_radius_m is 0, which would pivot every "
+            "claw about the axle. Build the spec with ring_for_design"
         )
     theta = segment_angles(spec)
     r = spec.radius_m
@@ -189,44 +328,125 @@ def ring_bodies(
     # No guard on body_radius: it is r(1 - pi/2n), positive for every n >= 2, and
     # RingSpec already refuses fewer than three segments. A check here would be a branch
     # that can never run, which reads as a safety net and is not one.
-    body_radius = r - seg_r * 0.5
+    body_radius = segment_body_radius_m(spec)
+    hinged = tangential == "hinge"
+    # Omitted entirely when zero, so a ring nobody has asked to damp emits the XML it always
+    # did and no earlier result silently acquires dissipation.
+    rad_damp = f' damping="{radial_damping:.9g}"' if radial_damping else ""
+    tan_damp = f' damping="{tangential_damping_c:.9g}"' if tangential_damping_c else ""
+    # Where the body sits, and how far the capsule is carried out from it. For the hinge the
+    # body is the pivot and the capsule is the tip; otherwise the body *is* the tip and the
+    # offset is exactly zero, so the geometry is unchanged from before the hinge existed.
+    origin_radius = hinge_pivot_radius_m(spec) if hinged else body_radius
+    arm = body_radius - origin_radius
 
     lines: list[str] = []
     for i, angle in enumerate(theta):
         # Outward radial unit vector for this segment; segment 0 points at the floor.
         ux, uz = float(np.sin(angle)), float(-np.cos(angle))
-        px, pz = body_radius * ux, body_radius * uz
-        lines += [
-            f'{pad}<body name="seg{i}" pos="{px:.9f} 0 {pz:.9f}">',
+        px, pz = origin_radius * ux, origin_radius * uz
+        lines.append(f'{pad}<body name="seg{i}" pos="{px:.9f} 0 {pz:.9f}">')
+        if hinged:
+            # Before the slide, so the slide's axis rotates with it. Limits at +-pi/2: past
+            # that the claw points back into the hub, which this model does not describe, and
+            # a run that reaches the stop has already collapsed.
+            lines.append(
+                f'{pad}  <joint name="t{i}" type="hinge" axis="0 -1 0" '
+                f'range="{-0.5 * np.pi:.9f} {0.5 * np.pi:.9f}" limited="true"{tan_damp}/>'
+            )
+        lines.append(
             # Positive q is outward. The old upper bound of 0.01 m was written when nothing
             # could push a segment outward at all; with the band there, segments beside the
             # patch bulge, and a joint limit that quietly caps that bulge would look like a
             # stiffness disagreement rather than the constraint it is. Both bounds are now
             # far outside anything physical, so hitting one means a bug, not a design.
-            (f'{pad}  <joint name="j{i}" type="slide" axis="{ux:.9f} 0 {uz:.9f}" '
-             f'range="{-0.9 * r:.9f} {0.5 * r:.9f}" limited="true"/>'),
-        ]
-        if tangential:
+            f'{pad}  <joint name="j{i}" type="slide" axis="{ux:.9f} 0 {uz:.9f}" '
+            f'range="{-0.9 * r:.9f} {0.5 * r:.9f}" limited="true"{rad_damp}/>'
+        )
+        if tangential == "slide":
             # Perpendicular to the radius, in the wheel's plane. Segment 0 points down, so
             # its tangential axis is +x, along the rolling direction — which is the direction
             # a claw bends when it catches a step, and the reason this joint exists.
             tx, tz = float(np.cos(angle)), float(np.sin(angle))
             lines.append(
                 f'{pad}  <joint name="t{i}" type="slide" axis="{tx:.9f} 0 {tz:.9f}" '
-                f'range="{-0.5 * r:.9f} {0.5 * r:.9f}" limited="true"/>'
+                f'range="{-0.5 * r:.9f} {0.5 * r:.9f}" limited="true"{tan_damp}/>'
             )
+        # The `+ 0.0` normalises a negative zero: `arm` is exactly 0 without the hinge, and
+        # `0.0 * -1.0` formats as "-0.000000000", which is legal MJCF and a diff for nothing.
+        gx, gz = arm * ux + 0.0, arm * uz + 0.0
         lines += [
             # The capsule spans the wheel's WIDTH, i.e. along y, the axle direction.
             # Laying it along x instead makes each segment a 30 mm bar in the rolling
             # direction: neighbours 15.7 mm apart then overlap permanently, and the model
             # reports tens of newtons of contact force before the floor is even touched.
             (f'{pad}  <geom name="g{i}" type="capsule" fromto="'
-             f'0 {-segment_half_width_m:.9f} 0 0 {segment_half_width_m:.9f} 0" '
+             f'{gx:.9f} {-segment_half_width_m:.9f} {gz:.9f} '
+             f'{gx:.9f} {segment_half_width_m:.9f} {gz:.9f}" '
              f'size="{seg_r * 0.5:.9f}" mass="{segment_mass_kg}" '
              f'contype="{contype}" conaffinity="{conaffinity}"/>'),
             f"{pad}</body>",
         ]
     return lines
+
+
+def segment_body_radius_m(spec: RingSpec) -> float:
+    """Radius at which a segment's capsule *centre* sits, metres.
+
+    ``R`` minus the capsule's own radius, so that the running *surface* is at ``R``. Shared by
+    the body layout and by anything that needs the hinge's moment arm, because computing it
+    twice is how the geometry and the dynamics come to disagree.
+    """
+    return spec.radius_m - 0.25 * spec.segment_arc_m
+
+
+def hinge_pivot_radius_m(spec: RingSpec) -> float:
+    """Radius at which the hinge joint is placed, metres — **not** ``root_radius_m``.
+
+    It sits one capsule radius inboard of the true root, and that offset is deliberate.
+
+    The moment the floor applies about the pivot is ``λ`` times the *horizontal* distance from
+    the pivot to the contact point. On a plane the contact point is directly below the
+    capsule's centre, so that distance is the pivot-to-**centre** arm, not the pivot-to-tip
+    one — the capsule's own radius contributes nothing horizontal. Pivot at the true root and
+    the arm comes out ``L - ρ``: 9.8% short at 24 segments on the R 60 mm claw, 4.9% at 48.
+    Offsetting the pivot by the same ``ρ`` makes it exactly ``L``.
+
+    That 10% is not a rounding. A short arm means less moment for the same contact force,
+    which means less rotation, which means a claw *stiffer* than the one the FEA sweep fitted
+    — and the question this element exists to answer is whether the wheel folds over. Erring
+    stiff is erring toward "it does not", which is the answer we would like to hear and
+    therefore the one to be careful about.
+
+    What it costs: the pivot is ``ρ`` nearer the axle than the real claw root, so the tip's
+    distance from the hub centre shrinks along a slightly different curve. That is second
+    order in ``ρ/R_root`` and does not touch the sign, where the arm error is first order in
+    the quantity the model turns on.
+
+    Raises:
+        ValueError: if the capsule is larger than the hub radius, which would put the pivot at
+            or through the axle. That means far too few segments for the wheel, not a bug.
+    """
+    capsule = 0.25 * spec.segment_arc_m
+    pivot = spec.root_radius_m - capsule
+    if pivot <= 0.0:
+        raise ValueError(
+            f"the capsule radius {capsule * 1e3:.2f} mm is not smaller than the claw root "
+            f"radius {spec.root_radius_m * 1e3:.2f} mm, so the hinge would sit at or beyond "
+            f"the axle. {spec.n_segments} segments is too few for this wheel"
+        )
+    return pivot
+
+
+def hinge_arm_m(spec: RingSpec) -> float:
+    """Pivot-to-capsule-centre distance for the hinge element, metres.
+
+    Exactly :attr:`RingSpec.claw_length_m` by construction — see
+    :func:`hinge_pivot_radius_m`, which is where that construction is argued. Kept as its own
+    function because it is the moment arm, and a reader following the dynamics should not have
+    to rediscover that the two are the same number.
+    """
+    return segment_body_radius_m(spec) - hinge_pivot_radius_m(spec)
 
 
 def coupling_tendons(spec: RingSpec, *, indent: int = 2) -> list[str]:
@@ -281,6 +501,7 @@ def _load(
     law: RadialLaw,
     *,
     tangential_law: RadialLaw | None = None,
+    tangential_element: TangentialElement | None = None,
     **kwargs,
 ) -> tuple[RingModel, object, object]:
     try:
@@ -288,7 +509,8 @@ def _load(
     except ImportError as exc:  # pragma: no cover - environment dependent
         raise MissingMuJoCo("MuJoCo is not installed; pip install -e '.[sim]'") from exc
 
-    xml = build_mjcf(spec, law, tangential=tangential_law is not None, **kwargs)
+    element = resolve_tangential_element(tangential_law, tangential_element)
+    xml = build_mjcf(spec, law, tangential=element, **kwargs)
     model = mujoco.MjModel.from_xml_string(xml)
     data = mujoco.MjData(model)
 
@@ -304,11 +526,54 @@ def _load(
         segment_joints=ids("j"),
         spec=spec,
         law=law,
-        tangential_joints=(ids("t") if tangential_law is not None
+        tangential_joints=(ids("t") if element is not None
                            else np.empty(0, dtype=np.int64)),
         tangential_law=tangential_law,
+        tangential_element=element,
     )
     return ring, model, data
+
+
+def tangential_damping(
+    spec: RingSpec, element: TangentialElement | None, linear_n_s_per_m: float
+) -> float:
+    """The second freedom's damping, in whatever units its own coordinate needs.
+
+    A slide's coordinate is a length and takes ``linear_n_s_per_m`` unchanged. A hinge's is an
+    angle, and a dashpot of rate ``c`` acting at the tip is ``c·arm²`` about the root — the
+    same conversion as ``m·arm²`` for inertia. Passing the linear number straight to a hinge
+    is not a mild mistuning: on the R 60 mm claw ``arm² = 1.6e-3``, so 4 N·s/m becomes
+    4 N·m·s/rad, roughly **1800× critical** for that joint, and every static press would
+    return the undeformed ring while looking like a stiffness result.
+    """
+    if element != "hinge":
+        return linear_n_s_per_m
+    arm = hinge_arm_m(spec)
+    return linear_n_s_per_m * arm * arm
+
+
+def resolve_tangential_element(
+    tangential_law: RadialLaw | None, tangential_element: TangentialElement | None
+) -> TangentialElement | None:
+    """Which element a caller meant, given a law and an optional element name.
+
+    One rule in one place, because there are three callers and the failure mode is silent: a
+    hinge driven by a slide law applies a torque in N·m numerically equal to a force in N,
+    which on the R 60 mm claw is a factor of ``L`` = 0.04 out and reads as a soft wheel.
+
+    - no law: no freedom, whatever was named. A joint nothing drives is a free joint.
+    - a law and no name: **hinge**, the element ``TODO.md`` #27 concluded is the right one.
+      Defaulting to the slide would keep old call sites silently on the wrong element.
+    - a law and a name: the name.
+    """
+    if tangential_law is None:
+        return None
+    element = tangential_element or "hinge"
+    if element not in TANGENTIAL_ELEMENTS:
+        raise ValueError(
+            f"unknown tangential element {element!r}; expected one of {TANGENTIAL_ELEMENTS}"
+        )
+    return element
 
 
 def static_load_deflection(
@@ -317,7 +582,8 @@ def static_load_deflection(
     delta_m: np.ndarray,
     *,
     tangential_law: RadialLaw | None = None,
-    settle_steps: int = 3000,
+    tangential_element: TangentialElement | None = None,
+    settle_s: float = 1.5,
     damping: float = 4.0,
 ) -> np.ndarray:
     """Press the ring into the floor at each δ and read the floor reaction, newtons.
@@ -330,23 +596,39 @@ def static_load_deflection(
     off its rigid-body reference node.
 
     Args:
-        tangential_law: if given, each segment also gets the in-plane perpendicular freedom
-            and this law resists it, **symmetrically** — a claw bends the same either way, so
-            the force is ``sign(v)·f(|v|)`` and not ``f(v)``, which would make one direction
-            free and the other doubled.
-        settle_steps: steps per δ, with the segments damped. Quasi-static by construction —
-            the hub cannot move, so this is a relaxation, not a dynamic run.
-        damping: joint damping, N·s/m. Sets how fast it settles, not where it settles.
+        tangential_law: if given, each segment also gets a second freedom and this law
+            resists it, **symmetrically** — a claw bends the same either way, so the
+            generalised force is ``sign(q)·f(|q|)`` and not ``f(q)``, which would make one
+            direction free and the other doubled.
+        tangential_element: ``"slide"`` or ``"hinge"``; defaults to the hinge whenever a law
+            is given. See :func:`resolve_tangential_element`.
+        settle_s: **simulated seconds** per δ, with the segments damped, not a step count —
+            the timestep is chosen by :func:`stable_timestep_s` and varies with the laws, so a
+            fixed count would silently shorten the relaxation on a stiff design and return a
+            ring that had not finished moving.
+        damping: joint damping, N·s/m. Sets how fast it settles, not where it settles; the
+            hinge gets the equivalent torsional value from :func:`tangential_damping`. Emitted
+            as the joints' native ``damping`` rather than applied as a force, so it is
+            integrated implicitly — see :func:`ring_bodies`.
     """
     import mujoco
 
     deltas = np.atleast_1d(np.asarray(delta_m, dtype=np.float64))
     out = np.empty(len(deltas), dtype=np.float64)
     force6 = np.zeros(6, dtype=np.float64)
+    element = resolve_tangential_element(tangential_law, tangential_element)
+    equivalent = (TipEquivalentLaw(tangential_law, hinge_arm_m(spec))
+                  if element == "hinge" else tangential_law)
+    timestep = stable_timestep_s([law, equivalent], SEGMENT_MASS_KG, STATIC_TIMESTEP_S)
+    settle_steps = max(1, round(settle_s / timestep))
+    tan_damping = tangential_damping(spec, element, damping)
 
     for k, delta in enumerate(deltas):
         ring, model, data = _load(spec, law, tangential_law=tangential_law,
-                                  indentation_m=float(delta))
+                                  tangential_element=tangential_element,
+                                  indentation_m=float(delta), timestep_s=timestep,
+                                  radial_damping=damping,
+                                  tangential_damping_c=tan_damping)
         # Indexed by joint rather than by the whole dof block: with two joints per segment the
         # block is interleaved, and `model.jnt_dofadr[:]` on its own no longer says which
         # entry is radial. Getting that wrong would drive a tangential dof with a radial law
@@ -358,12 +640,10 @@ def static_load_deflection(
 
         for _ in range(settle_steps):
             u = -data.qpos[radial_qpos]
-            data.qfrc_applied[radial_dof] = (law.force_n(u)
-                                             - damping * data.qvel[radial_dof])
+            data.qfrc_applied[radial_dof] = law.force_n(u)
             if tangential_law is not None:
                 v = data.qpos[tan_qpos]
-                data.qfrc_applied[tan_dof] = (-symmetric_force_n(tangential_law, v)
-                                              - damping * data.qvel[tan_dof])
+                data.qfrc_applied[tan_dof] = -symmetric_force_n(tangential_law, v)
             mujoco.mj_step(model, data)
 
         total = 0.0

@@ -151,9 +151,14 @@ class TestKeyResponds(unittest.TestCase):
         is the contact compliance — changing it 20 -> 5 turned a diverged plane-strain run
         into a converged one — and because the key did not move, the second run was served
         the first one's result and looked like evidence that both converged.
+
+        The probe values must differ from the current defaults, which is not automatic: 5.0
+        was the probe here until 2026-08-09, when #12 made it the default and this test
+        quietly began comparing a spec against itself.
         """
         for field, value in (
-            ("contact_stiffness_factor", 5.0),
+            ("contact_stiffness_factor", 12.0),
+            ("contact_length_floor_m", 0.001),
             ("initial_increment", 0.01),
             ("min_increment", 1e-4),
             ("max_increment", 0.1),

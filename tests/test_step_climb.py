@@ -43,6 +43,9 @@ SPEC = ring_for_design(TINY_PARAMS, MaterialSpec(name="TPU_95A", infill_density=
 #: The law `run_rom.py --tiny` fits at 24 segments.
 LAW = SpringLaw(a=178.3, b=-5.039e4, c=1.248e7)
 RIG = RigSpec(payload_kg=0.120, step_height_m=0.036)
+#: The same wheel with the band taken out, for the bandless-only paths.
+SPEC_BANDLESS = replace(SPEC, band_bending_n_per_m=0.0, band_hoop_n_per_m=0.0,
+                        root_radius_m=0.020)
 HALF_WIDTH, SEGMENT_MASS = 0.015, 0.002
 
 
@@ -168,15 +171,81 @@ class TestScenarioMjcf(unittest.TestCase):
         """
         self.assertTrue(SPEC.is_coupled)
         with self.assertRaises(ValueError):
-            build_scenario_mjcf(SPEC, RIG, rigid=False, tangential=True)
+            build_scenario_mjcf(SPEC, RIG, rigid=False, tangential="slide")
 
     def test_a_bandless_ring_gets_one_extra_joint_per_segment(self):
         bandless = replace(SPEC, band_bending_n_per_m=0.0, band_hoop_n_per_m=0.0)
         plain = build_scenario_mjcf(bandless, RIG, rigid=False)
-        splayed = build_scenario_mjcf(bandless, RIG, rigid=False, tangential=True)
+        splayed = build_scenario_mjcf(bandless, RIG, rigid=False, tangential="slide")
         self.assertNotIn('name="t0"', plain)
         for i in range(bandless.n_segments):
             self.assertIn(f'name="t{i}"', splayed)
+
+    def test_damping_is_a_joint_attribute_and_not_an_applied_force(self):
+        """Where the loss factor's damping is *integrated*, which is not a style question.
+
+        ``implicitfast`` folds a joint's native ``damping`` into the implicit velocity step
+        and integrates ``qfrc_applied`` explicitly. Explicit is stable only while
+        ``c·h < 2·I_eff``, and ``I_eff`` for a segment joint is far below the segment mass —
+        see the next test. Applied explicitly, the physically derived damping blew the driven
+        claw wheel up on round-off, in free flight, before it touched anything (2026-08-09).
+
+        Zero must still emit nothing, so a ring nobody damped is the XML it always was.
+        """
+        bandless = replace(SPEC, band_bending_n_per_m=0.0, band_hoop_n_per_m=0.0,
+                           root_radius_m=0.020)
+        plain = build_scenario_mjcf(bandless, RIG, rigid=False)
+        self.assertNotIn("damping", plain)
+        damped = build_scenario_mjcf(bandless, RIG, rigid=False, tangential="hinge",
+                                     radial_damping=14.34, tangential_damping_c=3.12e-3)
+        self.assertIn('name="j0" type="slide"', damped)
+        for line in damped.splitlines():
+            if 'name="j0"' in line:
+                self.assertIn('damping="14.34"', line)
+            if 'name="t0"' in line:
+                self.assertIn('damping="0.00312"', line)
+
+    @unittest.skipUnless(HAVE_MUJOCO, "mujoco is not installed")
+    def test_a_segment_joint_weighs_far_less_than_a_segment(self):
+        """The measurement that forbids integrating the damping explicitly.
+
+        Every hinge axis is parallel to the axle and the axle is free, so a torque on one claw
+        is reacted by the other eleven and by the carriage: the inertia the joint actually
+        presents is the *reduced* one, not the segment's own. Measured by putting a unit
+        generalised force on the joint and reading ``qacc`` with everything else free.
+
+        On the 12-claw R 60 mm ring, 2 g segments, on this rig: the hinge's composite inertia
+        is 3.26e-6 kg·m² and its effective inertia is **3.03e-7**, 10.8x smaller; the
+        tangential slide's is 3.61e-4 kg against a 2 g segment, 5.5x smaller. The collective
+        mode across twelve claws is smaller again, which is how ``c·h/I`` reached 9 at a
+        timestep the spring bound called safe.
+
+        The effective value moves a little with the carriage mass, because the carriage is one
+        of the things that reacts — hence 1% tolerances on numbers otherwise pinned to three
+        figures, and a factor-of-five margin asserted separately so the *conclusion* does not
+        depend on the rig.
+        """
+        import mujoco
+
+        bandless = replace(SPEC, band_bending_n_per_m=0.0, band_hoop_n_per_m=0.0,
+                           root_radius_m=0.020, n_segments=12)
+        for element, composite, expected in (("hinge", 3.2585e-6, 3.0269e-7),
+                                             ("slide", 2.0e-3, 3.6064e-4)):
+            model = mujoco.MjModel.from_xml_string(
+                build_scenario_mjcf(bandless, RIG, rigid=False, tangential=element))
+            data = mujoco.MjData(model)
+            dof = int(model.jnt_dofadr[
+                mujoco.mj_name2id(model, mujoco.mjtObj.mjOBJ_JOINT, "t0")])
+            self.assertAlmostEqual(float(model.dof_M0[dof]), composite, delta=1e-3 * composite)
+            data.qfrc_applied[:] = 0.0
+            mujoco.mj_forward(model, data)
+            baseline = float(data.qacc[dof])
+            data.qfrc_applied[dof] = 1.0
+            mujoco.mj_forward(model, data)
+            effective = 1.0 / (float(data.qacc[dof]) - baseline)
+            with self.subTest(element=element):
+                self.assertAlmostEqual(effective, expected, delta=1e-2 * expected)
+                self.assertLess(effective, 0.2 * composite)
 
     def test_the_step_top_sits_at_the_requested_height(self):
         rig = replace(RIG, step_height_m=0.05)
@@ -306,3 +375,106 @@ class TestRuns(unittest.TestCase):
         result = run_step(SPEC, LAW, replace(self.SHORT, step_height_m=-1.0))
         self.assertFalse(result.ok)
         self.assertTrue(result.message)
+
+
+@unittest.skipUnless(HAVE_MUJOCO, "mujoco is not installed")
+class TestSofteningLaw(unittest.TestCase):
+    """TODO #23: a segment whose force *falls* with compression, driven on purpose.
+
+    `TabulatedLaw` has been able to represent one since #16 and nothing had ever run one —
+    `run_step.py --tiny --law table` fits a law that happens not to soften, so it passes 5/5
+    without testing this at all. Measured 2026-08-09: it runs, it does not grow energy, and it
+    needs no smaller timestep. The wheel drops onto the next stable branch instead of
+    diverging, because the payload is a dead weight on a free carriage rather than a
+    prescribed displacement.
+    """
+
+    #: Knot forces on the tiny design's own 0/2/4/6 mm grid. Every one is a legal spring:
+    #: `TabulatedLaw` refuses a *negative* accumulated force, not a falling one.
+    KNOTS = np.array([0.0, 0.002, 0.004, 0.006])
+    MONOTONE = np.array([0.0, 0.2635, 0.6624, 1.9735])
+    SOFT_MIDDLE = np.array([0.0, 0.2635, 0.0241, 1.3352])
+    COLLAPSE = np.array([0.0, 1.9735, 0.6000, 0.0500])
+
+    def law(self, forces):
+        from wheelopt.rom.ring import TabulatedLaw
+
+        return TabulatedLaw.from_forces(self.KNOTS, forces)
+
+    def test_a_softening_law_is_a_valid_spring_and_says_so(self):
+        soft = self.law(self.SOFT_MIDDLE)
+        self.assertTrue(soft.is_valid_spring)
+        self.assertFalse(soft.is_monotone_nonneg)
+        self.assertIn("softens", soft.summary())
+        self.assertTrue(self.law(self.MONOTONE).is_monotone_nonneg)
+
+    def test_a_softening_segment_need_not_give_a_softening_wheel(self):
+        """The part that is not obvious, and the reason the mild case is uneventful.
+
+        As δ grows more segments engage, so the wheel's curve is the sum of a growing number
+        of falling terms. On the bandless tiny ring that wins for the mild case — the segment
+        tangent reaches -0.12 N/mm and the **wheel's** stays positive at +0.111, so nothing
+        is unstable at all. It does not win for the sharp one: -0.687 per segment gives the
+        wheel -1.747. So "a softening law" is not one behaviour, and which it is depends on
+        the ring as much as on the law.
+        """
+        from wheelopt.rom.ring import ring_force_n
+
+        delta = np.linspace(0.0005, 0.008, 30)
+        for forces, expected in ((self.MONOTONE, 0.1317), (self.SOFT_MIDDLE, 0.1106),
+                                 (self.COLLAPSE, -1.7471)):
+            law = self.law(forces)
+            force = np.array([float(ring_force_n(SPEC_BANDLESS, law, d)) for d in delta])
+            worst = float(np.min(np.gradient(force, delta))) / 1e3
+            with self.subTest(forces=forces[-1]):
+                self.assertAlmostEqual(worst, expected, places=4)
+                if forces is not self.MONOTONE:
+                    self.assertLess(float(np.min(law.slopes_n_per_m)), 0.0)
+
+    def test_it_runs_without_growing_energy_or_needing_a_smaller_step(self):
+        """The concern #23 was filed on, and it does not materialise.
+
+        A softening branch is statically unstable, so the wheel snaps through — and then
+        *lands*, because the payload is a dead weight on a free carriage rather than a
+        prescribed displacement, and the flat extrapolation past the last knot always offers a
+        branch to land on. The sharpest case crushes the axle from 60 mm to 22.5 mm and
+        compresses a segment 38.7 mm against a 6 mm fit, which is a collapse and a result; the
+        history stays finite throughout. The timestep bound never binds, because it is set by
+        ``k(0)`` and the softening branch does not change that.
+        """
+        from wheelopt.rom.mjcf import SEGMENT_MASS_KG, stable_timestep_s
+        from wheelopt.rom.ring import solve_equilibrium
+
+        for forces in (self.MONOTONE, self.SOFT_MIDDLE, self.COLLAPSE):
+            law = self.law(forces)
+            static = float(solve_equilibrium(SPEC_BANDLESS, law, 0.003).force_n)
+            rig = replace(RIG, payload_kg=max(static / 9.81, 1e-3), step_height_m=0.036)
+            result = run_step(SPEC_BANDLESS, law, rig, fit_max_m=0.006)
+            with self.subTest(peak=forces[1]):
+                self.assertEqual(stable_timestep_s([law], SEGMENT_MASS_KG, rig.timestep_s),
+                                 rig.timestep_s)
+                self.assertTrue(result.ok, result.message)
+                self.assertTrue(bool(np.all(np.isfinite(result.history))))
+                # Above the floor and below the undeformed radius plus the step: bounded, not
+                # necessarily gentle.
+                z = result.history[:, 2]
+                self.assertGreater(float(np.min(z)), 0.0)
+                self.assertLess(float(np.max(z)), 2.0 * SPEC_BANDLESS.radius_m)
+
+        # And the collapse is reported rather than hidden: a run 6x past its fitted range
+        # must say so, whatever the five signatures make of it.
+        law = self.law(self.COLLAPSE)
+        static = float(solve_equilibrium(SPEC_BANDLESS, law, 0.003).force_n)
+        rig = replace(RIG, payload_kg=max(static / 9.81, 1e-3), step_height_m=0.036)
+        crushed = run_step(SPEC_BANDLESS, law, rig, fit_max_m=0.006)
+        self.assertGreater(crushed.peak_compression_m, 6.0 * 0.006)
+        self.assertGreater(crushed.fraction_beyond_fit, 0.5)
+
+    def test_the_minimum_tangent_is_not_a_usable_damping_stiffness(self):
+        """#23 proposed deriving the damping from the minimum tangent instead of ``k(0)``.
+        On a softening law that is negative, so ``c = η k / ω`` injects energy. Recorded as a
+        refuted suggestion rather than silently ignored."""
+        law = self.law(self.COLLAPSE)
+        self.assertLess(float(np.min(law.slopes_n_per_m)), 0.0)
+        self.assertGreater(float(law.stiffness_n_per_m(0.0)), 0.0)
+        self.assertGreater(segment_damping_n_s_per_m(law, SPEC_BANDLESS, 0.12, 0.15), 0.0)

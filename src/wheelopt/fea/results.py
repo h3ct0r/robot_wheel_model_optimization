@@ -104,6 +104,16 @@ class LoadCurve:
     force_n: np.ndarray
     #: True on the loading branch, False on unloading.
     loading: np.ndarray
+    #: Displacement of the reference node along the in-plane axis that is **not** driven,
+    #: metres, signed **positive inward** (toward the hub). ``None`` for every case that holds
+    #: that axis, which is all of them except ``TIP_TANGENTIAL``.
+    #:
+    #: It is here because it is the one thing in this pipeline that can falsify the ring's
+    #: choice of tangential element: a claw hinged at its root must pull its tip *in* as it
+    #: bends, by ``L(1 - cos φ)``, where a tip on a tangential slide pushes it *out*. The
+    #: sweep leaves the axis free and measures which happens. See
+    #: :func:`~wheelopt.rom.fit.hinge_kinematics_check` and ``docs/plan/TODO.md`` #27.
+    cross_delta_m: np.ndarray | None = None
 
     @property
     def peak_force_n(self) -> float:

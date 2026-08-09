@@ -23,6 +23,8 @@ from wheelopt.rom.fit import (
     contact_segments,
     fit_spring_law,
     fit_tabulated_law,
+    hinge_kinematics_check,
+    hinge_law_from_tip_curve,
     nnls,
     ring_from_claw_curve,
 )
@@ -31,19 +33,26 @@ from wheelopt.rom.ring import (
     RingSpec,
     SpringLaw,
     TabulatedLaw,
+    TipEquivalentLaw,
     bending_coupling_n_per_m,
     coupling_matrix,
     curvature_operator,
     hoop_coupling_n_per_m,
     penetrations,
+    polygon_drop_m,
     ramp_basis,
+    ride_height_ripple_m,
     ring_for_design,
     ring_force_2dof_n,
+    ring_force_hinge_n,
     ring_force_n,
     segment_angles,
     solve_equilibrium,
     solve_equilibrium_2dof,
+    solve_equilibrium_hinge,
     symmetric_force_n,
+    tip_radius_hinge_m,
+    tip_radius_slide_m,
     uniform_knots,
 )
 
@@ -589,6 +598,41 @@ class TestCoupledFit(unittest.TestCase):
         self.assertFalse(fit.ok)  # even if the error happens to look fine
         self.assertIn("DID NOT CONVERGE", fit.summary())
 
+    def test_the_projected_step_reaches_the_nnls_answer_and_stops(self):
+        """``TODO.md`` #22, as a unit test of the optimiser rather than of a wheel.
+
+        A non-negative *linear* least squares problem is convex, so `nnls` gives the exact
+        constrained optimum — a second, differently-shaped algorithm to check the projected
+        Gauss-Newton against, which is the only kind of check that catches a stall reaching a
+        plausible wrong place. The matrix is chosen so the unconstrained solution has negative
+        components and three of the eight parameters pin at zero; that is the configuration
+        the coupled tabulated fit hits, and the one that ran 400 iterations without
+        converging before the step was solved on the free block only.
+        """
+        from wheelopt.rom.fit import _levenberg_marquardt, nnls
+
+        rng = np.random.default_rng(20260809)
+        matrix = rng.normal(size=(24, 8))
+        truth = np.array([2.0, -1.0, 1.5, -0.8, 3.0, -2.0, 0.5, 1.0])
+        target = matrix @ truth + 0.01 * rng.normal(size=24)
+        exact = nnls(matrix, target)
+        self.assertEqual(int(np.count_nonzero(exact <= 1e-12)), 3, "no parameters pinned")
+
+        start = np.full(8, 0.5)
+        found, iterations, converged = _levenberg_marquardt(
+            lambda x: matrix @ x - target, start, 400, 1e-10, non_negative=True
+        )
+        self.assertTrue(converged, "the projected step still runs to the iteration cap")
+        self.assertLess(iterations, 40)
+        self.assertTrue(np.all(found >= 0.0))
+        # Same cost, to the finite-difference floor. Compared on the residual rather than on
+        # the parameters: pinned parameters are degenerate directions and two solvers may sit
+        # at different points of the same flat.
+        def cost(x: np.ndarray) -> float:
+            return float(np.sum((matrix @ x - target) ** 2))
+
+        self.assertLess(cost(found), cost(exact) * (1.0 + 1e-6))
+
     def test_the_patch_count_needs_the_law_once_the_ring_is_coupled(self):
         # Without a law the count falls back to the geometric interference, which is only a
         # lower bound on a coupled ring. Callers get the bound, not a wrong answer dressed up
@@ -714,7 +758,7 @@ class TestMjcf(unittest.TestCase):
         model = mujoco.MjModel.from_xml_string(plain)
         self.assertEqual(model.njnt, SPEC.n_segments)
 
-        both = mujoco.MjModel.from_xml_string(build_mjcf(SPEC, self.LAW, tangential=True))
+        both = mujoco.MjModel.from_xml_string(build_mjcf(SPEC, self.LAW, tangential="slide"))
         self.assertEqual(both.njnt, 2 * SPEC.n_segments)
 
     def test_the_tangential_axis_raises_the_tip_by_v_sin_theta(self):
@@ -727,7 +771,7 @@ class TestMjcf(unittest.TestCase):
         """
         from wheelopt.rom.mjcf import build_mjcf
 
-        model = mujoco.MjModel.from_xml_string(build_mjcf(SPEC, self.LAW, tangential=True))
+        model = mujoco.MjModel.from_xml_string(build_mjcf(SPEC, self.LAW, tangential="slide"))
         data = mujoco.MjData(model)
         mujoco.mj_forward(model, data)
         theta = segment_angles(SPEC)
@@ -760,7 +804,7 @@ class TestMjcf(unittest.TestCase):
         spec = RingSpec(radius_m=0.085, n_segments=12)
         radial, tangential = SpringLaw(a=24807.0), SpringLaw(a=185.1)
         model = mujoco.MjModel.from_xml_string(
-            build_mjcf(spec, radial, indentation_m=0.018, tangential=True)
+            build_mjcf(spec, radial, indentation_m=0.018, tangential="slide")
         )
         data = mujoco.MjData(model)
 
@@ -903,7 +947,7 @@ class TestMjcf(unittest.TestCase):
         from wheelopt.rom.mjcf import static_load_deflection
 
         d = np.array([0.003, 0.006])
-        simulated = static_load_deflection(SPEC, self.LAW, d, settle_steps=1500)
+        simulated = static_load_deflection(SPEC, self.LAW, d, settle_s=0.75)
         analytic = ring_force_n(SPEC, self.LAW, d)
         self.assertTrue(bool(np.all(simulated > 0)))
         np.testing.assert_allclose(simulated, analytic, rtol=0.25)
@@ -1316,6 +1360,592 @@ class TestTwoDegreeOfFreedomRing(unittest.TestCase):
         self.assertTrue(np.all(np.isfinite(state.compression_m)))
         self.assertTrue(np.all(np.isfinite(state.slip_m)))
         self.assertGreater(state.force_n, 0.0)
+
+
+@unittest.skipUnless(HAVE_MUJOCO, "mujoco is not installed")
+class TestMjcfHinge(unittest.TestCase):
+    """The MJCF realisation of ``solve_equilibrium_hinge``. ``TODO.md`` #27."""
+
+    SPEC = RingSpec(radius_m=0.060, n_segments=12, root_radius_m=0.020)
+    RADIAL = SpringLaw(a=24807.0)
+
+    def hinge_law(self):
+        from wheelopt.rom.mjcf import hinge_arm_m
+
+        arm = hinge_arm_m(self.SPEC)
+        return SpringLaw(a=185.1 * arm * arm), arm
+
+    def test_the_pivot_is_inboard_so_the_moment_arm_is_the_claw_length(self):
+        """The correction that took the moment residual from 7e-3 to 6e-11.
+
+        On a plane the contact point is directly under the capsule *centre*, so the horizontal
+        lever the floor gets is pivot-to-centre. Pivot at the true root and that is one capsule
+        radius short — 19.6% here at 12 segments, 9.8% at 24 — which makes the modelled claw
+        stiffer in rotation than the one that was fitted.
+        """
+        from wheelopt.rom.mjcf import (
+            hinge_arm_m,
+            hinge_pivot_radius_m,
+            segment_body_radius_m,
+        )
+
+        capsule = 0.25 * self.SPEC.segment_arc_m
+        self.assertAlmostEqual(hinge_pivot_radius_m(self.SPEC),
+                               self.SPEC.root_radius_m - capsule, places=12)
+        self.assertAlmostEqual(hinge_arm_m(self.SPEC), self.SPEC.claw_length_m, places=12)
+        # And the running surface is still exactly at R, which is what must not move.
+        self.assertAlmostEqual(segment_body_radius_m(self.SPEC) + capsule,
+                               self.SPEC.radius_m, places=12)
+
+    def test_too_few_segments_for_the_hub_is_refused(self):
+        """A capsule wider than the hub would put the pivot at or through the axle."""
+        from wheelopt.rom.mjcf import hinge_pivot_radius_m
+
+        coarse = RingSpec(radius_m=0.060, n_segments=4, root_radius_m=0.020)
+        self.assertGreater(0.25 * coarse.segment_arc_m, coarse.root_radius_m)
+        with self.assertRaisesRegex(ValueError, "too few"):
+            hinge_pivot_radius_m(coarse)
+
+    def test_a_rootless_or_banded_spec_is_refused(self):
+        from wheelopt.rom.mjcf import ring_bodies
+
+        with self.assertRaisesRegex(ValueError, "root"):
+            ring_bodies(RingSpec(radius_m=0.060, n_segments=12), tangential="hinge")
+        banded = replace(self.SPEC, band_bending_n_per_m=0.8)
+        with self.assertRaisesRegex(ValueError, "shear"):
+            ring_bodies(banded, tangential="hinge")
+        with self.assertRaisesRegex(ValueError, "unknown tangential element"):
+            ring_bodies(self.SPEC, tangential="pivot")
+
+    def test_the_joints_compose_so_the_slide_stays_on_the_claw_axis(self):
+        """Hinge **before** slide, and MuJoCo carries the slide's axis round with it.
+
+        Get the order backwards and the slide is a fixed direction in the hub frame, which is
+        the two-slide element again wearing a hinge. Asserted on the compiled kinematics: at
+        90° of rotation the radial joint must move segment 0's capsule along +x, and at any
+        rotation the pivot-to-capsule distance must not change.
+        """
+        from wheelopt.rom.mjcf import build_mjcf, hinge_pivot_radius_m
+
+        model = mujoco.MjModel.from_xml_string(
+            build_mjcf(self.SPEC, self.RADIAL, tangential="hinge"))
+        data = mujoco.MjData(model)
+        geom = mujoco.mj_name2id(model, mujoco.mjtObj.mjOBJ_GEOM, "g0")
+        pivot = np.array([0.0, 0.0, self.SPEC.radius_m - hinge_pivot_radius_m(self.SPEC)])
+        h = model.jnt_qposadr[mujoco.mj_name2id(model, mujoco.mjtObj.mjOBJ_JOINT, "t0")]
+        j = model.jnt_qposadr[mujoco.mj_name2id(model, mujoco.mjtObj.mjOBJ_JOINT, "j0")]
+        self.assertLess(h, j, "the hinge must be listed before the slide")
+
+        for phi in (0.0, 0.4, 0.5 * np.pi):
+            data.qpos[:] = 0.0
+            data.qpos[h] = phi
+            mujoco.mj_kinematics(model, data)
+            reach = float(np.linalg.norm(data.geom_xpos[geom] - pivot))
+            with self.subTest(phi=phi):
+                self.assertAlmostEqual(reach, self.SPEC.claw_length_m, places=9)
+        data.qpos[h], data.qpos[j] = 0.5 * np.pi, 0.01
+        mujoco.mj_kinematics(model, data)
+        moved = data.geom_xpos[geom] - pivot
+        self.assertAlmostEqual(float(moved[0]), self.SPEC.claw_length_m + 0.01, places=9)
+        self.assertAlmostEqual(float(moved[2]), 0.0, places=9)
+
+    def test_the_hinged_tip_stays_inside_the_wheel_where_the_slide_leaves_it(self):
+        """The compiled-model form of the #27 discriminator, so the claim is not resting on
+        the analytic kinematics alone. Same tangential tip travel, opposite radial answer."""
+        from wheelopt.rom.mjcf import build_mjcf
+
+        travel = 0.020
+        radius = {}
+        for element in ("slide", "hinge"):
+            model = mujoco.MjModel.from_xml_string(
+                build_mjcf(self.SPEC, self.RADIAL, tangential=element))
+            data = mujoco.MjData(model)
+            hub = np.array([0.0, 0.0, self.SPEC.radius_m])
+            geom = mujoco.mj_name2id(model, mujoco.mjtObj.mjOBJ_GEOM, "g0")
+            t = model.jnt_qposadr[mujoco.mj_name2id(model, mujoco.mjtObj.mjOBJ_JOINT, "t0")]
+            data.qpos[t] = (travel if element == "slide"
+                            else np.arcsin(travel / self.SPEC.claw_length_m))
+            mujoco.mj_kinematics(model, data)
+            pos = data.geom_xpos[geom] - hub
+            self.assertAlmostEqual(float(pos[0]), travel, places=9)
+            capsule = 0.25 * self.SPEC.segment_arc_m
+            radius[element] = float(np.linalg.norm(pos)) + capsule
+        self.assertLess(radius["hinge"], self.SPEC.radius_m)
+        self.assertGreater(radius["slide"], self.SPEC.radius_m)
+
+    def test_the_hinged_ring_satisfies_the_analytic_equilibrium(self):
+        """MuJoCo's hinged ring against the conditions ``solve_equilibrium_hinge`` imposes.
+
+        The #26 pattern on the new element: read back MuJoCo's **own** ``u_i``, ``φ_i`` and
+        ``λ_i`` and check the two stationarity conditions, rather than comparing totals — a
+        total confounds the element with the capsule-versus-point contact geometry. MuJoCo is
+        told neither condition; it is given two force laws on two joints and a floor.
+
+        Measured 2026-08-09: the radial residual is 9e-11 of the contact force, and the
+        moment residual **divided by** the contact force — which is a length, and reads as the
+        error in the lever arm — is 6.1e-11 m. Before the pivot was moved inboard that second
+        number was 6.7e-3 of the arm, which is how the correction was found.
+        """
+        from wheelopt.rom.mjcf import build_mjcf
+
+        law, arm = self.hinge_law()
+        model = mujoco.MjModel.from_xml_string(
+            build_mjcf(self.SPEC, self.RADIAL, indentation_m=0.018, tangential="hinge"))
+        data = mujoco.MjData(model)
+
+        def addr(prefix):
+            ids = [mujoco.mj_name2id(model, mujoco.mjtObj.mjOBJ_JOINT, f"{prefix}{i}")
+                   for i in range(self.SPEC.n_segments)]
+            return model.jnt_qposadr[ids], model.jnt_dofadr[ids]
+
+        rq, rd = addr("j")
+        tq, td = addr("t")
+        for _ in range(40000):
+            data.qfrc_applied[rd] = self.RADIAL.force_n(-data.qpos[rq]) - 2.0 * data.qvel[rd]
+            data.qfrc_applied[td] = (-symmetric_force_n(law, data.qpos[tq])
+                                     - 2.0 * arm * arm * data.qvel[td])
+            mujoco.mj_step(model, data)
+        self.assertLess(float(np.max(np.abs(data.qvel))), 1e-8, "not settled")
+
+        theta = segment_angles(self.SPEC)
+        floor = mujoco.mj_name2id(model, mujoco.mjtObj.mjOBJ_GEOM, "floor")
+        lam = np.zeros(self.SPEC.n_segments)
+        horizontal = 0.0
+        wrench = np.zeros(6)
+        for c in range(data.ncon):
+            con = data.contact[c]
+            mujoco.mj_contactForce(model, data, c, wrench)
+            world = con.frame.reshape(3, 3).T @ wrench[:3]
+            i = int(mujoco.mj_id2name(
+                model, mujoco.mjtObj.mjOBJ_GEOM,
+                int(con.geom2 if con.geom1 == floor else con.geom1))[1:])
+            lam[i] += float(world[2])
+            horizontal += abs(float(world[0]))
+        # condim="1", so the plate is genuinely frictionless and the multiplier is vertical.
+        self.assertEqual(horizontal, 0.0)
+
+        u, phi = -data.qpos[rq], data.qpos[tq]
+        touching = np.flatnonzero(lam > 1e-6)
+        self.assertGreater(len(touching), 1, "no off-axis claw carries load")
+        for i in touching:
+            psi = theta[i] + phi[i]
+            with self.subTest(segment=int(i)):
+                self.assertAlmostEqual(float(self.RADIAL.force_n(u[i])),
+                                       lam[i] * np.cos(psi), delta=1e-9 * lam[i])
+                # Normalised by lam alone, so the tolerance is an error in the lever arm:
+                # 1e-9 m against a 40 mm claw.
+                self.assertAlmostEqual(float(symmetric_force_n(law, phi[i])),
+                                       lam[i] * (arm - u[i]) * np.sin(psi),
+                                       delta=1e-9 * lam[i])
+        # And the claw folds rather than compresses, which is the phenomenon: 24 deg of
+        # rotation against 0.09 mm of shortening on the off-axis claws.
+        off_axis = [i for i in touching if abs(theta[i]) > 1e-9]
+        self.assertTrue(off_axis)
+        for i in off_axis:
+            self.assertGreater(abs(phi[i]) * arm, 20.0 * abs(u[i]))
+
+    def test_the_static_press_tracks_the_analytic_hinged_ring(self):
+        """Totals, where the remaining gap is the capsule-versus-point contact geometry.
+
+        Measured 2026-08-09 across 12/24/48 segments and δ = 2-18 mm: within ±0.7%, and
+        within ±0.2% everywhere except the shallowest 24-segment point. The two runs that
+        diverged before :func:`stable_timestep_s` was applied to the press are the 18 mm
+        points at 24 and 48 segments.
+        """
+        from wheelopt.rom.mjcf import static_load_deflection
+
+        law, _arm = self.hinge_law()
+        deltas = np.array([0.006, 0.012, 0.018])
+        simulated = static_load_deflection(self.SPEC, self.RADIAL, deltas,
+                                           tangential_law=law, tangential_element="hinge",
+                                           settle_s=1.0)
+        analytic = ring_force_hinge_n(self.SPEC, self.RADIAL, law, deltas)
+        self.assertTrue(bool(np.all(np.isfinite(simulated))))
+        np.testing.assert_allclose(simulated, analytic, rtol=0.01)
+
+
+class TestHingedClawRing(unittest.TestCase):
+    """``TODO.md`` #27: the second freedom as a rotation at the root, not a slide at the tip.
+
+    Same wheel and same stiffnesses as :class:`TestTwoDegreeOfFreedomRing`, so the two models
+    are compared rather than merely both tested. The hinge law is the tip stiffness referred
+    to the root, ``M = k_t L² φ``, which is what makes them the same claw.
+    """
+
+    SPEC = RingSpec(radius_m=0.085, n_segments=12, root_radius_m=0.020)
+    RADIAL = SpringLaw(a=24807.0)
+    TANGENTIAL = SpringLaw(a=185.1)
+    HINGE = SpringLaw(a=185.1 * 0.065**2)
+    RIGID_HINGE = SpringLaw(a=1e9 * 185.1 * 0.065**2)
+
+    def test_the_claw_length_is_the_radius_less_the_root(self):
+        self.assertAlmostEqual(self.SPEC.claw_length_m, 0.065, places=12)
+        self.assertAlmostEqual(float(self.HINGE.a), 0.7820475, places=7)
+
+    def test_a_rootless_spec_is_refused(self):
+        """A claw hinged at the axle sweeps its tip round a circle of radius ``R``, so it can
+        never indent — the model would report a rigid wheel and look like a stiff result."""
+        rootless = RingSpec(radius_m=0.085, n_segments=12)
+        self.assertEqual(rootless.root_radius_m, 0.0)
+        with self.assertRaisesRegex(ValueError, "root"):
+            solve_equilibrium_hinge(rootless, self.RADIAL, self.HINGE, 0.018)
+
+    def test_a_banded_ring_is_refused(self):
+        banded = replace(self.SPEC, band_bending_n_per_m=0.8, band_hoop_n_per_m=90.0)
+        with self.assertRaises(ValueError):
+            solve_equilibrium_hinge(banded, self.RADIAL, self.HINGE, 0.004)
+
+    def test_the_root_radius_must_lie_inside_the_wheel(self):
+        for bad in (-0.001, 0.085, 0.1):
+            with self.subTest(root=bad), self.assertRaises(ValueError):
+                RingSpec(radius_m=0.085, n_segments=12, root_radius_m=bad)
+
+    def test_a_rigid_hinge_recovers_the_radial_kinematics(self):
+        """The limit that makes this a generalisation: a claw that cannot rotate is a claw on
+        a radial slide, so every compression must be the geometric penetration and the total
+        must be :func:`ring_force_n` — including its ``f_r/cos θ`` resolution (#26).
+
+        Tolerances are 1e-6, not machine epsilon, because 1e9 times stiffer is stiff and not
+        rigid; the residual rotation is 1e-8 rad. Tightening them would be testing the ratio
+        chosen here rather than the solver.
+        """
+        for delta in (0.006, 0.014, 0.020):
+            state = solve_equilibrium_hinge(self.SPEC, self.RADIAL, self.RIGID_HINGE, delta)
+            geometric = penetrations(self.SPEC, delta)
+            active = state.in_contact
+            with self.subTest(delta=delta):
+                self.assertTrue(bool(np.any(active)))
+                np.testing.assert_allclose(state.compression_m[active], geometric[active],
+                                           rtol=1e-6)
+                self.assertLess(float(np.max(np.abs(state.rotation_rad))), 1e-6)
+                self.assertAlmostEqual(
+                    state.force_n / float(ring_force_n(self.SPEC, self.RADIAL, delta)),
+                    1.0, places=6,
+                )
+
+    def test_it_is_inert_while_only_one_claw_touches(self):
+        """The lone claw sits at θ = 0, where the vertical force runs straight down its own
+        axis and there is no moment to rotate it. Exactly zero, not nearly — which is why the
+        flat-plate fit at design load is untouched by any of this."""
+        delta = 0.5 * 0.085 * (1.0 - np.cos(2.0 * np.pi / 12))
+        state = solve_equilibrium_hinge(self.SPEC, self.RADIAL, self.HINGE, delta)
+        self.assertEqual(int(state.in_contact.sum()), 1)
+        self.assertEqual(float(np.max(np.abs(state.rotation_rad))), 0.0)
+        self.assertAlmostEqual(
+            state.force_n, float(ring_force_n(self.SPEC, self.RADIAL, delta)), places=9
+        )
+
+    def test_rotation_is_antisymmetric_about_the_contact_point(self):
+        """The two sides fold opposite ways and cancel. A non-zero sum is a wheel walking
+        sideways under a symmetric load, which is how the ``_invert`` sign bug showed up in
+        the slide model."""
+        state = solve_equilibrium_hinge(self.SPEC, self.RADIAL, self.HINGE, 0.018)
+        self.assertAlmostEqual(float(np.sum(state.rotation_rad)), 0.0, places=12)
+        self.assertGreater(float(np.max(np.abs(state.rotation_rad))), 0.0)
+
+    def test_a_hinged_tip_comes_inward_where_a_sliding_one_goes_out(self):
+        """**This is #27.** The two elements make opposite predictions about the same number.
+
+        A hinged claw's tip swings on an arc of fixed length, so its distance from the hub
+        centre can only *shrink*; a two-slide segment's is ``√((R-u)² + v²)`` and *grows*.
+        Outward is the destabilising sign — a claw that lengthens as it splays presses harder
+        into the ground, which splays it further — so this is not a tie broken by taste.
+
+        Measured 2026-08-09 on the R 85 mm, 12-claw ring, as a fraction of ``R``:
+
+            δ = 12 mm   hinge -0.0202%   slide -0.0083%
+            δ = 18 mm   hinge -0.3956%   slide +0.9568%
+            δ = 25 mm   hinge -1.1337%   slide +4.4059%
+
+        At 12 mm the *slide* is inward too, and that is not a counter-example: barely past the
+        second claw's engagement the compression still dominates its own outward term. It is
+        already the larger of the two, and it crosses zero and keeps going. So the assertion
+        that holds at every δ is the **ordering**, and the sign is asserted where the splay is
+        real. A test that demanded an outward slide everywhere would be pinning an artefact of
+        which δ it happened to sample.
+        """
+        expected = {0.012: (-0.00020194, -0.00008282),
+                    0.018: (-0.00395564, +0.00956792),
+                    0.025: (-0.01133712, +0.04405904)}
+        for delta, (want_hinge, want_slide) in expected.items():
+            hinge = solve_equilibrium_hinge(self.SPEC, self.RADIAL, self.HINGE, delta)
+            slide = solve_equilibrium_2dof(self.SPEC, self.RADIAL, self.TANGENTIAL, delta)
+            r_h = tip_radius_hinge_m(self.SPEC, hinge.compression_m, hinge.rotation_rad)
+            r_s = tip_radius_slide_m(self.SPEC, slide.compression_m, slide.slip_m)
+            got_hinge = float(np.max(r_h[hinge.in_contact])) / self.SPEC.radius_m - 1.0
+            got_slide = float(np.max(r_s[slide.in_contact])) / self.SPEC.radius_m - 1.0
+            with self.subTest(delta=delta):
+                # No hinged tip may EVER exceed R -- that one is by construction and holds for
+                # every segment, in or out of contact.
+                self.assertLessEqual(float(np.max(r_h)), self.SPEC.radius_m + 1e-12)
+                self.assertLess(got_hinge, 0.0)
+                self.assertGreater(got_slide, got_hinge)
+                self.assertAlmostEqual(got_hinge, want_hinge, places=7)
+                self.assertAlmostEqual(got_slide, want_slide, places=7)
+        # And where the splay is real, the sliding tip is outside the wheel it belongs to.
+        for delta in (0.018, 0.025):
+            slide = solve_equilibrium_2dof(self.SPEC, self.RADIAL, self.TANGENTIAL, delta)
+            r_s = tip_radius_slide_m(self.SPEC, slide.compression_m, slide.slip_m)
+            self.assertGreater(float(np.max(r_s)), self.SPEC.radius_m)
+
+    def test_the_two_elements_agree_on_force_and_disagree_on_geometry(self):
+        """Why the flat-plate work survives #27 and the driven work does not.
+
+        The vertical reaction differs by 0.013% at 12 mm, 0.66% at 18 mm and 1.43% at 25 mm —
+        so every fit, every ``F(δ)`` and every static number taken with the slide stands, and
+        the flat-plate work does not have to be redone. What differs is where the tips are,
+        which is what a rolling contact depends on and a plate does not.
+        """
+        expected = {0.012: 0.999870, 0.018: 0.993406, 0.025: 0.985655}
+        for delta, ratio in expected.items():
+            hinge = float(ring_force_hinge_n(self.SPEC, self.RADIAL, self.HINGE, delta))
+            slide = float(ring_force_2dof_n(self.SPEC, self.RADIAL, self.TANGENTIAL, delta))
+            with self.subTest(delta=delta):
+                self.assertAlmostEqual(hinge / slide, ratio, places=6)
+
+    def test_it_softens_the_ring_once_a_second_claw_engages(self):
+        """Magnitudes pinned, as for the slide model, so a third set cannot appear quietly.
+
+        Measured 2026-08-09 against the same solver with a rigid hinge, so the comparison
+        isolates the freedom rather than mixing in a difference between two solvers.
+        """
+        expected = {0.012: 0.8828, 0.018: 0.5126, 0.025: 0.4148}
+        for delta, ratio in expected.items():
+            soft = float(ring_force_hinge_n(self.SPEC, self.RADIAL, self.HINGE, delta))
+            stiff = float(ring_force_hinge_n(self.SPEC, self.RADIAL, self.RIGID_HINGE, delta))
+            with self.subTest(delta=delta):
+                self.assertLess(soft, stiff)
+                self.assertAlmostEqual(soft / stiff, ratio, places=4)
+
+    def test_the_claw_never_rotates_past_the_plate(self):
+        """``ψ = θ + φ`` is bounded by ``arccos(c/L)``, where the claw has stood back up to
+        full length. A rotation past that would mean the claw stretching to stay in contact,
+        which the radial law has no branch for."""
+        for delta in (0.012, 0.018, 0.025, 0.035):
+            state = solve_equilibrium_hinge(self.SPEC, self.RADIAL, self.HINGE, delta)
+            active = state.in_contact
+            psi = np.abs(segment_angles(self.SPEC) + state.rotation_rad)[active]
+            with self.subTest(delta=delta):
+                self.assertTrue(bool(np.all(psi < 0.5 * np.pi)))
+                self.assertTrue(bool(np.all(state.compression_m[active] >= -1e-15)))
+                self.assertTrue(bool(np.all(state.contact_force_n >= 0.0)))
+
+    def test_it_inverts_a_table_with_a_flat_interval(self):
+        """A buckled claw carrying constant load has zero tangent over an interval — a
+        legitimate law, and a division by zero for anything Newton-shaped."""
+        flat = TabulatedLaw(knots_m=uniform_knots(0.008, 4),
+                            slopes_n_per_m=np.array([12000.0, 0.0, 0.0, 9000.0]))
+        state = solve_equilibrium_hinge(self.SPEC, flat, self.HINGE, 0.018)
+        self.assertTrue(np.all(np.isfinite(state.compression_m)))
+        self.assertTrue(np.all(np.isfinite(state.rotation_rad)))
+        self.assertGreater(state.force_n, 0.0)
+
+    def test_ring_for_design_supplies_the_root(self):
+        """Derived from ``hub_radius_mm``, so only a hand-built spec can be missing it."""
+        spec = ring_for_design(replace(TINY_PARAMS, rim_thickness_mm=0.0), TPU, n_segments=12)
+        self.assertAlmostEqual(spec.root_radius_m, 0.020, places=12)
+        self.assertAlmostEqual(spec.claw_length_m, 0.040, places=12)
+        banded = ring_for_design(TINY_PARAMS, TPU, n_segments=12)
+        self.assertAlmostEqual(banded.root_radius_m, 0.020, places=12)
+
+
+class TestTipEquivalentLaw(unittest.TestCase):
+    """A hinge law in tip coordinates, so the linear rules can be reused without rewriting."""
+
+    def test_it_is_the_change_of_variables_and_nothing_else(self):
+        hinge = SpringLaw(a=0.78, b=3.0, c=11.0)
+        arm = 0.065
+        tip = TipEquivalentLaw(hinge, arm)
+        for s in (0.001, 0.010, 0.030):
+            with self.subTest(s=s):
+                self.assertAlmostEqual(float(tip.force_n(s)),
+                                       float(hinge.force_n(s / arm)) / arm, places=12)
+                self.assertAlmostEqual(float(tip.stiffness_n_per_m(s)),
+                                       float(hinge.stiffness_n_per_m(s / arm)) / arm**2,
+                                       places=9)
+
+    def test_a_linear_hinge_gives_back_the_tip_stiffness_it_was_built_from(self):
+        """The round trip that matters: ``M = k_t a² φ`` must come back as ``k_t``."""
+        arm, k_t = 0.065, 185.1
+        tip = TipEquivalentLaw(SpringLaw(a=k_t * arm * arm), arm)
+        self.assertAlmostEqual(float(tip.stiffness_n_per_m(0.0)), k_t, places=9)
+
+    def test_a_zero_arm_is_refused(self):
+        with self.assertRaises(ValueError):
+            TipEquivalentLaw(SpringLaw(a=1.0), 0.0)
+
+
+class TestHingeLawFromTipCurve(unittest.TestCase):
+    """Turning a measured ``TIP_TANGENTIAL`` sweep into a moment-rotation law."""
+
+    L = 0.040
+
+    def test_a_rigid_bar_round_trips(self):
+        """Build the law from a curve, then check a rigid bar on that spring sits exactly
+        where the curve says under exactly the force the curve says.
+
+        This is the definition of the law restated as an assertion, and it is worth asserting
+        because both corrections — ``arcsin`` for the arc and ``cos φ`` for the shortening
+        moment arm — are second order and therefore easy to drop without anything looking
+        wrong until the deflections get large.
+        """
+        s = np.array([0.004, 0.010, 0.020, 0.030, 0.036])
+        f = np.array([0.85, 2.4, 6.1, 13.0, 21.3])
+        law = hinge_law_from_tip_curve(s, f, self.L)
+        for si, fi in zip(s, f, strict=True):
+            phi = np.arcsin(si / self.L)
+            with self.subTest(s=si):
+                # Moment balance on the bar: M(phi) = F * L cos(phi).
+                self.assertAlmostEqual(float(law.force_n(phi)), fi * self.L * np.cos(phi),
+                                       places=12)
+
+    def test_the_corrections_are_not_negligible_at_a_claw_length(self):
+        """If both were dropped the law would be ``M = F·s`` at ``φ = s/L``. At 36 mm on a
+        40 mm claw that is 44% wrong in the moment and 42% wrong in the rotation, so a small
+        sweep cannot tell you whether the code is right."""
+        s, f = 0.036, 21.3
+        law = hinge_law_from_tip_curve(np.array([s]), np.array([f]), self.L)
+        phi = float(np.arcsin(s / self.L))
+        naive_phi = s / self.L
+        self.assertAlmostEqual(np.degrees(phi), 64.158, places=3)
+        self.assertGreater(phi / naive_phi, 1.24)
+        self.assertLess(float(law.force_n(phi)) / (f * s), 0.57)
+
+    def test_it_refuses_a_sweep_longer_than_the_claw(self):
+        with self.assertRaisesRegex(FitFailure, "rigid bar|arcsin"):
+            hinge_law_from_tip_curve(np.array([0.02, 0.045]), np.array([1.0, 2.0]), self.L)
+
+    def test_it_refuses_a_non_positive_claw_length(self):
+        with self.assertRaises(FitFailure):
+            hinge_law_from_tip_curve(np.array([0.01]), np.array([1.0]), 0.0)
+
+    def test_the_kinematics_check_predicts_inward_travel(self):
+        """The falsifiable consequence: a hinged bar's tip must come in by ``L(1 - cos φ)``.
+        The sweep leaves that DOF free and measures it, so the check has something to be
+        wrong against — which is the point of it existing at all."""
+        s = np.array([0.010, 0.020, 0.036])
+        measured, predicted = hinge_kinematics_check(s, np.zeros_like(s), self.L)
+        np.testing.assert_allclose(measured, 0.0)
+        np.testing.assert_allclose(
+            predicted, self.L * (1.0 - np.cos(np.arcsin(s / self.L))), rtol=1e-12
+        )
+        # A slide would go the other way, by sqrt(L^2 + s^2) - L. Both are second order; they
+        # are within 3% of each other at 10 mm and 1.63x apart at 36 mm, so the *sign* is the
+        # discriminator at every deflection and the size only becomes one near the tip's limit.
+        outward = np.hypot(self.L, s) - self.L
+        self.assertTrue(bool(np.all(outward > 0.0)))
+        np.testing.assert_allclose(predicted / outward, [1.03177, 1.13505, 1.63339], rtol=1e-5)
+
+    def test_shape_mismatch_is_a_fit_failure(self):
+        with self.assertRaises(FitFailure):
+            hinge_kinematics_check(np.array([0.01, 0.02]), np.array([0.001]), self.L)
+
+
+class TestRideHarshness(unittest.TestCase):
+    """TODO #19: how few claws a bandless wheel may have, derived rather than inherited."""
+
+    RADIUS = 0.085
+    LOAD_N = 24.5
+
+    def law(self, k_n_per_mm: float) -> SpringLaw:
+        return SpringLaw(a=k_n_per_mm * 1e3)
+
+    def test_the_polygon_drop_is_the_rigid_limit_and_uses_half_the_pitch(self):
+        self.assertAlmostEqual(polygon_drop_m(0.085, 12), 0.0028963, places=7)
+        self.assertAlmostEqual(polygon_drop_m(0.085, 4), 0.0248959, places=7)
+        # Falls as 1/n^2 in the limit -- doubling the tips quarters the drop, which is why
+        # the criterion bites so hard at low n and disappears at high n. Approached from
+        # below: 3.932 at n = 6, 3.983 at 12, 3.996 at 24.
+        for n, ratio in ((6, 3.9319), (12, 3.9829), (24, 3.9957)):
+            with self.subTest(n=n):
+                self.assertAlmostEqual(
+                    polygon_drop_m(0.085, n) / polygon_drop_m(0.085, 2 * n), ratio, places=4
+                )
+
+    def test_it_refuses_a_degenerate_wheel(self):
+        for radius, n in ((0.0, 12), (-0.1, 12), (0.085, 2)):
+            with self.subTest(radius=radius, n=n), self.assertRaises(ValueError):
+                polygon_drop_m(radius, n)
+
+    def test_a_phase_rotates_the_ring_under_the_contact_point(self):
+        """Half a pitch puts the contact point between two segments rather than on one, which
+        is the whole polygon effect. At a full pitch the ring is back where it started."""
+        spec = RingSpec(radius_m=self.RADIUS, n_segments=12, root_radius_m=0.020)
+        pitch = 2.0 * np.pi / 12
+        np.testing.assert_allclose(np.sort(segment_angles(spec, pitch)),
+                                   np.sort(segment_angles(spec)), atol=1e-12)
+        half = segment_angles(spec, 0.5 * pitch)
+        self.assertFalse(np.any(np.isclose(half, 0.0, atol=1e-9)),
+                         "half a pitch must put no segment at the contact point")
+        self.assertAlmostEqual(float(np.min(np.abs(half))), 0.5 * pitch, places=12)
+
+    def test_a_phase_is_refused_on_a_banded_ring(self):
+        with self.assertRaisesRegex(ValueError, "bandless"):
+            ring_force_n(COUPLED, LAW, 0.004, phase_rad=0.1)
+        # Zero phase on a banded ring is the ordinary call and must still work.
+        self.assertGreater(float(ring_force_n(COUPLED, LAW, 0.004, phase_rad=0.0)), 0.0)
+
+    def test_compliance_smooths_the_polygon_and_more_tips_smooth_it_further(self):
+        """A stiff claw: the ripple sits below the rigid drop and falls with ``n``.
+
+        Measured on R 85 mm at 24.5 N with a linear 13.5 N/mm claw: ripple/drop 0.945 at
+        4 tips, 0.839 at 8, 0.674 at 12, 0.493 at 16. The wheel deflects into the gap, so it
+        never sees the whole polygon.
+        """
+        law = self.law(13.5)
+        previous = float("inf")
+        for n in (4, 8, 12, 16):
+            spec = RingSpec(radius_m=self.RADIUS, n_segments=n, root_radius_m=0.020)
+            ripple, lo, hi = ride_height_ripple_m(spec, law, self.LOAD_N)
+            with self.subTest(n=n):
+                self.assertLess(ripple, polygon_drop_m(self.RADIUS, n))
+                self.assertLess(ripple, previous)
+                self.assertAlmostEqual(hi - lo, ripple, places=12)
+            previous = ripple
+
+    def test_a_coarse_wheel_unloads_a_claw_once_a_pitch(self):
+        """The criterion, and the reason the claw count went **up** rather than down.
+
+        When the peak-to-peak axle movement reaches the wheel's own static deflection, the
+        trailing claw has left the ground entirely. On a linear 13.5 N/mm claw the crossing is
+        just past 12 tips — ripple/δ is 12.97 at 4, 2.99 at 8, 1.08 at 12, 0.687 at 14 and
+        0.444 at 16. The measured claws (fitted tabulated laws, 3.7 and 13.5 N/mm) cross at
+        10-12, so the family's answer is **n >= 12**, and it is not sensitive to which of them
+        you ask.
+        """
+        law = self.law(13.5)
+        crossing = {}
+        for n in (4, 8, 12, 14, 16):
+            spec = RingSpec(radius_m=self.RADIUS, n_segments=n, root_radius_m=0.020)
+            ripple, _lo, _hi = ride_height_ripple_m(spec, law, self.LOAD_N)
+            lo, hi = 0.0, 0.9 * self.RADIUS
+            for _ in range(60):
+                mid = 0.5 * (lo + hi)
+                if float(ring_force_n(spec, law, mid)) < self.LOAD_N:
+                    lo = mid
+                else:
+                    hi = mid
+            crossing[n] = ripple / (0.5 * (lo + hi))
+        self.assertAlmostEqual(crossing[4], 12.968, places=3)
+        self.assertAlmostEqual(crossing[8], 2.992, places=3)
+        self.assertGreater(crossing[12], 1.0)
+        self.assertLess(crossing[14], 1.0)
+        self.assertLess(crossing[16], 0.5)
+
+    def test_a_wheel_that_cannot_carry_the_load_reports_infinite_ripple(self):
+        """Not an exception and not a quiet zero: a wheel that bottoms out at some phase is a
+        result, and ``inf`` is the honest one."""
+        spec = RingSpec(radius_m=self.RADIUS, n_segments=4, root_radius_m=0.020)
+        ripple, lo, hi = ride_height_ripple_m(spec, self.law(0.05), self.LOAD_N)
+        self.assertEqual(ripple, float("inf"))
+        self.assertTrue(np.isnan(lo) and np.isnan(hi))
+
+    def test_it_refuses_a_banded_spec_and_a_non_positive_load(self):
+        with self.assertRaises(ValueError):
+            ride_height_ripple_m(COUPLED, LAW, 24.5)
+        spec = RingSpec(radius_m=self.RADIUS, n_segments=12, root_radius_m=0.020)
+        with self.assertRaises(ValueError):
+            ride_height_ripple_m(spec, self.law(13.5), 0.0)
 
 
 if __name__ == "__main__":  # pragma: no cover

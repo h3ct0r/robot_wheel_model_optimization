@@ -61,16 +61,23 @@ def build_parser() -> argparse.ArgumentParser:
                    help="kg on the axle; default puts the wheel at half its fitted range")
     p.add_argument("--step-height", type=float, default=None,
                    help="m; default is 0.05 for a nominal wheel, else 0.6 x radius")
-    p.add_argument("--tangential", action="store_true",
-                   help="give every segment the in-plane perpendicular freedom (TODO #20), "
-                        "with its law measured by a TIP_TANGENTIAL sweep on this design's own "
-                        "claw sector. Bandless rings only -- the band tendons couple radial "
-                        "joints only, so a banded ring would shear for free.")
-    p.add_argument("--tangential-max", type=float, default=0.040, metavar="M",
+    p.add_argument("--tangential", nargs="?", const="hinge", default=None,
+                   choices=("hinge", "slide"),
+                   help="give every claw a second in-plane freedom (TODO #20), with its law "
+                        "measured by a TIP_TANGENTIAL sweep on this design's own claw sector. "
+                        "'hinge' rotates the claw about its root and is the right element "
+                        "(TODO #27); 'slide' translates its tip and is kept only for "
+                        "comparison -- it lengthens the claw as it splays. Bandless rings "
+                        "only: the band tendons couple radial joints only, so a banded ring "
+                        "would shear for free.")
+    p.add_argument("--tangential-max", type=float, default=None, metavar="M",
                    help="how far the tangential sweep goes, metres. Must reach the "
                         "deflections the wheel actually sees: the claw stiffens 3.6x between "
                         "4 and 40 mm, so a short sweep extrapolates a straight line through a "
-                        "curve that is anything but (default one claw length on the R60 claw)")
+                        "curve that is anything but. Default is 90%% of the claw length -- "
+                        "derived, because the hinge law cannot represent a tip that has "
+                        "travelled further sideways than the claw is long, and a fixed "
+                        "default in metres is one claw length on exactly one design")
     p.add_argument("--sweep", action="store_true",
                    help="also find the tallest step each wheel clears (slow: ~10 runs each)")
     p.add_argument("--cache", type=Path, default=REPO_ROOT / "data" / "cache" / "fea")
@@ -82,20 +89,20 @@ def _fit_the_ring(args):
     """FEA -> ring fit. Returns (spec, fit) or (None, message)."""
     params = params_from_args(args)
     material = material_from_args(args)
-    if args.plane_strain:
-        mesh = MeshSpec(dimension=2, size_spoke_m=0.0025, size_rim_m=0.003, size_hub_m=0.002)
-        factor = 5.0
-    else:
-        mesh = MeshSpec(size_spoke_m=0.008, size_rim_m=0.010, size_hub_m=0.010)
-        factor = SolverSpec().contact_stiffness_factor
+    # One contact penalty for both tiers since #12 (2026-08-09): the plane-strain tier used
+    # to need a hand-softened factor of 5 where the 3-D tier ran at the default 20, and 5 is
+    # now the default because it costs 0.7-0.8% of the answer on the 3-D tier and buys the
+    # conditioning outright. Only the mesh differs.
+    mesh = (MeshSpec(dimension=2, size_spoke_m=0.0025, size_rim_m=0.003, size_hub_m=0.002)
+            if args.plane_strain
+            else MeshSpec(size_spoke_m=0.008, size_rim_m=0.010, size_hub_m=0.010))
 
     from wheelopt.fea.runner import run_load_case
 
     case = LoadCase(kind=LoadCaseKind.RADIAL_FLAT, delta_max_m=args.delta_max,
                     n_points_per_branch=args.n_points)
     result = run_load_case(params, material, case, mesh_spec=mesh,
-                           solver=SolverSpec(n_threads=args.threads,
-                                             contact_stiffness_factor=factor),
+                           solver=SolverSpec(n_threads=args.threads),
                            cache_root=args.cache)
     if not result.ok:
         return None, f"{result.status.value}: {result.message}"
@@ -110,35 +117,62 @@ def _fit_the_ring(args):
 
 
 
-def _measure_tangential_law(args):
-    """The claw's own tangential curve, tabulated. Returns ``(law, message)``.
+def _tangential_max_m(args, spec) -> float:
+    """How far to sweep the claw tip. 90% of the claw length unless the caller said."""
+    return (args.tangential_max if args.tangential_max is not None
+            else 0.9 * spec.claw_length_m)
+
+
+def _measure_tangential_law(args, spec):
+    """The claw's own tangential curve, as a law for ``args.tangential``.
 
     Measured rather than chosen (invariant 2), and **tabulated rather than a stiffness**: the
     claw stiffens 3.6x in secant and 13x in tangent between 4 mm and one claw length, because
     it rotates toward the load and starts carrying it axially instead of in bending. A single
     ``k_t`` is only the first 10 mm of that curve, and drive torque takes it far past there.
+
+    One sweep, two readings. As a *slide* law it is force against tip travel, straight off the
+    solver; as a *hinge* law it is moment against root rotation, the same points in different
+    coordinates. Returns ``(law, kinematics, message)`` where ``kinematics`` is the measured
+    versus predicted inward tip travel -- the check from outside the ROM that says whether the
+    hinge idealisation describes this claw at all, and ``None`` if the solver did not report
+    the free axis.
     """
     from wheelopt.fea.runner import run_load_case
-    from wheelopt.rom.fit import law_from_claw_curve
+    from wheelopt.rom.fit import (
+        hinge_kinematics_check,
+        hinge_law_from_tip_curve,
+        law_from_claw_curve,
+    )
 
     params = params_from_args(args)
     material = material_from_args(args)
     mesh = MeshSpec(dimension=2, size_spoke_m=0.0025, size_rim_m=0.003, size_hub_m=0.002,
                     claw_sector=True)
-    case = LoadCase(kind=LoadCaseKind.TIP_TANGENTIAL, delta_max_m=args.tangential_max,
+    case = LoadCase(kind=LoadCaseKind.TIP_TANGENTIAL, delta_max_m=_tangential_max_m(args, spec),
                     n_points_per_branch=10, friction_mu=0.0)
     result = run_load_case(params, material, case, mesh_spec=mesh,
-                           solver=SolverSpec(n_threads=args.threads,
-                                             contact_stiffness_factor=5.0),
+                           solver=SolverSpec(n_threads=args.threads),
                            cache_root=args.cache)
     if not result.ok:
-        return None, f"{result.status.value}: {result.message}"
+        return None, None, f"{result.status.value}: {result.message}"
     load = result.curve.loading
+    delta, force = result.curve.delta_m[load], result.curve.force_n[load]
     try:
-        return law_from_claw_curve(result.curve.delta_m[load],
-                                   result.curve.force_n[load]), ""
+        if args.tangential == "hinge":
+            law = hinge_law_from_tip_curve(delta, force, spec.claw_length_m)
+        else:
+            law = law_from_claw_curve(delta, force)
     except Exception as exc:  # noqa: BLE001 - a bad curve is a result, not a crash
-        return None, f"{type(exc).__name__}: {exc}"
+        return None, None, f"{type(exc).__name__}: {exc}"
+
+    kinematics = None
+    if result.curve.cross_delta_m is not None:
+        keep = delta > 0.0
+        kinematics = hinge_kinematics_check(
+            delta[keep], result.curve.cross_delta_m[load][keep], spec.claw_length_m
+        )
+    return law, kinematics, ""
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -168,7 +202,13 @@ def main(argv: list[str] | None = None) -> int:
     height = (args.step_height if args.step_height is not None
               else round(0.6 * spec.radius_m, 3))
 
-    from wheelopt.sim.step_climb import RigSpec, highest_step_climbed, run_flat, run_step
+    from wheelopt.sim.step_climb import (
+        RigSpec,
+        default_step_heights_m,
+        highest_step_climbed,
+        run_flat,
+        run_step,
+    )
 
     tangential_law = None
     if args.tangential:
@@ -177,16 +217,31 @@ def main(argv: list[str] | None = None) -> int:
                   f"({spec.band_bending_n_per_m:.3f} / {spec.band_hoop_n_per_m:.1f} N/m). "
                   "Use --rim-thickness 0 geometry, or drop the flag.")
             return 1
-        tangential_law, message = _measure_tangential_law(args)
+        tangential_law, kinematics, message = _measure_tangential_law(args, spec)
         if tangential_law is None:
             print(f"tangential sweep failed: {message}")
             return 1
-        near = tangential_law.stiffness_n_per_m(0.001)
-        far = tangential_law.stiffness_n_per_m(0.9 * args.tangential_max)
-        print(f"tangential law measured over 0-{args.tangential_max * 1e3:.0f} mm: "
-              f"{near / 1e3:.4f} N/mm near the origin, {far / 1e3:.4f} N/mm at "
-              f"{0.9 * args.tangential_max * 1e3:.0f} mm ({far / near:.1f}x stiffer); "
+        from wheelopt.rom.ring import TipEquivalentLaw
+
+        # Report both laws in tip coordinates whichever element is in use, so the two runs are
+        # comparable and the stiffening is the same number in both.
+        at_tip = (TipEquivalentLaw(tangential_law, spec.claw_length_m)
+                  if args.tangential == "hinge" else tangential_law)
+        sweep_max = _tangential_max_m(args, spec)
+        near = float(at_tip.stiffness_n_per_m(0.001))
+        far = float(at_tip.stiffness_n_per_m(0.9 * sweep_max))
+        print(f"tangential: {args.tangential} element, claw {spec.claw_length_m * 1e3:.1f} mm "
+              f"long, law measured over 0-{sweep_max * 1e3:.1f} mm: "
+              f"{near / 1e3:.4f} N/mm at the tip near the origin, {far / 1e3:.4f} N/mm at "
+              f"{0.9 * sweep_max * 1e3:.1f} mm ({far / near:.1f}x stiffer); "
               f"radial is {fit.law.stiffness_n_per_m(0.0) / near:.0f}x the near value")
+        if kinematics is not None:
+            measured, predicted = kinematics
+            print("  tip travel inward, FEA vs the hinge idealisation "
+                  "(a slide would predict the negative of these):")
+            for k in sorted({0, len(measured) // 2, len(measured) - 1}):
+                print(f"    measured {measured[k] * 1e3:+7.3f} mm, "
+                      f"hinge predicts {predicted[k] * 1e3:+7.3f} mm")
 
     rig = RigSpec(payload_kg=payload, step_height_m=height)
     print(f"rig:  {payload:.3f} kg ({static_load:.2f} N) on the axle, "
@@ -199,9 +254,11 @@ def main(argv: list[str] | None = None) -> int:
     for name, rigid in (("compliant", False), ("rigid", True)):
         runs[name] = {
             "flat": run_flat(spec, fit.law, rig, rigid=rigid, fit_max_m=fit_max,
-                             tangential_law=tangential_law),
+                             tangential_law=tangential_law,
+                             tangential_element=args.tangential),
             "step": run_step(spec, fit.law, rig, rigid=rigid, fit_max_m=fit_max,
-                             tangential_law=tangential_law),
+                             tangential_law=tangential_law,
+                             tangential_element=args.tangential),
         }
         for phase, result in runs[name].items():
             if not result.ok:
@@ -236,12 +293,20 @@ def main(argv: list[str] | None = None) -> int:
           f"{compliant['step'].fraction_beyond_fit:.0%} of loaded samples beyond it")
 
     if args.sweep:
+        ceiling = float(default_step_heights_m(spec)[-1])
         print("\ntallest step cleared (sweep, 10 mm resolution):")
         for name, rigid in (("compliant", False), ("rigid", True)):
             tallest = highest_step_climbed(spec, fit.law, rig, rigid=rigid,
                                            fit_max_m=fit_max,
-                                           tangential_law=tangential_law)
-            print(f"  {name:<10} {tallest * 1e3:5.0f} mm  ({tallest / spec.radius_m:.2f} R)")
+                                           tangential_law=tangential_law,
+                                           tangential_element=args.tangential)
+            # A result at the top of the swept range is the range's answer, not the wheel's.
+            note = "  <- AT THE SWEEP CEILING; the true value is >= this" \
+                if tallest >= ceiling - 1e-12 else ""
+            print(f"  {name:<10} {tallest * 1e3:5.0f} mm  "
+                  f"({tallest / spec.radius_m:.2f} R){note}")
+        print("  10 mm buckets, and a 1% change in the fitted law moves the answer one "
+              "bucket; read it as a bucket, not a millimetre.")
 
     passed = sum(verdicts)
     print(f"\n{passed}/{len(verdicts)} signatures came out the way physics requires.")

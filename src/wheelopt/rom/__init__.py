@@ -35,6 +35,14 @@ See docs/plan/06-compliance-rom.md.
 #:   so this invalidates prior results in a way none of the earlier bumps did. Also adds a
 #:   tangential degree of freedom for bandless rings (``solve_equilibrium_2dof``), which is
 #:   inert until a second segment engages and therefore changes no flat-plate fit.
-ROM_VERSION = "rom-0.4.0"
+#: - ``rom-0.5.0`` — the second freedom becomes a **hinge at the claw root**
+#:   (``solve_equilibrium_hinge``) rather than a slide at the tip, because a slide lengthens
+#:   the claw as it splays and the FEA measures the tip moving the other way (``TODO.md`` #27,
+#:   the 2026-08-09 log entry). ``RingSpec`` gains ``root_radius_m``, so a spec built before
+#:   this is not a spec built after it. The vertical reaction moves by under 1.5% out to
+#:   δ = 25 mm and the flat-plate fits are effectively unchanged; what moves is where the tips
+#:   are, which only a rolling contact sees. The slide is kept and reachable, as the thing the
+#:   hinge is compared against.
+ROM_VERSION = "rom-0.5.0"
 
 __all__ = ["ROM_VERSION"]

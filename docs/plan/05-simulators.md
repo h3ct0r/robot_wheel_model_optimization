@@ -122,8 +122,12 @@ What it cannot do, and why 3-D stays:
 - **No out-of-plane behaviour at all.** Lateral spoke buckling, sidewall taper and any
   spanwise pattern are invisible. Buckling is a hard constraint in
   [`04-design-space.md`](04-design-space.md), so any design near it goes to 3-D.
-- **Frictional contact needs a softened penalty** (`--contact-stiffness 5`); the fine section
-  mesh diverges at the default. The answer moves ~1% across a tenfold change in penalty, so
-  this is conditioning rather than physics.
+- **Frictional contact needs a softened penalty**, which is the default since #12
+  (2026-08-09) rather than a flag this tier has to remember: `contact_stiffness_factor = 5`
+  and a 4 mm floor under the element size in `factor × E / element_size`. The floor is the
+  part specific to this tier — its 2.5 mm section mesh sits below it, and without the floor
+  the penalty rises as the mesh refines until a frictional run diverges *at any factor*. The
+  answer moves ~1% across a tenfold change in penalty, so this is conditioning rather than
+  physics.
 - **The 0.90 ratio is one measurement on one geometry.** It is not yet known whether it is a
   constant to divide out or a function of topology.

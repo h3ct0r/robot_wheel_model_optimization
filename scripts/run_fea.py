@@ -91,9 +91,14 @@ def build_parser() -> argparse.ArgumentParser:
     s.add_argument("--timeout", type=float, default=SolverSpec().timeout_s)
     s.add_argument("--contact-stiffness", type=float,
                    default=SolverSpec().contact_stiffness_factor,
-                   help="penalty stiffness multiplier (x E / element size). Lower it if a "
-                        "frictional contact diverges — a fine mesh gets a stiff penalty. "
-                        "The plane-strain tier needs <= 5 with friction; 20 diverges")
+                   help="penalty stiffness multiplier (x E / floored element size). Both "
+                        "tiers run at the default since #12; raise it only to reproduce an "
+                        "older result, and expect friction to diverge at 20")
+    s.add_argument("--contact-length-floor", type=float,
+                   default=SolverSpec().contact_length_floor_m, metavar="M",
+                   help="smallest element size the penalty may see, metres. Without it the "
+                        "penalty grows without bound as the mesh refines and a frictional "
+                        "run diverges at any factor; 0 restores the uncapped scaling")
 
     io = p.add_argument_group("io")
     io.add_argument("--step", type=Path, default=None, help="reuse an existing STEP")
@@ -177,6 +182,7 @@ def main(argv: list[str] | None = None) -> int:
             timeout_s=args.timeout,
             n_threads=args.threads,
             contact_stiffness_factor=args.contact_stiffness,
+            contact_length_floor_m=args.contact_length_floor,
         )
         indenter = IndenterSpec(
             step_height_m=args.step_height, edge_fillet_m=args.step_edge_fillet

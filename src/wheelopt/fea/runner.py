@@ -405,9 +405,16 @@ def _extract_result(
             FeaStatus.PARSE_FAILED, load_case, key, "no .dat in the run directory",
             diagnostics,
         )
+    # Which way is "inward" along the axis the tangential tip case leaves free. Taken from the
+    # tread centroid, which the cache already stores, so this needs no cache format change and
+    # a cached run reports it as readily as a fresh one. Zero for every other case, where the
+    # axis is held and its displacement is identically zero by construction.
+    cross_inward_sign = 0.0
+    if load_case.kind.is_tangential and len(slave_coords_m):
+        cross_inward_sign = -1.0 if float(slave_coords_m.mean(axis=0)[1]) > 0.0 else 1.0
     try:
         blocks = parse_dat(dat.read_text())
-        curve = build_load_curve(blocks, load_case, ref_node)
+        curve = build_load_curve(blocks, load_case, ref_node, cross_inward_sign)
     except Exception as exc:  # noqa: BLE001 - invariant 4
         return failure(
             FeaStatus.PARSE_FAILED, load_case, key, f"{type(exc).__name__}: {exc}",

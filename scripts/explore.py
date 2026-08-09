@@ -56,10 +56,11 @@ from wheelopt.report import (
     write_report,
 )
 
-#: The plane-strain tier's settings, from CLAUDE.md's command block. The fine section mesh
-#: over-stiffens penalty contact, so the default factor of 20 diverges under friction.
+#: The plane-strain tier's settings, from CLAUDE.md's command block. The contact penalty is
+#: no longer among them: the fine section mesh over-stiffened it and this script softened it
+#: by hand, and since #12 (2026-08-09) the softened value *is* `SolverSpec`'s default, with a
+#: floor on the element size so that refining the mesh cannot stiffen it back.
 SECTION_MESH = {"size_spoke_m": 0.0025, "size_rim_m": 0.003, "size_hub_m": 0.002}
-CONTACT_STIFFNESS = 5.0
 
 #: Which flags `--compare` may sweep. Restricted on purpose: sweeping something the pipeline
 #: keys its cache on but the plots do not label would silently overlay unlike things.
@@ -171,8 +172,7 @@ def stage_fea(design: Design, args: argparse.Namespace) -> None:
                     n_points_per_branch=args.n_points, friction_mu=args.friction)
     result = run_load_case(
         design.params, design.material, case, mesh_spec=mesh,
-        solver=SolverSpec(n_threads=args.threads,
-                          contact_stiffness_factor=CONTACT_STIFFNESS),
+        solver=SolverSpec(n_threads=args.threads),
         cache_root=args.cache,
     )
     if not result.ok:

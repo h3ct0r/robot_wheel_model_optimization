@@ -20,79 +20,45 @@ weeks; this file says what is blocking the next fortnight of it.
 
 ## Next
 
-### #27 — The ring's tangential element is a slide; it must be a hinge at the claw root
-
-**Highest priority in the claw direction.** Retitled 2026-08-09 after the measurement below
-overturned the day's earlier reading of it — the log entry of the same date is the record.
-
-**What was thought.** `k_r/k_t = (L/t)²` exactly for a rectangular section (69.4 predicted,
-75.5 measured on the driven R 60 claw), so compliance and torque capacity are one parameter,
-and a linear `k_t` = 0.2277 N/mm puts 93.5 mm of tip deflection under the platform's 21.3 N.
-That read as a structural impossibility for `T7`.
-
-**What is actually true.** The claw *stiffens*: pushed to a full claw length its secant rises
-**3.6×** and its tangent **13×**, because it rotates toward the load and carries it axially
-rather than in bending. It reaches 21.3 N at about **36 mm**, not 93.5. The `(L/t)²` identity
-still holds and is still a genuine tension in the family, but it is a small-deflection
-statement and the claw does not stay in small deflection, so it does not settle the design.
-
-**What actually blocks the rolling model.** The segment's *kinematics*. A two-slide segment
-moves its tip along a straight line, so the tip's distance from the hub centre is `√(R² + v²)`
-and **grows** with splay; a hinged claw's tip swings on an arc and the distance **shrinks**.
-Error on the R 60 claw: +2.1% of R at 10 mm of splay, +8.4% at 20 mm, **+30.1% at 36 mm** —
-and outward is the destabilising sign, because a segment pressing harder into the ground
-splays further. It is a property of the element, so no timestep, joint range or damping
-touches it.
-
-**Work: replace the tangential slide with a root hinge and a rotational spring.** The measured
-`TIP_TANGENTIAL` curve is already a moment-rotation curve of exactly that hinge. A hinge keeps
-the claw length fixed by construction, and it removes the feedback. Expect to lose the clean
-per-segment factorisation of `solve_equilibrium_2dof`, which is what bought the slide.
-
-**What survives untouched:** the flat-plate work, where splay stays small — the geometric
-error is 0.0% of R at δ = 12 mm and 1.5% at 18 mm. Read the 25 mm entry of the softening table
-with a 6% caveat. The static MuJoCo-vs-analytic agreement at 1e-9 is also untouched and was
-never evidence about this: both models share the same kinematics, which is why they agreed.
-
 ### #20 — Add tangential claw compliance to the ring ROM
 
-Every segment in `src/wheelopt/rom/ring.py` and its MJCF realisation has a **radial slide
-only**. For a claw that is a real omission: a cantilever claw bends *backwards* under drive
-torque, and that backward bend is much of what makes a claw catch and grip a step edge.
-`docs/plan/06-compliance-rom.md` §2 already lists torsional stiffness `k_θ` as a ROM parameter
-to extract.
+**Done for the flat-plate and step rigs; open for what the number now rests on.** The
+element, its MJCF realisation and the driven rig all work as of 2026-08-09 — see the log entry
+of that date for the evidence and #27 in the closed table for the element itself.
 
-**Scoped 2026-08-08, and it is bigger than it reads.** A claw points radially, so a radial tip
-load compresses it as a *column* and a tangential one bends it as a *cantilever*. At the
-nominal claw, **measured** with the contact-free `TIP_RADIAL` / `TIP_TANGENTIAL` cases:
-**24.81 N/mm against 0.1851 N/mm — a factor of 134**. The ring models the stiff one and omits
-the soft one entirely, so for a claw this is not a refinement, it is the missing dominant
-compliance.
+Where it stands. A bandless ring's claws each have a root hinge with a moment-rotation law
+measured by a `TIP_TANGENTIAL` sweep on the design's own claw sector, and
+`scripts/run_step.py --tangential hinge` drives it. The R 60 mm, 12-claw, taper 0.6 design
+passes **5/5 signatures** and clears a **60 mm step against the rigid wheel's 20 mm** at
+matched mass, radius and rotational inertia. That is the project's first end-to-end claw climb
+number, and it is **not** the spike's 50-vs-20, which was a banded `T3`. It read 30-vs-20 until
+the #12 re-run; see the 2026-08-09 log entry, which supersedes that.
 
-**The FEA half, the analytic ROM half and the MJCF joint are all done** (2026-08-08/09), and
-the issue is still open because the driven rig will not run with it.
+What is left, in order:
 
-`solve_equilibrium_2dof` gives a bandless ring a tangential freedom, solved per segment by
-bisection; `ring_bodies(..., tangential=True)` gives MuJoCo the same freedom, refused on a
-banded spec because the band tendons couple radial joints only. The two agree per segment to
-**1e-9** on both Kuhn-Tucker conditions in the static press, and on totals to 0.02-0.07%. The
-`ROM_VERSION` bump landed with #26.
+0. **The climb height is worth one significant figure and the sweep knows it.** 10 mm buckets,
+   and a **1%** change in the fitted law moves the answer a full bucket — measured across #12's
+   contact floor, which shifts the law 0.3% in peak force and gives 60 mm with it and 50 mm
+   without. Do not rank two designs on one bucket. Either drive the resolution from a
+   sensitivity measurement rather than a round number, or report the climb as the profile
+   (which heights cleared) instead of its maximum; the profile is what distinguishes a climb
+   from the bounce the predicate admits.
+1. **14% of loaded samples run past the fitted range** (peak 8.60 mm against a 6 mm fit). The
+   climb number is therefore partly an extrapolation of the radial table. Widen the
+   `RADIAL_FLAT` sweep for this design and re-run; if the number moves, the current one was
+   the extrapolation talking.
+2. **The step-edge patch disagrees between elements** — 24.0 mm for the hinge against 50.3 mm
+   for the slide on the same design. That is the outward tip inflating the patch, so the hinge
+   is the one to believe, but the size of the gap says patch length is the metric most exposed
+   to the element choice and it is one of the five signatures.
+3. **The hinge law is a rigid-bar idealisation of a bending claw.** It reproduces the measured
+   tip trajectory to 2% mid-range and 13% at a full claw length
+   (`fit.hinge_kinematics_check`), which is good enough to choose the element and not
+   obviously good enough to quote a climb height to two figures.
 
-**What blocks it: the wheel folds over under drive.** At the platform's 21.3 N per wheel a claw
-at the measured `k_t` needs **144 mm** of tangential deflection (188 mm at stall) against a
-±30 mm joint range on a 60 mm wheel. The claws lie flat and the run is meaningless. That is
-the model being honest, not a bug — the tractive force at a planted tip is perpendicular to
-the claw, so it bends it as a cantilever, and 134x below radial is far too soft to carry it.
-
-Step 1 of the plan here — measure `k_t` on the design actually being driven — was done the same day and produced **#27**, which now blocks the rest. The measured `k_t` is 0.2277 N/mm (ratio 75.5x, not the nominal claw's 134x), the wheel still folds at that value, and the reason is structural rather than a parameter choice. There is no point putting the tangential freedom into the five signatures until there is a claw model that survives the load.
-
-Also unresolved and cheap: `run_step` graded a collapsed wheel **4/5**, because it accepts any
-run whose history stays finite. `fraction_beyond_fit` did say 100%, but the headline did not.
-
-The spike's 50 mm-versus-20 mm headline was measured on a **banded `T3`** design, where the
-band carries tangential load between segments — that result stands, and it does **not**
-transfer to claws. Any claw climb number from the current ROM is a lower bound on compliance,
-so probably pessimistic.
+Also unresolved and cheap: `run_step` graded a collapsed wheel **4/5** before this landed,
+because it accepts any run whose history stays finite. `fraction_beyond_fit` did say 100%, but
+the headline did not. The collapse is gone; the grading hole is not.
 
 ---
 
@@ -100,86 +66,29 @@ so probably pessimistic.
 
 These arrived with the `T7` redirection on 2026-08-08 and are listed in that log entry.
 
-### #19 — Re-derive the `n_spokes` lower bound for claws
+### #28 — The slenderness threshold of 40 is far too permissive for a claw
 
-`PARAM_BOUNDS["n_spokes"] = (6, 36)` in `src/wheelopt/cad/params.py` rejects the four-claw
-design in Table I of the PaTS-Wheel letter (`docs/papers`). That bound was set for a banded
-wheel, where many thin spokes are cheap and the band carries load between them; for `T7`,
-fewer, longer and thicker claws are the point of the family.
+Opened 2026-08-09 by #21, which fixed the *proxy* and left the *threshold*.
 
-**Do not simply widen it.** Derive it from the claw load case: how few claws can carry 24.5 N
-at an acceptable tip deflection *and* an acceptable gap between successive tip contacts —
-contact is discrete without a band, so ride harshness grows as `n` falls and
-`spoke_phase_deg` becomes decisive.
+`constraints.py` warns above `slenderness > 40`. On the frictionless claw-sector plate sweep
+of that date every design showed a load plateau — effective slenderness 8.1 through 26.0, so
+none of them warns — and every plateau sat **below** the per-claw design load. A screening
+threshold that fires on nothing in the family it is meant to screen is not screening.
 
-Now unblocked: #24 established that the claw's radial curve is well determined on the stick
-branch, so a claw count can be derived from it.
+**Do not simply lower it.** The frictionless plateau is the *slip* branch, and #24 established
+that the physical branch is **stick**: at every μ from 0.2 to 1.2 the nominal claw carries
+22.69 N at 1 mm against the frictionless 4.59 N, and the column mode does not appear there. So
+the question is which branch a slenderness warning is about. Answering it needs a frictional
+sweep deep enough to find the stick branch's own limit point, if it has one.
 
-### #21 — Fix the slenderness proxy for tapered claws
-
-`src/wheelopt/cad/constraints.py` computes `slenderness = spoke_span_mm / spoke_thickness_mm`.
-For a tapered claw that reads the **root**, which is the stiffest section, so the proxy
-understates slenderness and errs toward *accepting* a claw that buckles — the non-conservative
-direction.
-
-Left deliberately unfixed, with a comment in the code, when `claw_taper_ratio` was added:
-the correct effective section for a tapered cantilever is not obviously the root, the tip or
-the mean, and choosing one inside a millisecond pre-filter would be inventing buckling
-physics. Resolve it properly — either from tapered-column buckling theory, or by calibrating
-the proxy against FEA `detect_buckling` over a taper sweep, with the calibration recorded in
-the log. The screening threshold is currently `slenderness > 40`.
-
----
+Until then the proxy is right and the threshold is decoration.
 
 ## Deferred
 
 Real, understood, and not on the critical path.
 
-### #22 — The coupled tabulated fit stalls
-
-`fit_tabulated_law` on a *banded* spec reports 15.57% RMS with `converged=False` on the
-nominal at 24 segments, where the same fit uncoupled reaches 8.32%. The path is
-`_levenberg_marquardt` with a projection onto non-negative parameters, seeded from the
-uncoupled NNLS answer, with finite-difference Jacobians taken through `solve_equilibrium`'s
-active-set plus Newton loop.
-
-Suspects, in order: the projection fighting the damping loop (a clamped trial is evaluated,
-but the gradient still points into the infeasible region, so damping ratchets up and the
-search stalls); the piecewise-constant tangent making the inner Newton semismooth, so its
-output is not smooth in the parameters and the finite differences are noise; eight parameters
-simply being too many for a finite-difference Gauss-Newton at this cost. Analytic
-sensitivities are available in principle — the equilibrium is differentiable in the parameters
-away from active-set changes, by implicit differentiation of the KKT system.
-
-**Low priority while every new design is bandless.** `T3` banded is the comparator, not the
-target.
-
-### #23 — Drive a softening spring law in MuJoCo deliberately
-
-`TabulatedLaw` can now represent a segment with a negative tangent, and
-`src/wheelopt/sim/step_climb.py` applies the law through `qfrc_applied` — so a segment on a
-softening branch will **snap through dynamically** rather than settle. That is physically
-right and has never been run: `scripts/run_step.py --tiny --law table` passes 5/5 with a law
-that does not soften, so it does not test this and does not claim to.
-
-Build the case on purpose: take the tiny design's fitted table, hand-edit one interval to a
-negative slope that keeps the accumulated force non-negative, run the step rig. Watch for
-energy growth, whether `RigSpec.timestep_s` has to fall, and whether
-`segment_damping_n_s_per_m` is enough — it reads the tangent at `u = 0` and is therefore
-*unaffected* by a softening branch further out, which may be exactly the wrong place to read
-it. If so, derive damping from the minimum tangent instead of the initial one.
-
-### #12 — Reconsider the default `contact_stiffness_factor` of 20
-
-Measured 2026-08-08 on the plane-strain tier: dropping the factor from 20 to 5 to 2 moves the
-answer by **1.3%** (3.90 / 3.88 / 3.86 N) while turning a diverged frictional run into a
-converged one. If the result is that insensitive across a tenfold range, 20 buys nothing and
-costs conditioning.
-
-Check the same sensitivity on the 3-D tier before changing the default — the factor is in the
-cache key, so changing it invalidates every cached result. Consider also whether the
-`factor × E / element_size` scaling should be capped, since it grows without bound as the mesh
-refines.
+*Empty as of 2026-08-09 — #22 and #12 both closed. Kept as a heading because the distinction
+it draws is a real one and the list will fill again.*
 
 ---
 
@@ -234,8 +143,14 @@ Kept so the numbering stays unambiguous. The evidence for each is in
 | 25 | `scripts/explore.py`, the manual playground and its HTML report | 2026-08-08 — a manual playground |
 | 24 | Separate tip slip from structural response in the claw curve | 2026-08-08 — stick or slip |
 | 26 | Settle how the ring resolves a frictionless contact force | 2026-08-09 — MuJoCo settles #26 |
+| 27 | Replace the ring's tangential slide with a hinge at the claw root | 2026-08-09 — the root hinge, and the damper |
+| 19 | Re-derive the `n_spokes` lower bound for claws | 2026-08-09 — the claw family's two screening gaps |
+| 21 | Fix the slenderness proxy for tapered claws | 2026-08-09 — same entry |
+| 23 | Drive a softening spring law in MuJoCo deliberately | 2026-08-09 — a softening segment, uneventful |
+| 22 | Fix the coupled tabulated fit, which stalls | 2026-08-09 — #22 and #12: two deferred items |
+| 12 | Reconsider the default `contact_stiffness_factor` of 20 | 2026-08-09 — same entry |
 
-Three of these closed differently from how their titles read, which is worth knowing before
+Several of these closed differently from how their titles read, which is worth knowing before
 trusting one:
 
 - **#9 was never run and has no log entry.** It existed only as a workaround for a supposed
@@ -245,6 +160,35 @@ trusting one:
   if the 2-D tier's frictionless restriction ever needs lifting.
 - **#16 was titled "tabulated *monotone* law"** and closed by establishing that monotonicity
   was the thing to remove.
+- **#19 closed by moving the bound the other way.** It expected to widen `n_spokes` downward
+  for claws and the measurement said a passive claw wheel wants **more** tips, not fewer —
+  twelve, against the six already in the bounds. `PARAM_BOUNDS` is therefore unchanged and the
+  claw-specific limit is a warning that fires only without a band.
+- **#21 fixed the proxy and left the threshold**, which is now #28.
+- **#22 was a cost fault, not an accuracy one.** The projection *was* the culprit, exactly as
+  its suspect list said, and the free-block step cut it from 400 iterations and 4004 residual
+  evaluations to **4 and 37** with an honest `converged=True`. But the error moved 14.55% →
+  **14.54%**. The 8.32% it was framed against belongs to a *bandless* fit, which is a different
+  problem, not the same one solved better. The other two suspects — finite-difference noise and
+  too many parameters — are refuted.
+- **#12 changed two things, and the second was not the one it was filed for.** The default
+  factor moved 20 → 5 as expected (0.7–0.8% of the answer on the 3-D tier, 3 cutbacks to 0).
+  The cap it asked about "for consideration" turned out to be **load-bearing**: the factor
+  alone cannot make a fine mesh converge — at 2.5 and 1.5 mm both 20 and 5 diverge — and it is
+  the absolute penalty that decides, so `contact_length_floor_m` is a fix and not a tidy-up.
+- **#23 closed by not reproducing.** It was filed expecting dynamic snap-through and energy
+  growth; a softening segment runs cleanly at every severity tested, because the payload is a
+  dead weight rather than a prescribed displacement and there is always a branch to land on.
+  What it *did* find is that the loss-factor damping has no defined stiffness to read on a
+  softening branch, worth ~8% of cost of transport, and that its own proposed remedy — the
+  minimum tangent — is negative and would inject energy.
+- **#27 was right about the element and wrong about what it would fix.** The hinge is the
+  correct element and the FEA says so directly — the claw's tip comes *inward* as it bends,
+  by +19.7 mm measured against the hinge's +22.6 mm prediction and the slide's −13.9 mm. But
+  the driven wheel's collapse was **not** the slide's kinematics. It was the loss-factor
+  damping, integrated explicitly, on a joint whose effective inertia is 120x below the segment
+  mass it had been scaled by. Moving the same damping into the joints' native `damping`
+  attribute fixed it, and the *slide* rig runs now too.
 - **#25 found a bug in its first hour that no existing test could see.** The rigid
   comparator's inertia sat exactly on MuJoCo's triangle-inequality boundary, so whether the
   model loaded depended on decimal rounding — rejected in 3 of 54 geometries, and never on

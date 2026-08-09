@@ -64,9 +64,19 @@ BUCKLING_STIFFNESS_FRACTION = 0.10
 
 
 def build_load_curve(
-    blocks: list[DatBlock], load_case: LoadCase, ref_node: int
+    blocks: list[DatBlock], load_case: LoadCase, ref_node: int,
+    cross_inward_sign: float = 0.0,
 ) -> LoadCurve | None:
-    """Reaction force against imposed displacement at the rigid-body reference node."""
+    """Reaction force against imposed displacement at the rigid-body reference node.
+
+    Args:
+        cross_inward_sign: ``+1`` or ``-1``, whichever turns the *undriven* in-plane component
+            into an inward-positive displacement; ``0`` means don't report it. Only the
+            tangential tip case leaves an axis free, and only that case has anything to say
+            here. The sign has to be passed in because this function sees displacements and
+            not coordinates, and guessing it from the driven axis would be wrong for half the
+            possible spoke phases — see :attr:`~wheelopt.fea.results.LoadCurve.cross_delta_m`.
+    """
     forces = collect(blocks, "total_force") or collect(blocks, "force")
     displacements = collect(blocks, "displacement")
     if not forces or not displacements:
@@ -83,7 +93,7 @@ def build_load_curve(
     # before it was fixed: 7.35 N/mm against a beam-theory 0.06.
     axis = 0 if load_case.kind.is_tangential else 1
 
-    delta, force = [], []
+    delta, force, cross = [], [], []
     for t in times:
         fb, db = forces[t], displacements[t]
         # A TOTALS=ONLY block has no meaningful node id; a per-node block does.
@@ -94,6 +104,8 @@ def build_load_curve(
         # Magnitudes, so the curve is positive in compression.
         force.append(abs(float(f_row[axis])))
         delta.append(abs(float(d_row[axis])))
+        # The other in-plane axis, kept **signed**: which way it went is the whole content.
+        cross.append(cross_inward_sign * float(d_row[1 - axis]))
 
     if len(delta) < 2:
         return None
@@ -103,7 +115,10 @@ def build_load_curve(
     t = np.array(times, dtype=np.float64)
     # The amplitude peaks at t = 1: everything up to it is loading, the rest unloading.
     loading = t <= 1.0 + 1e-9
-    return LoadCurve(delta_m=d, force_n=f, loading=loading)
+    return LoadCurve(
+        delta_m=d, force_n=f, loading=loading,
+        cross_delta_m=np.array(cross, dtype=np.float64) if cross_inward_sign else None,
+    )
 
 
 def _row_for(block: DatBlock, node: int) -> np.ndarray | None:

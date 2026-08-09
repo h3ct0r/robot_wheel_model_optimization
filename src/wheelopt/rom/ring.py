@@ -61,21 +61,29 @@ __all__ = [
     "RingSpec",
     "RingState",
     "SegmentState2D",
+    "SegmentStateHinge",
     "SpringLaw",
     "TabulatedLaw",
+    "TipEquivalentLaw",
     "bending_coupling_n_per_m",
     "coupling_matrix",
     "curvature_operator",
     "hoop_coupling_n_per_m",
     "penetrations",
+    "polygon_drop_m",
     "ramp_basis",
+    "ride_height_ripple_m",
     "ring_for_design",
     "ring_force_2dof_n",
+    "ring_force_hinge_n",
     "ring_force_n",
     "segment_angles",
     "solve_equilibrium",
     "solve_equilibrium_2dof",
+    "solve_equilibrium_hinge",
     "symmetric_force_n",
+    "tip_radius_hinge_m",
+    "tip_radius_slide_m",
     "uniform_knots",
     "vertical_reaction_n",
 ]
@@ -101,6 +109,13 @@ class RingSpec:
     #: at all: it couples every segment to every other, because stretching a hoop is a global
     #: thing. Omitting it is not a small error — see :func:`hoop_coupling_n_per_m`.
     band_hoop_n_per_m: float = 0.0
+    #: Radius at which a segment is attached to the hub, metres — the claw root. Only the
+    #: **hinge** model reads it (:func:`solve_equilibrium_hinge`), because only that model has
+    #: an element with a length: a radial slide and a tangential slide both act at the tip and
+    #: never ask where the other end is. Zero means "not stated", and the hinge solver refuses
+    #: it rather than silently hinging at the wheel's centre — a claw pivoting about the axle
+    #: sweeps its tip along a circle of radius ``R`` and can therefore never indent at all.
+    root_radius_m: float = 0.0
 
     def __post_init__(self) -> None:
         if self.radius_m <= 0:
@@ -109,11 +124,26 @@ class RingSpec:
             raise ValueError("a ring needs at least three segments")
         if min(self.band_bending_n_per_m, self.band_hoop_n_per_m) < 0:
             raise ValueError("band stiffnesses must be non-negative")
+        if not 0.0 <= self.root_radius_m < self.radius_m:
+            raise ValueError(
+                f"root_radius_m must be in [0, radius_m); got {self.root_radius_m} "
+                f"against a radius of {self.radius_m}"
+            )
 
     @property
     def segment_arc_m(self) -> float:
         """Arc length one segment occupies on the undeformed ring."""
         return 2.0 * np.pi * self.radius_m / self.n_segments
+
+    @property
+    def claw_length_m(self) -> float:
+        """Root-to-tip length of one segment, metres. ``R - root_radius_m``.
+
+        Equals ``radius_m`` when the root radius was never stated, which is the degenerate
+        reading and the reason :func:`solve_equilibrium_hinge` refuses that case instead of
+        using this value.
+        """
+        return self.radius_m - self.root_radius_m
 
     @property
     def is_coupled(self) -> bool:
@@ -420,18 +450,26 @@ class TabulatedLaw:
                 + " -> ".join(f"{k:.2f}" for k in stiffness) + f" N/mm{tail}")
 
 
-def segment_angles(spec: RingSpec) -> np.ndarray:
+def segment_angles(spec: RingSpec, phase_rad: float = 0.0) -> np.ndarray:
     """Angle of each segment from the contact point, radians, in ``[-π, π)``.
 
-    Segment 0 sits at the contact point. The ring is symmetric about it, which is what makes
-    the flat-plate response a function of ``δ`` alone.
+    With ``phase_rad = 0`` — the default everywhere except the harshness metric — segment 0
+    sits at the contact point, the ring is symmetric about it, and the flat-plate response is
+    a function of ``δ`` alone.
+
+    ``phase_rad`` rotates the whole ring under a stationary contact point. For a **banded**
+    wheel that is a rotation of a nearly circular thing and changes almost nothing; for a
+    **bandless** one it is the difference between standing on a tip and standing between two,
+    which is the entire polygon effect. Half a segment pitch is the worst case. See
+    :func:`ride_height_ripple_m`.
     """
     i = np.arange(spec.n_segments)
-    theta = 2.0 * np.pi * i / spec.n_segments
+    theta = (2.0 * np.pi * i / spec.n_segments + phase_rad) % (2.0 * np.pi)
     return np.where(theta >= np.pi, theta - 2.0 * np.pi, theta)
 
 
-def penetrations(spec: RingSpec, delta_m: float) -> np.ndarray:
+def penetrations(spec: RingSpec, delta_m: float,
+                 phase_rad: float = 0.0) -> np.ndarray:
     """Radial compression of each segment at hub indentation ``δ``, metres.
 
     A segment slides along **its own radius**, so its tip sits at height
@@ -574,8 +612,13 @@ def ring_for_design(
     from ..fea.hyperelastic import for_material
 
     radius_m = params.outer_radius_mm * 1e-3
+    # The claw root, for the hinge model. Derived here rather than defaulted, so that a ring
+    # built from a design always knows where its segments are attached and only a hand-built
+    # RingSpec can be missing it.
+    root_radius_m = params.hub_radius_mm * 1e-3
     if params.rim_thickness_mm <= 0.0:
-        return RingSpec(radius_m=radius_m, n_segments=n_segments)
+        return RingSpec(radius_m=radius_m, n_segments=n_segments,
+                        root_radius_m=root_radius_m)
 
     band = for_material(material, feature_thickness_mm=params.rim_thickness_mm)
     geometry = {
@@ -591,6 +634,7 @@ def ring_for_design(
         n_segments=n_segments,
         band_bending_n_per_m=bending_coupling_n_per_m(**geometry),
         band_hoop_n_per_m=hoop_coupling_n_per_m(**geometry),
+        root_radius_m=root_radius_m,
     )
 
 
@@ -657,7 +701,8 @@ def _solve_spd(matrix: np.ndarray, rhs: np.ndarray) -> np.ndarray:
         return np.linalg.lstsq(matrix, rhs, rcond=None)[0]
 
 
-def vertical_reaction_n(spec: RingSpec, contact_force_n: np.ndarray) -> float:
+def vertical_reaction_n(spec: RingSpec, contact_force_n: np.ndarray,
+                        phase_rad: float = 0.0) -> float:
     """Total vertical load on the plate, newtons, given each segment's *radial* force.
 
     ``Σ f_r / cos θ``. The division is the whole of ADR-free issue #26 and it was wrong here
@@ -689,7 +734,7 @@ def vertical_reaction_n(spec: RingSpec, contact_force_n: np.ndarray) -> float:
     exactly zero whenever ``n_segments`` is a multiple of four, and there the quotient is
     ``0/0``. They carry no contact force in any case.
     """
-    cos_theta = np.cos(segment_angles(spec))
+    cos_theta = np.cos(segment_angles(spec, phase_rad))
     facing = cos_theta > 0.0
     return float(np.sum(contact_force_n[facing] / cos_theta[facing]))
 
@@ -725,6 +770,7 @@ def solve_equilibrium(
     max_active_set_iters: int = 64,
     newton_iters: int = 40,
     tol_m: float = 1e-14,
+    phase_rad: float = 0.0,
 ) -> RingState:
     """Equilibrium of the ring pressed onto a flat plate by ``δ``, with coupling.
 
@@ -751,8 +797,12 @@ def solve_equilibrium(
     returns rather than raises. **Cycling** of the active set is prevented by only ever
     releasing the single most-negative contact and only ever adding the single deepest
     violation, so each step strictly improves one measure.
+
+    ``phase_rad`` rotates the ring under the contact point (:func:`segment_angles`). It is a
+    bandless quantity — the band operator is a circulant on a fixed segment grid — and
+    :func:`ring_force_n` refuses it on a coupled spec for that reason.
     """
-    theta = segment_angles(spec)
+    theta = segment_angles(spec, phase_rad)
     cos_theta = np.cos(theta)
     reachable = cos_theta > 0.0
     gap = np.full(spec.n_segments, -np.inf, dtype=np.float64)
@@ -770,7 +820,7 @@ def solve_equilibrium(
             compression_m=compression,
             contact_force_n=contact,
             in_contact=active,
-            force_n=vertical_reaction_n(spec, contact),
+            force_n=vertical_reaction_n(spec, contact, phase_rad),
             iterations=1,
         )
 
@@ -820,25 +870,104 @@ def solve_equilibrium(
         compression_m=compression,
         contact_force_n=contact,
         in_contact=active,
-        force_n=vertical_reaction_n(spec, contact),
+        force_n=vertical_reaction_n(spec, contact, phase_rad),
         iterations=iterations,
         converged=converged,
     )
 
 
-def ring_force_n(spec: RingSpec, law: RadialLaw, delta_m: np.ndarray | float) -> np.ndarray:
+def ring_force_n(spec: RingSpec, law: RadialLaw, delta_m: np.ndarray | float,
+                 phase_rad: float = 0.0) -> np.ndarray:
     """Vertical reaction of the ring against a flat plate, newtons.
 
     The plate's normal force on a segment is ``f_r / cos θ``, not ``f_r · cos θ``; see
     :func:`vertical_reaction_n`. Segments past ±90° face away from the plate and are excluded
     there, so they cannot contribute a negative term.
+
+    ``phase_rad`` rotates the ring under the contact point. **Bandless only**: the coupled
+    solve is written about a fixed segment grid, so a phase there would rotate the contact set
+    without rotating the band, and it raises rather than quietly answering the wrong question.
     """
+    if phase_rad and spec.is_coupled:
+        raise ValueError(
+            "phase_rad is a bandless-ring quantity: solve_equilibrium's band operator is "
+            "written on a fixed segment grid, so rotating the contact point alone would "
+            "shear the band for free"
+        )
     deltas = np.atleast_1d(np.asarray(delta_m, dtype=np.float64))
-    out = np.array([solve_equilibrium(spec, law, float(d)).force_n for d in deltas])
+    out = np.array([solve_equilibrium(spec, law, float(d), phase_rad=phase_rad).force_n
+                    for d in deltas])
     # Scalar in, scalar out. The earlier version wrote `out if np.ndim(delta_m) else out`,
     # which is the same expression twice and so always returned a length-1 array; under
     # numpy 2 `float()` on that raises rather than quietly working.
     return out if np.ndim(delta_m) else out[0]
+
+
+def polygon_drop_m(radius_m: float, n_segments: int) -> float:
+    """Ride-height drop of a **rigid** ``n``-tip wheel over one segment pitch, metres.
+
+    ``R(1 - cos(π/n))``. A bandless wheel runs on ``n`` discrete tips, so it is a regular
+    polygon: the axle rides at ``R`` with a tip straight down and falls to ``R cos(π/n)``
+    midway between two, ``n`` times a revolution.
+
+    **Half the pitch, not the whole one.** The neighbouring quantity ``R(1 - cos(2π/n))`` is
+    the *second-claw engagement* threshold — how deep the wheel must indent before the next
+    tip reaches the ground plane — and the two get confused because they differ only in a
+    factor of two inside a cosine. This one is about where the axle sits as the wheel turns;
+    that one is about how many claws share a static load.
+
+    The rigid limit, and therefore an upper bound on the ripple a compliant wheel of the same
+    tip count shows: see :func:`ride_height_ripple_m` for what the compliance does to it.
+    """
+    if radius_m <= 0.0 or n_segments < 3:
+        raise ValueError("need a positive radius and at least three tips")
+    return float(radius_m * (1.0 - np.cos(np.pi / n_segments)))
+
+
+def ride_height_ripple_m(
+    spec: RingSpec, law: RadialLaw, load_n: float, *, samples: int = 13,
+    max_delta_m: float | None = None,
+) -> tuple[float, float, float]:
+    """How far the axle rises and falls over one segment pitch at constant load, metres.
+
+    The harshness metric ``docs/plan/TODO.md`` #19 needs, and the reason a bandless wheel
+    cannot have arbitrarily few claws: with no band the running surface is a polygon, and a
+    wheel that does not deflect by more than the polygon drop leaves the ground between tips.
+
+    Measured rather than reasoned: rotate the ring under the contact point across half a pitch
+    (symmetry makes the other half a mirror), solve ``F(δ, ψ) = load_n`` for ``δ`` at each
+    phase, and report the axle height ``R - δ`` at each. Loaded compliance shrinks the ripple
+    below :func:`polygon_drop_m`, and by how much is the answer.
+
+    Returns:
+        ``(ripple_m, delta_min_m, delta_max_m)`` — the peak-to-peak axle movement, and the
+        indentations at the two extremes. ``ripple_m`` is ``inf`` if the ring cannot carry
+        ``load_n`` at some phase within ``max_delta_m``, which is itself the answer: that wheel
+        bottoms out once a pitch.
+
+    Raises:
+        ValueError: on a coupled spec, where a phase is not defined (see :func:`ring_force_n`).
+    """
+    if spec.is_coupled:
+        raise ValueError("ride_height_ripple_m is a bandless quantity; this spec has a band")
+    if load_n <= 0.0:
+        raise ValueError("load_n must be positive")
+    ceiling = max_delta_m if max_delta_m is not None else 0.95 * spec.radius_m
+    pitch = 2.0 * np.pi / spec.n_segments
+    deltas = []
+    for phase in np.linspace(0.0, 0.5 * pitch, samples):
+        if float(ring_force_n(spec, law, ceiling, phase_rad=float(phase))) < load_n:
+            return float("inf"), float("nan"), float("nan")
+        lo, hi = 0.0, ceiling
+        for _ in range(60):
+            mid = 0.5 * (lo + hi)
+            if float(ring_force_n(spec, law, mid, phase_rad=float(phase))) < load_n:
+                lo = mid
+            else:
+                hi = mid
+        deltas.append(0.5 * (lo + hi))
+    lo_d, hi_d = float(np.min(deltas)), float(np.max(deltas))
+    return hi_d - lo_d, lo_d, hi_d
 
 
 # --------------------------------------------------------------------------------------
@@ -1039,6 +1168,264 @@ def ring_force_2dof_n(
     deltas = np.atleast_1d(np.asarray(delta_m, dtype=np.float64))
     out = np.array([
         solve_equilibrium_2dof(spec, radial_law, tangential_law, float(d)).force_n
+        for d in deltas
+    ])
+    return out if np.ndim(delta_m) else out[0]
+
+
+# --------------------------------------------------------------------------------------
+# The hinge: the same second freedom, with the kinematics a claw actually has.
+
+
+@dataclass(frozen=True, slots=True)
+class SegmentStateHinge:
+    """A ring of hinged claws solved at one indentation."""
+
+    #: Axial shortening of every claw, metres. Positive inward, as in the radial-only model.
+    compression_m: np.ndarray
+    #: Rotation of every claw about its own root, radians. Signed: positive carries the tip
+    #: toward ``+e_t``, so a claw ahead of the contact point and its mirror behind it rotate
+    #: opposite ways and the ring's total is zero by symmetry.
+    rotation_rad: np.ndarray
+    #: Vertical force the plate applies to each claw tip, newtons. Non-negative.
+    contact_force_n: np.ndarray
+    in_contact: np.ndarray
+    #: Total vertical reaction, newtons — the plain sum of the multipliers, which *are* the
+    #: vertical forces. Directly comparable with :attr:`SegmentState2D.force_n`.
+    #:
+    #: For where the tips ended up — the one quantity that distinguishes this model from
+    #: :class:`SegmentState2D`, and the whole of ``TODO.md`` #27 — pass
+    #: :attr:`compression_m` and :attr:`rotation_rad` to :func:`tip_radius_hinge_m`.
+    force_n: float
+
+
+def tip_radius_hinge_m(
+    spec: RingSpec, compression_m: np.ndarray | float, rotation_rad: np.ndarray | float
+) -> np.ndarray:
+    """Distance of a hinged claw's tip from the hub centre, metres.
+
+    ``√(R_root² + ℓ² + 2 R_root ℓ cos φ)`` with ``ℓ = L - u`` — the law of cosines on the
+    triangle root/centre/tip. **Decreasing in ``|φ|``**, which is the point.
+
+    Compare the two-slide segment of :func:`solve_equilibrium_2dof`, whose tip sits at
+    ``√((R - u)² + v²)`` and therefore moves *outward* as it splays. On the R 60 mm claw
+    (root 20 mm, ℓ 40 mm) the two disagree by +2.1% of ``R`` at 10 mm of tip travel, +8.4% at
+    20 mm and +30.1% at 36 mm, and the sign is the destabilising one: a segment that grows
+    longer as it splays presses harder into the ground, which splays it further.
+    """
+    ell = spec.claw_length_m - np.asarray(compression_m, dtype=np.float64)
+    root = spec.root_radius_m
+    cos_phi = np.cos(np.asarray(rotation_rad, dtype=np.float64))
+    return np.sqrt(np.maximum(root * root + ell * ell + 2.0 * root * ell * cos_phi, 0.0))
+
+
+def tip_radius_slide_m(
+    spec: RingSpec, compression_m: np.ndarray | float, slip_m: np.ndarray | float
+) -> np.ndarray:
+    """The same quantity for the two-slide segment: ``√((R - u)² + v²)``. **Increasing in
+    ``|v|``.** Here so the two kinematics can be compared in one expression rather than in
+    prose; see :func:`tip_radius_hinge_m`."""
+    radial = spec.radius_m - np.asarray(compression_m, dtype=np.float64)
+    slip = np.asarray(slip_m, dtype=np.float64)
+    return np.sqrt(radial * radial + slip * slip)
+
+
+@dataclass(frozen=True, slots=True)
+class TipEquivalentLaw:
+    """A hinge's moment-rotation law, restated as the force-deflection law of its own tip.
+
+    ``M(φ)`` at arm ``a`` is ``F(s) = M(s/a)/a`` for small rotations, and the tangent scales by
+    ``a²``. That is a change of coordinates, not a model: it exists so that every rule already
+    written for a **linear** segment law — the explicit-integration timestep bound, the
+    hysteretic damping equivalence — can be applied to a hinge without being rewritten in
+    angular form and without a second chance to get a factor of ``a`` wrong. Convert the
+    damping the rule returns back with :func:`~wheelopt.rom.mjcf.tangential_damping`.
+
+    Deliberately **not** what drives the joint: MuJoCo needs the real moment, and
+    ``solve_equilibrium_hinge`` needs the real moment, so both take ``hinge_law`` itself.
+    """
+
+    hinge_law: RadialLaw
+    arm_m: float
+
+    def __post_init__(self) -> None:
+        if self.arm_m <= 0.0:
+            raise ValueError(f"arm_m must be positive; got {self.arm_m}")
+
+    def force_n(self, u_m: np.ndarray | float) -> np.ndarray:
+        return np.asarray(
+            self.hinge_law.force_n(np.asarray(u_m, dtype=np.float64) / self.arm_m)
+        ) / self.arm_m
+
+    def stiffness_n_per_m(self, u_m: np.ndarray | float) -> np.ndarray:
+        return np.asarray(
+            self.hinge_law.stiffness_n_per_m(np.asarray(u_m, dtype=np.float64) / self.arm_m)
+        ) / (self.arm_m * self.arm_m)
+
+    @property
+    def is_valid_spring(self) -> bool:
+        return self.hinge_law.is_valid_spring
+
+    @property
+    def is_monotone_nonneg(self) -> bool:
+        return self.hinge_law.is_monotone_nonneg
+
+
+def solve_equilibrium_hinge(
+    spec: RingSpec,
+    radial_law: RadialLaw,
+    hinge_law: RadialLaw,
+    delta_m: float,
+    *,
+    bisection_iters: int = 60,
+) -> SegmentStateHinge:
+    """Equilibrium of a **bandless** ring of claws hinged at the hub, on a flat plate.
+
+    The replacement for :func:`solve_equilibrium_2dof` demanded by ``docs/plan/TODO.md`` #27.
+    Same physics, same contact law, same per-segment factorisation — a different *element*.
+    There, the second freedom is a slide at the tip; here it is a rotation at the root, and a
+    claw is a cantilever off a hub, so the rotation is the honest one. What changes is not the
+    stiffness but the kinematics: a hinged tip swings on an arc of fixed radius and therefore
+    comes *inward* as it rotates, where a sliding one goes outward.
+    :func:`tip_radius_hinge_m` carries the measurement.
+
+    The geometry. Claw ``i`` is rooted at radius ``R_root`` on the ray at angle ``θ_i`` from
+    the contact point, and reaches its tip a further ``ℓ = L - u`` along that ray, where
+    ``L = R - R_root`` and ``u`` is the claw's axial shortening. Rotating the claw about its
+    root by ``φ`` swings the tip through the same angle, so the tip's downward extent is
+
+        d(u, φ) = R_root cos θ + (L - u) cos(θ + φ)
+
+    — the two terms are the two sides of the triangle, and ``θ + φ`` appearing as a sum is the
+    whole simplification: rotating the claw is indistinguishable from *moving the claw round
+    the wheel*, as far as this segment's own contact is concerned. Height above the plate is
+    ``y = (R - δ) - d``, and at ``φ = 0`` it collapses to ``(R - δ) - R cos θ``, the
+    radial-only model, exactly.
+
+    The forces. A frictionless plate pushes straight up with ``λ ≥ 0``, so stationarity of
+    ``U_r(u) + U_φ(φ) - λ y`` against each freedom gives
+
+        f_r(u) = λ cos(θ + φ),    M(φ) = λ (L - u) sin(θ + φ),    λ ≥ 0, y ≥ 0, λ y = 0
+
+    Note the second: ``(L - u) sin(θ + φ)`` is the moment arm of a *vertical* force about the
+    root, which is a lever arm that shortens as the claw folds — and that is the stabilising
+    feedback the slide model lacked. Note also that ``M`` is a **moment**, N·m against a
+    rotation in radians, so ``hinge_law`` is a :class:`RadialLaw` only in the duck-typed sense;
+    :func:`~wheelopt.rom.fit.hinge_law_from_tip_curve` builds one from a measured tip curve and
+    is the only intended source.
+
+    Solving: **one bisection per claw**, on the contact angle ``ψ = θ + φ`` rather than on
+    ``λ``. Written in ``λ`` this is two coupled equations needing a bisection inside a
+    bisection, which costs about a thousand times more work and stacks two tolerances; in
+    ``ψ`` it collapses. A claw in contact has ``y = 0``, so with ``c = (R - δ) - R_root cos θ``
+    fixed by the geometry,
+
+        L - u = c / cos ψ,     λ = f_r(u) / cos ψ,     M(ψ - θ) = f_r(u) · c · sin ψ / cos²ψ
+
+    — the first is the contact condition solved for the claw's remaining length, the second is
+    the radial stationarity (and is ``f_r/cos``, the #26 result, arriving a third way), and
+    substituting both into the moment condition leaves one scalar equation in ``ψ``.
+
+    It is bracketed by construction. The lower end is ``ψ = |θ|``, the unrotated claw, where
+    the residual is ``-f_r c tan θ / cos θ ≤ 0``. The upper end is ``ψ_max = arccos(c/L)``,
+    where ``u = 0`` — the claw has stood back up to its full length — and beyond which it would
+    have to stretch; there ``f_r(0) = 0`` and the residual is ``M(ψ_max - θ) > 0``. A claw in
+    contact always has ``|θ| < ψ_max``, so the sign change is guaranteed and no iteration can
+    run away. Claws behind the contact point are the mirror image, solved as ``|θ|`` with the
+    sign restored, which is why ``hinge_law`` is applied symmetrically.
+
+    Raises:
+        ValueError: if the spec has a band (the factorisation needs independent segments), or
+            if ``root_radius_m`` is zero — a claw hinged at the wheel's centre sweeps its tip
+            round a circle of radius ``R`` and can never indent, so the model would silently
+            report a rigid wheel.
+    """
+    if spec.is_coupled:
+        raise ValueError(
+            "solve_equilibrium_hinge factorises per segment, which needs independent "
+            "segments; this spec has a band. Use solve_equilibrium for the radial-only "
+            "coupled model"
+        )
+    if spec.root_radius_m <= 0.0:
+        raise ValueError(
+            "a root hinge needs a root: RingSpec.root_radius_m is 0, which puts the pivot at "
+            "the wheel's centre, where rotating a claw moves its tip along a circle of "
+            "radius R and cannot indent at all. Build the spec with ring_for_design, which "
+            "takes it from hub_radius_mm"
+        )
+
+    theta = segment_angles(spec)
+    n = spec.n_segments
+    length, root = spec.claw_length_m, spec.root_radius_m
+    hub = spec.radius_m - delta_m
+
+    compression = np.zeros(n, dtype=np.float64)
+    rotation = np.zeros(n, dtype=np.float64)
+    contact = np.zeros(n, dtype=np.float64)
+    active = np.zeros(n, dtype=bool)
+
+    for i in range(n):
+        abs_theta = abs(float(theta[i]))
+        sign = 1.0 if theta[i] >= 0.0 else -1.0
+        cos_theta = np.cos(abs_theta)
+        # A claw facing away from the plate can never reach it. Rotating only ever raises the
+        # tip — the downward extent is R_root cos θ + (L - u) cos ψ and ψ only grows — so a
+        # claw that misses the plate unrotated misses it however it moves. Excluded outright,
+        # as in the other two models.
+        if cos_theta <= 0.0 or hub >= spec.radius_m * cos_theta:
+            continue
+
+        c = hub - root * cos_theta
+
+        def residual(psi: float, c: float = c, abs_theta: float = abs_theta) -> float:
+            cos_psi = np.cos(psi)
+            u = length - c / cos_psi
+            radial = float(radial_law.force_n(u)) if u > 0.0 else 0.0
+            return (float(hinge_law.force_n(psi - abs_theta))
+                    - radial * c * np.sin(psi) / (cos_psi * cos_psi))
+
+        lo = abs_theta
+        hi = float(np.arccos(min(max(c / length, -1.0), 1.0)))
+        if residual(lo) >= 0.0 or hi <= lo:
+            # θ = 0, where the vertical force is along the claw and there is nothing to rotate
+            # about. Not a fallback: it is the exact answer, and the branch exists because
+            # bisecting an interval with no sign change would return its midpoint instead.
+            psi = lo
+        else:
+            for _ in range(bisection_iters):
+                mid = 0.5 * (lo + hi)
+                if residual(mid) < 0.0:
+                    lo = mid
+                else:
+                    hi = mid
+            psi = 0.5 * (lo + hi)
+
+        cos_psi = np.cos(psi)
+        u = length - c / cos_psi
+        compression[i] = u
+        rotation[i] = sign * (psi - abs_theta)
+        contact[i] = float(radial_law.force_n(u)) / cos_psi if u > 0.0 else 0.0
+        active[i] = True
+
+    return SegmentStateHinge(
+        compression_m=compression,
+        rotation_rad=rotation,
+        contact_force_n=contact,
+        in_contact=active,
+        force_n=float(np.sum(contact)),
+    )
+
+
+def ring_force_hinge_n(
+    spec: RingSpec,
+    radial_law: RadialLaw,
+    hinge_law: RadialLaw,
+    delta_m: np.ndarray | float,
+) -> np.ndarray:
+    """Vertical reaction of the hinged-claw ring. Scalar in, scalar out."""
+    deltas = np.atleast_1d(np.asarray(delta_m, dtype=np.float64))
+    out = np.array([
+        solve_equilibrium_hinge(spec, radial_law, hinge_law, float(d)).force_n
         for d in deltas
     ])
     return out if np.ndim(delta_m) else out[0]
