@@ -1713,3 +1713,257 @@ signatures should be re-run across it — the climb result is the one most likel
 it should move *upward*.
 
 **Gates.** No code changed; unit suite 508/508, ruff at the standing 71.
+
+---
+
+## 2026-08-08 — Measuring a claw's tangential stiffness: 134×, and two bugs that read as physics
+
+**Hypothesis.** Yesterday's scoping arithmetic put a claw's radial stiffness 576× above its
+tangential one, from `EA/L` against `3EI/L³`. Measure it instead of estimating it, which needs
+an FEA case that loads the tip tangentially. First half of TODO #20.
+
+### What was built
+
+Two contact-free load cases, `TIP_RADIAL` and `TIP_TANGENTIAL`, with
+`LoadCaseKind.needs_indenter` selecting the deck shape. There is no indenter, no surface
+interaction, no friction and no contact pair; instead the tread node set is *itself* the rigid
+body, tied to `NREF`, and that node is driven. `NREF` means the same thing in both deck shapes,
+so parsing and extraction are untouched.
+
+That is a modelling claim, not a convenience: **a ring segment is a rigid body on a slide**, so
+driving the tread rigidly is the ring's own kinematics written out in FEA. It also removes the
+contact model from the measurement, which is the only way to tell a structural answer from a
+contact one.
+
+### The measurement
+
+Nominal claw, plane strain, delta to 6 mm:
+
+| | at 1 mm | at 6 mm |
+|---|---|---|
+| tip, radial | **24.81 N/mm** | 37.73 N |
+| tip, tangential | **0.1851 N/mm** | 1.77 N |
+
+**Measured ratio 134×**, against the 576× estimated. The estimate was not wrong so much as
+answering a different question, and the gap is explainable rather than mysterious: the rigid
+tip cannot *rotate*, so the right closed form is a **guided** cantilever `12EI/L³` = 0.234 N/mm,
+not a free-tip `3EI/L³` = 0.0585. Measured 0.185 sits just below the guided value, which is
+what a section tapering 7 → 3.5 mm toward the tip should do. Radial agrees the same way:
+24.81 N/mm rising to a secant near the analytic `EA/L` = 33.70 as the claw straightens.
+
+**134× stands as the finding.** The ring gives each segment the stiff direction and none of the
+soft one, and a step edge loads the soft one.
+
+### Two bugs, both of which produced plausible numbers
+
+Neither announced itself. Both were caught by having a closed form to compare against — the
+first useful thing the scoping arithmetic did.
+
+1. **The tangential boundary condition was inverted.** The comment said "leave the radial DOF
+   free"; the code held it. A claw bending tangentially sweeps its tip along an *arc*, so it
+   must come radially inward; forbidding that makes it stretch along its own axis instead, and
+   the case reports the **axial** mode. Measured while wrong: 7.35 N/mm — 125× the beam-theory
+   value and *constant with displacement*, because nothing was bending.
+2. **The extractor hardcoded the y axis.** `build_load_curve` read component 1 for force and
+   displacement. The tangential case drives x, so displacement came back **identically zero**
+   while the force column filled with rising, believable numbers. A zero-displacement curve
+   then made `np.interp` return the last force for every query — which is where the suspiciously
+   constant "7.354 N at both 1 mm and 3 mm" came from. The axis is now chosen from the load
+   case.
+
+The second is the sharper one: a curve with a **zero** independent variable and a healthy
+dependent variable still produced a stiffness that could be quoted. Both are pinned by tests
+in `tests/test_fea_deck.py` — the tangential test asserts the radial DOF is *absent* from the
+boundary block, which is the assertion that would have failed.
+
+### Where this leaves #20
+
+The FEA half is done and measured. The ROM half is not: `ring.py` still gives each segment one
+degree of freedom. That is the next piece — a second DOF with its own law, the MJCF joint, a
+`ROM_VERSION` bump, and the step-climb signatures re-run across it.
+
+**Gates.** Unit suite **514/514** (6 new), ruff at the standing 71.
+
+---
+
+## 2026-08-09 — A two-freedom ring, and a question it raises about the one-freedom one
+
+**Hypothesis.** With the tangential stiffness measured (134× below radial), give the ring
+segment a second degree of freedom and see what it changes. Second half of TODO #20.
+
+### What was built
+
+`solve_equilibrium_2dof` in `rom/ring.py`, plus `SegmentState2D`, `ring_force_2dof_n` and
+`symmetric_force_n`. Deliberately **additive** rather than a rewrite of `solve_equilibrium`:
+without a band the segments are independent, so the two-freedom problem factorises into `N`
+three-unknown problems instead of one `2N` system. Bandless is every design this project now
+builds; a banded spec is refused rather than approximated.
+
+Per segment, with `y(u,v) = (R − δ) − (R − u)cos θ + v sin θ` the height above the plate and a
+purely vertical contact force `λ`:
+
+    f_r(u) = λ cos θ,   f_t(v) = λ sin θ,   λ ≥ 0,  y ≥ 0,  λy = 0
+
+`f_r` and `f_t` increasing ⇒ `y` decreasing in `λ` ⇒ a one-dimensional **bisection** on `λ`
+that cannot fail to bracket and needs no initial guess. The inner inverse is bisection too,
+because a `TabulatedLaw`'s tangent can be exactly zero over an interval — a buckled segment at
+constant load — which is a legitimate law and a division by zero for a Newton inverse.
+
+### What it changes
+
+On the nominal claw ring (12 segments, R 85 mm, k_r 24.81 N/mm, k_t 0.1851 N/mm):
+
+| δ, mm | rigid-tangential | 2-dof | ratio | in contact | max splay, mm |
+|---|---|---|---|---|---|
+| 8 | 198.5 | 198.5 | 1.000 | 1 | 0.00 |
+| 11 | 272.9 | 272.9 | 1.000 | 1 | 0.00 |
+| 12 | 328.1 | 318.4 | 0.970 | 3 | 1.20 |
+| 18 | 774.6 | 670.0 | 0.865 | 3 | 12.9 |
+| 25 | 1295.5 | 1080.3 | 0.834 | 3 | 26.6 |
+
+**It is exactly inert until a second claw engages**, at `R(1 − cos 30°) = 11.4 mm` for twelve
+claws. A lone segment sits at `θ = 0`, where `sin θ = 0` and there is nothing to splay. Two
+consequences worth stating plainly: the flat-plate fit **at design load is unaffected** (24.5 N
+is δ ≈ 1 mm, deep in the single-claw regime), and everything this freedom buys is at large
+indentation or at angled contact — i.e. at a step, which is where it was wanted.
+
+### The bug the symmetry test caught
+
+`_invert` checked `force_n <= 0` and returned zero **before** the sign handling, so the
+symmetric branch was unreachable — and it was marked `# pragma: no cover`, which should have
+been read as a warning rather than written as a note. Segments on one side of the contact
+point splayed and their mirrors did not, so the ring walked sideways under a symmetric load.
+Found by asserting `sum(slip) == 0`, not by reading the code.
+
+### The question this raises about the existing ring
+
+Building the second freedom forced the contact force to be written down explicitly, and the
+two models **disagree about how it resolves**. At δ = 18 mm, 12 segments, per segment:
+
+| θ | `f_r` | `f_r·cos θ` (existing) | `f_r/cos θ` (2-dof) |
+|---|---|---|---|
+| 0° | 446.53 | 446.53 | 446.53 |
+| ±30° | 189.40 | 164.03 | 218.70 |
+
+Total 774.58 N against 883.93 N — **a factor of 1.141**, and it grows with how far the patch
+spreads. The *kinematics* agree exactly; only the force resolution differs.
+
+The argument for `f_r/cos θ`: a frictionless plate can only push **vertically**, and the
+segment's tangential equilibrium is supplied by its own slide joint, which is internal to the
+wheel. Virtual work along the joint axis then gives `f_r(u) = λ cos θ`, so the plate sees
+`λ = f_r/cos θ`. The argument for `f_r·cos θ` — the one in `ring.py` and in every fit so far —
+treats the segment as a strut carrying force along its own axis and takes the vertical
+component.
+
+**Evidence on the other side**, and it is why this is not being changed today: the MuJoCo
+realisation, which computes real contacts and real joint reactions, agreed with the existing
+analytic ring to **0.03–0.05%** below 4 mm (2026-08-08). At that depth the off-axis segments
+carry little, so the test is weak — `cos²15° = 0.933` on a small contribution — and the
+disagreement did grow to 6.1–6.6% at 5–6 mm, which was attributed to contact discretisation.
+Some of that may be this.
+
+**Filed as TODO #26 rather than fixed.** It is a real question with real evidence both ways,
+the fits absorb it into the spring law (so `F(δ)` still matches the FEA either way, and it is
+the *inferred law* that would be distorted), and settling it needs a deliberate MuJoCo
+experiment at a depth where the off-axis segments carry real load — not an argument at the end
+of a session. The new tests were written to assert only what is verified: the two solvers'
+**compressions** agree to 1e-5 in the rigid-tangential limit, and the softening comparison is
+made against the same solver rather than across the disputed quantity.
+
+**Gates.** Unit suite **521/521** (7 new), ruff at the standing 71.
+
+## 2026-08-09 — MuJoCo settles #26: the ring divided where it multiplied
+
+**Hypothesis.** The ring's frictionless contact force resolves as `f_r/cos θ`, not
+`f_r·cos θ`. MuJoCo assumes neither, so it can decide. Closes TODO #26.
+
+### The measurement
+
+Not a comparison of totals. MuJoCo's round capsules engage a wider set of segments than the
+analytic scallop geometry does — that is a **separate**, already-recorded disagreement, and
+comparing sums would have confounded the two. Instead: press the ring, let it settle, and read
+back MuJoCo's *own* per-segment joint position `u_i` and its *own* per-contact force `λ_i`.
+Then ask which relation holds between them.
+
+Config: bandless ring, R 85 mm, 24 segments, a **linear** law `a = 24.81 kN/m` so nothing is
+hidden in a nonlinearity, `condim="1"`, δ = 2–20 mm, settled to `max|q̇| < 1e-13`.
+
+| δ, mm | segment | θ | `u` from MuJoCo, mm | `λ` measured, N | `f_r·cos θ` | `f_r/cos θ` |
+|---|---|---|---|---|---|---|
+| 6 | 0 | 0° | 5.9442 | 147.475 | 147.475 | 147.475 |
+| 6 | ±1 | ±15° | 3.3623 | 86.360 | 80.575 | 86.360 |
+| 15 | ±1 | ±15° | 12.6541 | 325.024 | 303.252 | 325.024 |
+| 15 | ±2 | ±30° | 4.9679 | 142.321 | 106.741 | 142.321 |
+
+Worst relative error over the whole sweep: **`f_r/cos θ` 6.2e-11, `f_r·cos θ` 2.5e-1**. The
+0.25 is not approximate — it is exactly `1 − cos²30°`. The measured *horizontal* contact force
+is exactly 0.0 N at every contact, which is the premise the derivation rests on.
+
+**So the incumbent was wrong**, and the virtual-work argument in `vertical_reaction_n` is the
+reason: with the plate pushing only along its normal, the generalised force on a radial slide
+is `λ cos θ`, so equilibrium of the segment reads `f_r(u) = λ cos θ` and the plate carries
+`λ = f_r/cos θ`. `Σ f_r·cos θ` is the vertical part of a force pointing along the segment's own
+axis — the segment as a two-force strut — which needs a horizontal `f_r sin θ` the plate has no
+way to supply.
+
+### What it actually changes, which is less than it sounds
+
+Fixed in `solve_equilibrium` (both branches) via a new `vertical_reaction_n`; `ROM_VERSION` to
+**`rom-0.4.0`**, and this is the first bump that genuinely invalidates prior fits.
+
+**The tiny design barely moves.** Re-fitting its cached FEA curve under both resolutions:
+
+| segments | `a` fixed, N/m | `a` old, N/m | ratio | RMS fixed | RMS old |
+|---|---|---|---|---|---|
+| 24 | 171.88 | 178.33 | 0.964 | 0.68% | 0.69% |
+| 36 | 129.24 | 129.72 | 0.996 | 1.23% | 1.19% |
+| 48 | 98.98 | 99.26 | 0.997 | 1.24% | 1.22% |
+
+Because this design's patch is three segments wide, so the correction only ever acts at ±15°
+(`cos² = 0.933`) on the two segments carrying least. Note the RMS gets marginally *worse* at 36
+and 48 — 0.03pp, well inside the noise of a fit compensating for a geometry mismatch either
+way, and not a reason to prefer a wrong model.
+
+Where it is not small is where the patch spreads: **14.1%** on the 12-claw ring at δ = 18 mm
+(the discrepancy that raised #26 in the first place), because that patch reaches ±30°. Few
+segments, deep indentation and a step edge are exactly the regime the claw redirection is
+heading into, so this needed fixing before the claw ROM is built on it, not after.
+
+**The 5–6 mm MuJoCo gap shrank, as predicted, and did not close.** `run_rom.py --tiny --mujoco`,
+24 segments, re-fitted:
+
+| δ, mm | ring N | mujoco N | gap now | gap before |
+|---|---|---|---|---|
+| 1–4 | — | — | 0.03–0.05% | 0.03–0.05% |
+| 5.0 | 2.690 | 2.819 | 4.80% | 6.6% |
+| 6.0 | 4.341 | 4.514 | 4.00% | 6.1% |
+
+Both halves of that matter. The sub-4 mm agreement is *unchanged*, which it must be — one
+segment dominates there and `cos 0° = 1`. The 5–6 mm gap fell by about a third, and the
+remainder is the contact-discretisation effect it was originally attributed to: MuJoCo's
+capsules bridge the scallops and touch on more segments than the analytic active set. So the
+old attribution was **partly** right, and partly cover for this.
+
+### Two things caught while writing the tests
+
+**A capsule on a plane is two contacts, not one.** MuJoCo resolves the line contact at the ends
+of the capsule axis, each carrying half the load. The first version of the regression test
+asserted per contact and failed by exactly 2.000 on every segment — which reads as a factor-of-two
+physics error and is a factor-of-two bookkeeping one. Forces are now accumulated per segment.
+
+**The hand-computed reference had to be computed, not recalled.** The first literal in the test
+was 11.3361 N from mental arithmetic; the true value is 11.3354970. Pinning the wrong constant
+would have been the same class of failure as the bug being fixed.
+
+### Why no existing test caught this
+
+All 521 passed after the change, which is the finding. Every ring-force test in the suite
+checks a *shape* — monotone in δ, stiffer at more segments, zero at zero indentation — and
+`cos²θ` is a positive factor that scales a curve without bending it. Nothing pinned a
+magnitude, and the fit absorbed the rest into the spring law, so `F(δ)` matched the FEA either
+way. This is the third instance of the same failure recorded in this log: **a model checked
+only against itself**. Now pinned by `TestVerticalReaction`, which computes the three-term sum
+from literal angles rather than through `segment_angles`/`penetrations`, and by the MuJoCo
+arbitration above kept as a regression test.
+
+**Gates.** Unit suite **525/525** (4 new), ruff at the standing 71.

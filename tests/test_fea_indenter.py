@@ -18,13 +18,19 @@ RADIUS = 0.070
 WIDTH = 0.040
 
 
+#: Only the contact cases have an indenter at all. `TIP_RADIAL` / `TIP_TANGENTIAL` prescribe
+#: the tread directly and `build_indenter` rightly refuses them, so sweeping every member of
+#: the enum here would be testing that a function fails.
+CONTACT_KINDS = tuple(k for k in LoadCaseKind if k.needs_indenter)
+
+
 def build(kind: LoadCaseKind, **spec_kwargs):
     return build_indenter(kind, IndenterSpec(**spec_kwargs), RADIUS, WIDTH)
 
 
 class TestElementValidity(unittest.TestCase):
     def test_all_elements_have_positive_volume(self):
-        for kind in LoadCaseKind:
+        for kind in CONTACT_KINDS:
             for fillet in (0.0, 0.0005, 0.001, 0.003):
                 with self.subTest(kind=kind.value, fillet=fillet):
                     m = build(kind, edge_fillet_m=fillet)
@@ -41,7 +47,7 @@ class TestElementValidity(unittest.TestCase):
         self.assertTrue(bool((vols > 0).all()))
 
     def test_connectivity_is_within_range(self):
-        for kind in LoadCaseKind:
+        for kind in CONTACT_KINDS:
             with self.subTest(kind=kind.value):
                 m = build(kind)
                 self.assertEqual(m.elements.shape[1], 8)
@@ -56,7 +62,7 @@ class TestElementValidity(unittest.TestCase):
 
 class TestPlacement(unittest.TestCase):
     def test_sits_below_the_wheel_with_a_gap(self):
-        for kind in LoadCaseKind:
+        for kind in CONTACT_KINDS:
             with self.subTest(kind=kind.value):
                 m = build(kind)
                 top = float(m.nodes_m[:, 1].max())
@@ -65,7 +71,7 @@ class TestPlacement(unittest.TestCase):
 
     def test_overhangs_the_wheel_width(self):
         """The patch must never run off the master surface."""
-        for kind in LoadCaseKind:
+        for kind in CONTACT_KINDS:
             with self.subTest(kind=kind.value):
                 m = build(kind)
                 self.assertGreater(float(m.nodes_m[:, 2].max()), WIDTH / 2)
@@ -87,7 +93,7 @@ class TestPlacement(unittest.TestCase):
         self.assertGreater(span, 0.045)
 
     def test_reference_point_is_on_the_wheel_centreline(self):
-        for kind in LoadCaseKind:
+        for kind in CONTACT_KINDS:
             with self.subTest(kind=kind.value):
                 m = build(kind)
                 self.assertAlmostEqual(float(m.ref_point_m[2]), 0.0)
@@ -137,7 +143,7 @@ class TestContactFace(unittest.TestCase):
         Checked geometrically: those four nodes must be no deeper than the rest of the
         element, i.e. they are the outermost face toward the wheel.
         """
-        for kind in LoadCaseKind:
+        for kind in CONTACT_KINDS:
             with self.subTest(kind=kind.value):
                 m = build(kind)
                 for h in m.elements[:40]:

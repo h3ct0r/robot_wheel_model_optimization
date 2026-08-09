@@ -64,8 +64,13 @@ def fixture_mesh() -> FeaMesh:
 def build(load_case: LoadCase | None = None, mesh: FeaMesh | None = None):
     case = load_case or LoadCase()
     m = mesh or fixture_mesh()
-    ind = build_indenter(
-        case.kind, case.indenter, PARAMS.outer_radius_mm * 1e-3, PARAMS.width_mm * 1e-3
+    # The tip cases prescribe the tread directly and take no indenter at all.
+    ind = (
+        build_indenter(
+            case.kind, case.indenter, PARAMS.outer_radius_mm * 1e-3, PARAMS.width_mm * 1e-3
+        )
+        if case.kind.needs_indenter
+        else None
     )
     return build_deck(
         m, ind, PARAMS, MATERIAL, HYPER, case, SolverSpec(),
@@ -252,6 +257,61 @@ class TestTimePoints(unittest.TestCase):
             if "TIME POINTS=" in line and not line.startswith("*TIME POINTS"):
                 with self.subTest(line=line):
                     self.assertIn("TIME POINTS=TP", line)
+
+
+class TestPrescribedTipDeck(unittest.TestCase):
+    """The contact-free cases: no indenter, the tread itself driven as a rigid body."""
+
+    def deck(self, kind: LoadCaseKind) -> str:
+        return build(LoadCase(kind=kind, delta_max_m=0.006)).text
+
+    def test_there_is_no_contact_at_all(self):
+        """The point of these cases: nothing about the answer can come from the contact
+        model, because there is not one."""
+        text = self.deck(LoadCaseKind.TIP_RADIAL)
+        for keyword in ("*CONTACT PAIR", "*SURFACE INTERACTION", "*FRICTION",
+                        "*CONTACT PRINT", "EINDENT"):
+            self.assertNotIn(keyword, text)
+
+    def test_the_tread_is_the_rigid_body(self):
+        text = self.deck(LoadCaseKind.TIP_RADIAL)
+        self.assertIn("*RIGID BODY, NSET=NTREAD", text)
+
+    def test_radial_drives_y_and_holds_x(self):
+        text = self.deck(LoadCaseKind.TIP_RADIAL)
+        ref = _ref_node(text)
+        self.assertIn(f" {ref}, 2, 2, 6.000000000e-03", text)   # driven
+        self.assertIn(f" {ref}, 1, 1, 0.0", text)               # tangential held
+
+    def test_tangential_drives_x_and_leaves_y_free(self):
+        """The bug this pins: holding y as well forces the claw to *stretch* instead of
+        bend, because a bending tip sweeps an arc and must come radially inward. Measured
+        while it was wrong — 7.35 N/mm against a beam-theory 0.06, and constant with
+        displacement because nothing was bending."""
+        text = self.deck(LoadCaseKind.TIP_TANGENTIAL)
+        ref = _ref_node(text)
+        self.assertIn(f" {ref}, 1, 1, 6.000000000e-03", text)   # driven
+        self.assertNotIn(f" {ref}, 2, 2, 0.0", text)            # radial must stay free
+
+    def test_an_indenter_is_refused_rather_than_ignored(self):
+        case = LoadCase(kind=LoadCaseKind.TIP_RADIAL)
+        ind = build_indenter(
+            LoadCaseKind.RADIAL_FLAT, case.indenter,
+            PARAMS.outer_radius_mm * 1e-3, PARAMS.width_mm * 1e-3,
+        )
+        with self.assertRaises(DeckError):
+            build_deck(fixture_mesh(), ind, PARAMS, MATERIAL, HYPER, case, SolverSpec())
+
+    def test_a_contact_case_without_an_indenter_is_refused(self):
+        with self.assertRaises(DeckError):
+            build_deck(fixture_mesh(), None, PARAMS, MATERIAL, HYPER,
+                       LoadCase(kind=LoadCaseKind.RADIAL_FLAT), SolverSpec())
+
+
+def _ref_node(text: str) -> int:
+    """The id declared by ``*NSET, NSET=NREF``."""
+    lines = text.splitlines()
+    return int(lines[lines.index("*NSET, NSET=NREF") + 1].strip())
 
 
 if __name__ == "__main__":

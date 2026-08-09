@@ -8,7 +8,7 @@ to get the coefficients without also getting it.
 Why this is a fit and not a division
 ------------------------------------
 At hub indentation ``δ`` the segments are compressed by a *spread* of amounts — the one at the
-contact point by ``δ``, its neighbours by less, following ``δ - R(1 - cos θ)``. So each
+contact point by ``δ``, its neighbours by less, following ``u = R - (R - δ)/cos θ``. So each
 measured ``F(δ)`` is a weighted sum over many points of the unknown ``f(u)``, and recovering
 ``f`` from ``F`` is a deconvolution.
 
@@ -175,7 +175,7 @@ def _levenberg_marquardt(
     caller; table slopes are all N/m and are not.
 
     Why not the obvious thing. Freezing the compressions makes the reaction linear in the
-    coefficients again — ``Σ_contact [f_spring(u_i) + (K u)_i] cos θ_i`` with ``u`` held —
+    coefficients again — ``Σ_contact [f_spring(u_i) + (K u)_i] / cos θ_i`` with ``u`` held —
     so alternating a shape solve with a linear coefficient solve looks like it should work,
     and it is how this was first written. It diverges. Measured on the tiny design at 48
     segments, starting from the uncoupled fit: the first pass returns ``a = -9.6 N/m``, the

@@ -47,6 +47,11 @@ class MissingPlotting(ImportError):
 CASE_COLOURS: dict[str, str] = {
     LoadCaseKind.RADIAL_FLAT.value: "#0f7d86",
     LoadCaseKind.RADIAL_STEP_EDGE.value: "#c4661a",
+    # The contact-free tip cases. Paler than the contact pair on purpose: they measure one
+    # claw against a prescribed displacement, not a wheel against the ground, and a plot
+    # mixing the two should not invite reading them off the same axis.
+    LoadCaseKind.TIP_RADIAL.value: "#5a8fa8",
+    LoadCaseKind.TIP_TANGENTIAL.value: "#a87f5a",
 }
 _INK = "#1a2226"
 _MUTED = "#5d6b72"

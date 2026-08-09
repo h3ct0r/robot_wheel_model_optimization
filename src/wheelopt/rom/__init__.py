@@ -28,6 +28,13 @@ See docs/plan/06-compliance-rom.md.
 #:   softens" to "never pulls" — a design whose segments buckle is now fittable and was not,
 #:   so the same curve can produce a different law than it did at 0.2.0. The cubic path is
 #:   numerically unchanged; the version moves because which law a caller gets is now a choice.
-ROM_VERSION = "rom-0.3.0"
+#: - ``rom-0.4.0`` — the ring's frictionless contact force was resolved wrongly. The plate's
+#:   normal force on a segment is ``f_r / cos θ``, not ``f_r · cos θ``; MuJoCo, which assumes
+#:   neither, matches the former to 6e-11 and the latter to 25% (see ``vertical_reaction_n``).
+#:   **Every ring force and every fitted law moves**, the more so the wider the contact patch,
+#:   so this invalidates prior results in a way none of the earlier bumps did. Also adds a
+#:   tangential degree of freedom for bandless rings (``solve_equilibrium_2dof``), which is
+#:   inert until a second segment engages and therefore changes no flat-plate fit.
+ROM_VERSION = "rom-0.4.0"
 
 __all__ = ["ROM_VERSION"]

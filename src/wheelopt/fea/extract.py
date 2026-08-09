@@ -76,6 +76,13 @@ def build_load_curve(
     if not times:
         return None
 
+    # Which component is the loading direction. Every case drives y except the tangential
+    # tip case, which drives x — and reading y there gives a curve whose displacement is
+    # *identically zero* while the force column still fills with plausible rising numbers,
+    # so the failure looks like a stiffness result rather than a units mistake. Measured
+    # before it was fixed: 7.35 N/mm against a beam-theory 0.06.
+    axis = 0 if load_case.kind.is_tangential else 1
+
     delta, force = [], []
     for t in times:
         fb, db = forces[t], displacements[t]
@@ -84,9 +91,9 @@ def build_load_curve(
         d_row = _row_for(db, ref_node)
         if f_row is None or d_row is None:
             continue
-        # y is the loading direction; magnitudes, so the curve is positive in compression.
-        force.append(abs(float(f_row[1])))
-        delta.append(abs(float(d_row[1])))
+        # Magnitudes, so the curve is positive in compression.
+        force.append(abs(float(f_row[axis])))
+        delta.append(abs(float(d_row[axis])))
 
     if len(delta) < 2:
         return None

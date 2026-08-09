@@ -11,11 +11,13 @@ The model
 ``n_segments`` rigid segments evenly spaced around the hub, each on a radial spring
 (``docs/plan/06-compliance-rom.md`` §3, FTire's structure at a smaller node count). Pressing
 the wheel onto a flat plate by ``δ`` compresses the segment at angle ``θ`` from the contact
-point by ``u(θ) = R - (R - δ)/cos θ`` where that is positive (:func:`penetrations`), and each
-compressed segment pushes back along its own radius, so only the vertical component carries
-load:
+point by ``u(θ) = R - (R - δ)/cos θ`` where that is positive (:func:`penetrations`), and the
+plate reacts each compressed segment with
 
-    F(δ) = Σ_i f(u_i) · cos θ_i
+    F(δ) = Σ_i f(u_i) / cos θ_i
+
+**Divided, not multiplied** — see :func:`vertical_reaction_n`, which is where the reasoning
+and the measurement that settled it are written down.
 
 Note what that means for the *inverse* problem: a measured ``F(δ)`` does not give ``f(u)``
 directly, because every δ mixes many different ``u`` values. Fitting is a deconvolution, which
@@ -58,6 +60,7 @@ __all__ = [
     "RadialLaw",
     "RingSpec",
     "RingState",
+    "SegmentState2D",
     "SpringLaw",
     "TabulatedLaw",
     "bending_coupling_n_per_m",
@@ -67,10 +70,14 @@ __all__ = [
     "penetrations",
     "ramp_basis",
     "ring_for_design",
+    "ring_force_2dof_n",
     "ring_force_n",
     "segment_angles",
     "solve_equilibrium",
+    "solve_equilibrium_2dof",
+    "symmetric_force_n",
     "uniform_knots",
+    "vertical_reaction_n",
 ]
 
 #: Segment counts the plan calls for. Not enforced — `verify` sweeps outside it deliberately —
@@ -650,6 +657,43 @@ def _solve_spd(matrix: np.ndarray, rhs: np.ndarray) -> np.ndarray:
         return np.linalg.lstsq(matrix, rhs, rcond=None)[0]
 
 
+def vertical_reaction_n(spec: RingSpec, contact_force_n: np.ndarray) -> float:
+    """Total vertical load on the plate, newtons, given each segment's *radial* force.
+
+    ``Σ f_r / cos θ``. The division is the whole of ADR-free issue #26 and it was wrong here
+    until 2026-08-09, so the reasoning is worth keeping next to the arithmetic.
+
+    ``f_r`` is the force conjugate to the segment's radial coordinate ``u`` — what the spring
+    law returns, and what the coupled solve's constraint multiplier is. The *contact* force is
+    a different vector. A frictionless plate can only push along its own normal, so it applies
+    ``λ ĵ`` with no horizontal part; virtual work against the slide joint's motion
+    ``∂p/∂u = (-sin θ, cos θ)`` gives the generalised force ``λ cos θ``, and equilibrium of
+    the segment is ``f_r(u) = λ cos θ``. Hence ``λ = f_r / cos θ``, and the plate carries
+    ``Σ λ``. The horizontal ``λ tan θ`` needed to hold the segment on its radius is supplied
+    by the slide joint, which is internal to the wheel and cancels in the sum.
+
+    The old ``Σ f_r · cos θ`` is the answer to a different question: it is the vertical part
+    of a contact force pointing **along the segment's own axis**, i.e. the segment treated as
+    a two-force strut. That needs the plate to supply ``f_r sin θ`` horizontally, which a
+    frictionless plate has no way to do. The two differ by ``cos²θ`` per segment: 6.7% one
+    segment off-centre on a 24-ring, 25% two off, and it grows with the patch.
+
+    **Measured, not argued.** MuJoCo's ring (``condim="1"``, so genuinely frictionless — the
+    measured horizontal contact force is exactly 0.0 N) settles at its own ``u_i`` and reports
+    its own ``λ_i``. Over δ = 2–20 mm on a 24-segment R 85 mm ring with a linear law,
+    ``f_r(u_i)/cos θ_i`` reproduces every measured ``λ_i`` to **6.2e-11** relative, and
+    ``f_r(u_i)·cos θ_i`` is off by up to **25%** — exactly ``1 - cos²30°``. See the 2026-08-09
+    log entry.
+
+    Segments facing away from the plate are excluded rather than divided: ``cos θ`` reaches
+    exactly zero whenever ``n_segments`` is a multiple of four, and there the quotient is
+    ``0/0``. They carry no contact force in any case.
+    """
+    cos_theta = np.cos(segment_angles(spec))
+    facing = cos_theta > 0.0
+    return float(np.sum(contact_force_n[facing] / cos_theta[facing]))
+
+
 @dataclass(frozen=True, slots=True)
 class RingState:
     """The solved state of a ring at one indentation."""
@@ -662,7 +706,8 @@ class RingState:
     contact_force_n: np.ndarray
     #: Which segments the plate touches.
     in_contact: np.ndarray
-    #: Vertical reaction on the plate, newtons: ``Σ contact_force · cos θ``.
+    #: Vertical reaction on the plate, newtons: ``Σ contact_force / cos θ``. Divided — see
+    #: :func:`vertical_reaction_n`; :attr:`contact_force_n` is radial, the reaction is not.
     force_n: float
     #: Active-set iterations used. One means the geometric guess was already right.
     iterations: int
@@ -725,7 +770,7 @@ def solve_equilibrium(
             compression_m=compression,
             contact_force_n=contact,
             in_contact=active,
-            force_n=float(np.sum(contact * cos_theta)),
+            force_n=vertical_reaction_n(spec, contact),
             iterations=1,
         )
 
@@ -775,7 +820,7 @@ def solve_equilibrium(
         compression_m=compression,
         contact_force_n=contact,
         in_contact=active,
-        force_n=float(np.sum(contact * cos_theta)),
+        force_n=vertical_reaction_n(spec, contact),
         iterations=iterations,
         converged=converged,
     )
@@ -784,13 +829,205 @@ def solve_equilibrium(
 def ring_force_n(spec: RingSpec, law: RadialLaw, delta_m: np.ndarray | float) -> np.ndarray:
     """Vertical reaction of the ring against a flat plate, newtons.
 
-    Only the vertical component of each segment's contact force reacts the plate, hence the
-    ``cos θ`` inside :func:`solve_equilibrium`. Segments past ±90° face away from the plate
-    and are excluded there, so they cannot contribute a negative term.
+    The plate's normal force on a segment is ``f_r / cos θ``, not ``f_r · cos θ``; see
+    :func:`vertical_reaction_n`. Segments past ±90° face away from the plate and are excluded
+    there, so they cannot contribute a negative term.
     """
     deltas = np.atleast_1d(np.asarray(delta_m, dtype=np.float64))
     out = np.array([solve_equilibrium(spec, law, float(d)).force_n for d in deltas])
     # Scalar in, scalar out. The earlier version wrote `out if np.ndim(delta_m) else out`,
     # which is the same expression twice and so always returned a length-1 array; under
     # numpy 2 `float()` on that raises rather than quietly working.
+    return out if np.ndim(delta_m) else out[0]
+
+
+# --------------------------------------------------------------------------------------
+# The tangential degree of freedom.
+
+
+@dataclass(frozen=True, slots=True)
+class SegmentState2D:
+    """A two-degree-of-freedom ring solved at one indentation."""
+
+    #: Radial compression of every segment, metres. Positive inward.
+    compression_m: np.ndarray
+    #: Tangential displacement of every segment, metres. Signed: a segment on the leading
+    #: side splays one way, its mirror the other, and the ring's total is zero by symmetry.
+    slip_m: np.ndarray
+    #: Vertical force the plate applies to each segment, newtons. Non-negative.
+    contact_force_n: np.ndarray
+    in_contact: np.ndarray
+    #: Total vertical reaction, newtons — the plain sum of the per-segment multipliers, which
+    #: *are* the vertical forces here. The radial-only :class:`RingState` reaches the same
+    #: quantity from its radial force by :func:`vertical_reaction_n`, so the two now agree in
+    #: the rigid-tangential limit rather than differing by ``cos²θ``.
+    force_n: float
+
+
+def symmetric_force_n(law: RadialLaw, x_m: np.ndarray | float) -> np.ndarray:
+    """A radial law applied symmetrically about zero: ``sign(x) · f(|x|)``.
+
+    The tangential spring resists displacement in *either* direction with the same
+    magnitude, which a :class:`RadialLaw` does not do on its own — it is written for a
+    compression that is normally one-signed, with an asymmetric tension branch. A claw bends
+    as readily backwards as forwards, so reusing the radial law directly would make one
+    direction of splay stiffer than the other for no physical reason.
+    """
+    x = np.atleast_1d(np.asarray(x_m, dtype=np.float64)).ravel()
+    out = np.sign(x) * np.asarray(law.force_n(np.abs(x)), dtype=np.float64)
+    return out if np.ndim(x_m) else out[0]
+
+
+def solve_equilibrium_2dof(
+    spec: RingSpec,
+    radial_law: RadialLaw,
+    tangential_law: RadialLaw,
+    delta_m: float,
+    *,
+    bisection_iters: int = 80,
+) -> SegmentState2D:
+    """Equilibrium of a **bandless** ring whose segments also move tangentially.
+
+    Why this is separate from :func:`solve_equilibrium` rather than replacing it: without a
+    band the segments are *independent*, so the two-freedom problem factorises into ``N``
+    identical three-unknown problems instead of one ``2N`` system. That is both far cheaper
+    and far more robust, and bandless is every design this project now builds
+    (``docs/plan/04-design-space.md`` §Direction). The coupled solver keeps the radial-only
+    model, which is the correct one for a banded wheel.
+
+    The geometry. Segment ``i`` sits on a radius at angle ``θ_i`` from the contact point,
+    with outward unit vector ``e_r`` and tangential ``e_t``. Let ``u`` be its radial
+    compression and ``v`` its tangential displacement. Its height above the plate is
+
+        y(u, v) = (R - δ) - (R - u) cos θ + v sin θ
+
+    and it may not go below the plate. On a frictionless plate the contact force is purely
+    **vertical**, so it drives both freedoms, weighted by how much each changes the height:
+    ``∂y/∂u = cos θ`` and ``∂y/∂v = sin θ``. Stationarity of
+    ``U_r(u) + U_t(v) - λ y`` then gives
+
+        f_r(u) = λ cos θ,      f_t(v) = λ sin θ,      λ ≥ 0,  y ≥ 0,  λ y = 0
+
+    Three equations, three unknowns, per segment. Because ``f_r`` and ``f_t`` are increasing,
+    ``u`` and ``v`` increase with ``λ`` and ``y`` therefore *decreases* with ``λ`` — so the
+    active case is a one-dimensional bisection on ``λ``, which cannot fail to bracket and
+    needs no initial guess. That monotonicity is the whole reason this is not a Newton solve
+    with the usual failure modes.
+
+    **What it changes physically.** A segment away from the contact point is pushed up by a
+    vertical force with a component along its own tangent, and the radial-only model has
+    nowhere for that to go — it is reacted rigidly. Here the segment splays, so the wheel is
+    softer and the contact patch spreads. On the nominal claw the two stiffnesses are
+    24.81 N/mm radial against 0.1851 N/mm tangential, a factor of 134, so "softer" is not a
+    small correction away from the contact point.
+
+    Raises:
+        ValueError: if the spec has a band. A banded ring's segments are not independent and
+            this factorisation does not hold; use :func:`solve_equilibrium`.
+    """
+    if spec.is_coupled:
+        raise ValueError(
+            "solve_equilibrium_2dof factorises per segment, which needs independent "
+            "segments; this spec has a band. Use solve_equilibrium for the radial-only "
+            "coupled model"
+        )
+    theta = segment_angles(spec)
+    cos_t, sin_t = np.cos(theta), np.sin(theta)
+    n = spec.n_segments
+    radius, hub = spec.radius_m, spec.radius_m - delta_m
+
+    compression = np.zeros(n, dtype=np.float64)
+    slip = np.zeros(n, dtype=np.float64)
+    contact = np.zeros(n, dtype=np.float64)
+    active = np.zeros(n, dtype=bool)
+
+    def height(index: int, u: float, v: float) -> float:
+        return hub - (radius - u) * cos_t[index] + v * sin_t[index]
+
+    for i in range(n):
+        # A segment facing away from the plate can never reach it, whatever it does
+        # tangentially: its radius carries it further away and the tangential term is
+        # bounded by the splay the spring permits. Excluded outright, as in the radial model.
+        if cos_t[i] <= 0.0 or height(i, 0.0, 0.0) >= 0.0:
+            continue
+
+        # Bracket lambda. y is decreasing in lambda, so grow the upper bound until the
+        # segment is at or above the plate, then bisect.
+        lo, hi = 0.0, 1.0
+        for _ in range(200):
+            u_hi = _invert(radial_law, hi * cos_t[i])
+            v_hi = _invert(tangential_law, hi * sin_t[i], symmetric=True)
+            if height(i, u_hi, v_hi) >= 0.0:
+                break
+            hi *= 2.0
+        for _ in range(bisection_iters):
+            mid = 0.5 * (lo + hi)
+            u_m = _invert(radial_law, mid * cos_t[i])
+            v_m = _invert(tangential_law, mid * sin_t[i], symmetric=True)
+            if height(i, u_m, v_m) < 0.0:
+                lo = mid
+            else:
+                hi = mid
+        lam = 0.5 * (lo + hi)
+        compression[i] = _invert(radial_law, lam * cos_t[i])
+        slip[i] = _invert(tangential_law, lam * sin_t[i], symmetric=True)
+        contact[i] = lam
+        active[i] = True
+
+    return SegmentState2D(
+        compression_m=compression,
+        slip_m=slip,
+        contact_force_n=contact,
+        in_contact=active,
+        force_n=float(np.sum(contact)),
+    )
+
+
+def _invert(law: RadialLaw, force_n: float, *, symmetric: bool = False,
+            iters: int = 60) -> float:
+    """Displacement at which ``law`` carries ``force_n``. Bisection, no derivative needed.
+
+    Deliberately derivative-free: a :class:`TabulatedLaw`'s tangent is piecewise constant and
+    can be **zero** over an interval, which is a legitimate law (a buckled segment carrying a
+    constant load) and a division by zero for a Newton inverse. Bisection does not care, and
+    on a flat interval it returns the low end of it — the smallest displacement consistent
+    with the force, which is the right choice for a contact problem.
+    """
+    # Sign first, then the zero check. Written the other way round the early return fired on
+    # every negative force and the symmetric branch was unreachable — so the segments on one
+    # side of the contact point splayed and their mirrors did not, and the ring walked
+    # sideways under a symmetric load. Caught by the antisymmetry test, not by inspection.
+    sign = 1.0
+    if force_n < 0.0:
+        if not symmetric:
+            return 0.0
+        sign, force_n = -1.0, -force_n
+    if force_n == 0.0:
+        return 0.0
+    lo, hi = 0.0, 1e-4
+    for _ in range(200):
+        if float(law.force_n(hi)) >= force_n:
+            break
+        hi *= 2.0
+    for _ in range(iters):
+        mid = 0.5 * (lo + hi)
+        if float(law.force_n(mid)) < force_n:
+            lo = mid
+        else:
+            hi = mid
+    return sign * 0.5 * (lo + hi)
+
+
+def ring_force_2dof_n(
+    spec: RingSpec,
+    radial_law: RadialLaw,
+    tangential_law: RadialLaw,
+    delta_m: np.ndarray | float,
+) -> np.ndarray:
+    """Vertical reaction of the two-freedom ring. Scalar in, scalar out."""
+    deltas = np.atleast_1d(np.asarray(delta_m, dtype=np.float64))
+    out = np.array([
+        solve_equilibrium_2dof(spec, radial_law, tangential_law, float(d)).force_n
+        for d in deltas
+    ])
     return out if np.ndim(delta_m) else out[0]

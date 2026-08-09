@@ -185,10 +185,22 @@ class TestLoadCaseValidation(unittest.TestCase):
         case = LoadCase(nominal_load_n=10.0, max_load_multiple=3.0)
         self.assertAlmostEqual(case.target_load_n, 30.0)
 
-    def test_both_kinds_are_available(self):
+    def test_the_load_cases_split_into_contact_and_prescribed(self):
+        """Two contact cases and two contact-free tip cases, and the split is queryable.
+
+        `needs_indenter` is what the deck, the runner and the indenter tests all branch on,
+        so it has to stay in agreement with the enum rather than being re-derived by each.
+        """
         self.assertEqual(
-            {k.value for k in LoadCaseKind}, {"radial_flat", "radial_step_edge"}
+            {k.value for k in LoadCaseKind if k.needs_indenter},
+            {"radial_flat", "radial_step_edge"},
         )
+        self.assertEqual(
+            {k.value for k in LoadCaseKind if not k.needs_indenter},
+            {"tip_radial", "tip_tangential"},
+        )
+        self.assertTrue(LoadCaseKind.TIP_TANGENTIAL.is_tangential)
+        self.assertFalse(LoadCaseKind.TIP_RADIAL.is_tangential)
 
 
 if __name__ == "__main__":

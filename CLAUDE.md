@@ -24,11 +24,12 @@ Full statement and sub-questions: `docs/plan/02-research-questions.md`
 - **Active work:** ROM feasibility spike, `docs/plan/16-first-week.md`.
   Steps 2 (CAD generator) and 3 (CalculiX radial compression) are **done and verified** —
   `scripts/verify_cad.py` 48/48, `scripts/verify_fea.py --full` 30/30 against CalculiX 2.23.
-  **Step 4 (the segmented ring) is done, band included** (`rom-0.2.0`): `wheelopt.rom` fits
-  a ring to the FEA `k_r(δ)` at **0.69% RMS on 24 segments**, and the MuJoCo realisation
-  tracks the analytic ring to **0.03–0.05%** below 4 mm (6.1–6.6% at 5–6 mm, measured to be
-  contact discretisation — MuJoCo's round capsules bridge the scallops and touch on 6
-  segments where the analytic active set has 3). The shear band is two derived stiffnesses,
+  **Step 4 (the segmented ring) is done, band included** (`rom-0.4.0`): `wheelopt.rom` fits
+  a ring to the FEA `k_r(δ)` at **0.68% RMS on 24 segments**, and the MuJoCo realisation
+  tracks the analytic ring to **0.03–0.05%** below 4 mm (4.0–4.8% at 5–6 mm — contact
+  discretisation, MuJoCo's round capsules bridge the scallops and touch on more segments
+  than the analytic active set; it was 6.1–6.6% before #26). The shear band is two derived
+  stiffnesses,
   bending **and hoop**; omitting the hoop term makes the ring 5.28× too soft, all of it the
   `n=0` breathing mode (see the 2026-08-08 log entry). Both come from band geometry and
   modulus via `ring_for_design`, never chosen. **Known gap: the band does not shear**, and a
@@ -79,6 +80,25 @@ Full statement and sub-questions: `docs/plan/02-research-questions.md`
   design's stiffening sweep 1.157 — a decade either side. The first sample is excluded from
   both the test and the reference; a contact-closure spike as yardstick would flag everything
   after it.
+- **The ring divided where it multiplied, and MuJoCo settled it** (2026-08-09, `rom-0.4.0`,
+  `TODO.md` #26 closed). A frictionless plate's normal force on a segment is `f_r/cos θ`, not
+  `f_r·cos θ` — see `ring.vertical_reaction_n` for the virtual-work derivation. Measured
+  per segment against MuJoCo (`condim="1"`, horizontal contact force exactly 0.0 N, reading
+  back *its* `u_i` and *its* `λ_i`): `f_r/cos θ` matches to **6.2e-11**, `f_r·cos θ` is off by
+  **25%** — exactly `1 − cos²30°`. **But the correction is small on today's designs**: the tiny
+  design's fitted `a` moves 3.6% at 24 segments and under 0.3% at 36/48, because its patch is
+  three segments wide. It scales with patch spread — 14.1% at ±30° — so it matters for claws.
+  The 5–6 mm MuJoCo gap fell from 6.1–6.6% to 4.0–4.8% and the rest is the contact
+  discretisation it was first attributed to; sub-4 mm is unchanged at 0.03–0.05%, as it must be.
+  Step-climb re-run across the re-fit: still **5/5**.
+- **A bandless ring can now splay** (2026-08-09, `solve_equilibrium_2dof`). Second DOF per
+  segment, solved per segment by bisection since bandless segments are independent; a banded
+  spec is refused. **Exactly inert until a second claw engages** at `R(1−cos π/n)` = 11.4 mm for
+  12 claws, then 3% softer at 12 mm, 17% at 25 mm. Design load is δ ≈ 1 mm, so the flat-plate
+  fit is unchanged and the benefit is all at a step. **The MJCF joint is still missing**, so
+  the analytic ring splays and the simulated one does not — every result the project reports
+  above 11.4 mm, the step-climb signatures included, is still the non-splaying one (`TODO.md`
+  #20).
 - **Two FEA tiers.** 3-D (`MeshSpec.dimension=3`, C3D10) is the reference and is
   **unaffordable at full size**: the nominal design is 50 779 elements / 279 k DOF at ~23 min
   per increment, ≈20 h per sweep, and coarsening does not help because the 3 mm band, 7 mm
@@ -126,8 +146,11 @@ Full statement and sub-questions: `docs/plan/02-research-questions.md`
   floor. **Fit claws at μ ≥ 0.2, never frictionless**; `scripts/explore.py` now picks the
   default from the topology and prints it. **#20 is now the next substantial
   piece of work, and bigger than it reads**: a claw points radially, so a radial tip load
-  compresses it as a *column* (`EA/L` = **33.70 N/mm**) and a tangential one bends it as a
-  *cantilever* (`3EI/L³` = **0.0585 N/mm**) — **576×**. The ring has the stiff direction and
+  compresses it as a *column* and a tangential one bends it as a *cantilever*. **Measured**
+  on the claw sector with the two new contact-free cases (`TIP_RADIAL`, `TIP_TANGENTIAL`):
+  **24.81 N/mm against 0.1851 N/mm — 134×**. (A first estimate said 576×; it used a free-tip
+  `3EI/L³`, where the rigid tip cannot rotate, so the guided `12EI/L³` = 0.234 N/mm is the
+  right closed form and the measurement sits just below it, as a taper should.) The ring has the stiff direction and
   not the soft one, and a step edge loads the soft one. Two external checks fell out of the
   same arithmetic: analytic `EA/L` 33.7 against the measured 22.69 N/mm, and fixed-free Euler
   **7.19 N** against the measured frictionless plateau **4.59 N** — so that plateau is a

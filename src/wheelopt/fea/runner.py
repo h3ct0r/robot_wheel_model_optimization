@@ -259,12 +259,16 @@ def run_load_case(
 
     # --- deck -----------------------------------------------------------------------
     try:
-        indenter = build_indenter(
-            load_case.kind,
-            load_case.indenter,
-            params.outer_radius_mm * 1e-3,
-            params.width_mm * 1e-3,
-            dimension=mesh_spec.dimension,
+        indenter = (
+            build_indenter(
+                load_case.kind,
+                load_case.indenter,
+                params.outer_radius_mm * 1e-3,
+                params.width_mm * 1e-3,
+                dimension=mesh_spec.dimension,
+            )
+            if load_case.kind.needs_indenter
+            else None
         )
         bundle = build_deck(
             mesh, indenter, params, material, hyper, load_case, solver,

@@ -38,9 +38,12 @@ from wheelopt.rom.ring import (
     penetrations,
     ramp_basis,
     ring_for_design,
+    ring_force_2dof_n,
     ring_force_n,
     segment_angles,
     solve_equilibrium,
+    solve_equilibrium_2dof,
+    symmetric_force_n,
     uniform_knots,
 )
 
@@ -160,6 +163,72 @@ class TestRingForce(unittest.TestCase):
         coarse = ring_force_n(RingSpec(0.060, 12), SpringLaw(a=1e3), 0.005)
         fine = ring_force_n(RingSpec(0.060, 48), SpringLaw(a=1e3), 0.005)
         self.assertGreater(float(fine), float(coarse))
+
+
+class TestVerticalReaction(unittest.TestCase):
+    """How a segment's radial force becomes load on the plate — issue #26.
+
+    Everything else in this file tests the ring's *shape*: monotone in δ, stiffer at more
+    segments, zero at zero. All of it passed for months with the resolution inverted, because
+    ``cos²θ`` is a positive factor and scales a curve without bending it. So these tests pin a
+    magnitude, and they do it by a route that does not call the ring's own machinery.
+    """
+
+    #: R 60 mm, 24 segments, a linear 1 kN/m segment spring, pressed 5 mm. Chosen so the whole
+    #: sum is three terms and can be written out by hand.
+    SPEC = RingSpec(radius_m=0.060, n_segments=24)
+    LAW = SpringLaw(a=1.0e3)
+    DELTA_M = 0.005
+
+    @staticmethod
+    def _by_hand() -> tuple[float, float]:
+        """The reaction, computed from literal angles rather than from ``segment_angles``.
+
+        Returns both resolutions so the test can assert the code matches one and is nowhere
+        near the other. At 5 mm on this ring only θ = 0 and θ = ±15° reach the plate: the
+        segments at ±30° would need ``u = 60 - 55/cos 30° = -3.5 mm``, i.e. the plate is
+        3.5 mm short of them.
+        """
+        r_mm, delta_mm, k_n_per_mm = 60.0, 5.0, 1.0
+        total_sec = total_cos = 0.0
+        for deg in (-15.0, 0.0, 15.0):
+            cos = np.cos(np.radians(deg))
+            u_mm = r_mm - (r_mm - delta_mm) / cos
+            assert u_mm > 0.0
+            total_sec += k_n_per_mm * u_mm / cos
+            total_cos += k_n_per_mm * u_mm * cos
+        return total_sec, total_cos
+
+    def test_the_reaction_matches_a_hand_computed_sum(self):
+        divided, multiplied = self._by_hand()
+        # 11.3355 N against 10.9111 N. Only 3.9% apart, because a three-segment patch reaches
+        # just +/-15 deg and the two outer segments carry little; the gap is 8.8% by 15 mm on
+        # a 24-ring and 14% at +/-45 deg. A shallow test would not have caught this.
+        self.assertAlmostEqual(divided, 11.3354970, places=6)
+        self.assertAlmostEqual(multiplied, 10.9110992, places=6)
+        got = float(ring_force_n(self.SPEC, self.LAW, self.DELTA_M))
+        self.assertAlmostEqual(got, divided, places=9)
+
+    def test_the_helper_divides_by_cos_theta(self):
+        """Stated as a per-segment identity, so a future refactor that reintroduces the
+        multiplication fails here with the reason rather than three tests away with a number.
+        """
+        state = solve_equilibrium(self.SPEC, self.LAW, self.DELTA_M)
+        cos = np.cos(segment_angles(self.SPEC))
+        active = state.in_contact
+        expected = float(np.sum(state.contact_force_n[active] / cos[active]))
+        self.assertAlmostEqual(state.force_n, expected, places=12)
+        self.assertGreater(state.force_n,
+                           float(np.sum(state.contact_force_n[active] * cos[active])))
+
+    def test_segments_facing_away_are_excluded_rather_than_divided(self):
+        """``cos θ`` is exactly zero at ±90°, which every segment count divisible by four
+        reaches. Dividing there would be 0/0 and would poison the sum with a NaN."""
+        for n in (4, 8, 12, 24, 48):
+            spec = RingSpec(radius_m=0.060, n_segments=n)
+            with self.subTest(n=n):
+                self.assertTrue(np.any(np.isclose(np.cos(segment_angles(spec)), 0.0)))
+                self.assertTrue(np.isfinite(float(ring_force_n(spec, self.LAW, 0.005))))
 
 
 class TestCurvatureOperator(unittest.TestCase):
@@ -579,6 +648,61 @@ class TestMjcf(unittest.TestCase):
             pair = (data.contact[c].geom1, data.contact[c].geom2)
             self.assertIn(floor, pair, "two segments are in contact with each other")
 
+    def test_mujoco_resolves_the_contact_force_as_f_over_cos_theta(self):
+        """The arbitration of issue #26, kept as a regression test.
+
+        MuJoCo assumes neither resolution: ``condim="1"`` makes the floor genuinely
+        frictionless, and the segments settle wherever the constraint solver puts them. So we
+        read back *its* compressions and *its* per-contact forces and ask which relation holds
+        between them. This is a per-segment test on purpose — comparing totals would confound
+        the answer with contact discretisation, since round capsules engage a wider set of
+        segments than the analytic scallop geometry does, which is a separate known gap.
+        """
+        from wheelopt.rom.mjcf import build_mjcf
+
+        law, delta = SpringLaw(a=1.0e4), 0.010
+        model = mujoco.MjModel.from_xml_string(build_mjcf(SPEC, law, indentation_m=delta))
+        data = mujoco.MjData(model)
+        qpos, dofs = model.jnt_qposadr[:], model.jnt_dofadr[:]
+        for _ in range(4000):
+            data.qfrc_applied[dofs] = (law.force_n(-data.qpos[qpos])
+                                       - 4.0 * data.qvel[dofs])
+            mujoco.mj_step(model, data)
+        self.assertLess(float(np.max(np.abs(data.qvel))), 1e-8, "not settled")
+
+        cos = np.cos(segment_angles(SPEC))
+        floor = mujoco.mj_name2id(model, mujoco.mjtObj.mjOBJ_GEOM, "floor")
+        wrench = np.zeros(6)
+        # Accumulated per segment, not per contact: a capsule resting on a plane is a line
+        # contact, and MuJoCo resolves it as *two* points at the ends of the axis, each
+        # carrying half the load. Asserting per contact fails by exactly a factor of two.
+        vertical = np.zeros(SPEC.n_segments)
+        horizontal = np.zeros(SPEC.n_segments)
+        for c in range(data.ncon):
+            con = data.contact[c]
+            mujoco.mj_contactForce(model, data, c, wrench)
+            world = con.frame.reshape(3, 3).T @ wrench[:3]
+            i = int(mujoco.mj_id2name(
+                model, mujoco.mjtObj.mjOBJ_GEOM,
+                int(con.geom2 if con.geom1 == floor else con.geom1))[1:])
+            vertical[i] += float(world[2])
+            horizontal[i] += abs(float(world[0]))
+
+        touching = np.flatnonzero(vertical > 1e-9)
+        for i in touching:
+            f_r = float(law.force_n(-data.qpos[qpos][i]))
+            with self.subTest(segment=int(i)):
+                # Frictionless: the plate pushes straight up and nothing sideways. If this
+                # ever fails the rest of the test is meaningless, not merely wrong.
+                self.assertAlmostEqual(horizontal[i], 0.0, places=9)
+                self.assertAlmostEqual(vertical[i], f_r / cos[i], delta=1e-6 * vertical[i])
+                if cos[i] < 1.0:  # at theta = 0 the two resolutions are the same statement
+                    self.assertNotAlmostEqual(vertical[i], f_r * cos[i],
+                                              delta=1e-3 * vertical[i])
+        # Five segments carry load here, out to +/-30 deg where the two resolutions differ by
+        # 1/cos^2(30) = 1.333. A test that only ever touched one segment would pass either way.
+        self.assertEqual(len(touching), 5)
+
     def test_indentation_lowers_the_hub(self):
         from wheelopt.rom.mjcf import build_mjcf
 
@@ -964,6 +1088,106 @@ class TestRingFromClawCurve(unittest.TestCase):
         self.assertEqual(contact_segments(spec, float(self.DELTA.max())), 1)
         np.testing.assert_allclose(ring_force_n(spec, law, self.DELTA), self.FORCE,
                                    rtol=1e-9)
+
+
+class TestTwoDegreeOfFreedomRing(unittest.TestCase):
+    """The tangential freedom. Measured on the nominal claw: 24.81 N/mm radial against
+    0.1851 N/mm tangential, a factor of 134."""
+
+    SPEC = RingSpec(radius_m=0.085, n_segments=12)
+    RADIAL = SpringLaw(a=24807.0)
+    TANGENTIAL = SpringLaw(a=185.1)
+    #: 12 claws on an 85 mm wheel: the second tip reaches the plate at R(1 - cos 30) = 11.4 mm.
+    SECOND_CLAW_M = 0.085 * (1.0 - np.cos(np.pi / 12))
+
+    def test_a_rigid_tangential_spring_recovers_the_radial_kinematics(self):
+        """The limit that makes this a generalisation: infinitely stiff tangentially *is* a
+        radial slide, so every compression must equal the geometric penetration exactly.
+
+        Asserted on the kinematics *and*, since #26 closed, on the force: both solvers now
+        resolve the plate's normal force as ``f_r/cos θ``, so the rigid-tangential limit must
+        reproduce :func:`ring_force_n` and not merely resemble it.
+        """
+        for delta in (0.006, 0.014, 0.020):
+            state = solve_equilibrium_2dof(
+                self.SPEC, self.RADIAL, SpringLaw(a=1e6 * self.RADIAL.a), delta
+            )
+            geometric = penetrations(self.SPEC, delta)
+            active = state.in_contact
+            with self.subTest(delta=delta):
+                self.assertTrue(bool(np.any(active)))
+                # rtol is 1e-5, not machine epsilon, and the reason is worth stating: a
+                # 1e6 stiffness ratio is stiff, not rigid. The residual splay is ~2 nm,
+                # which perturbs the height equation at ~3e-7 relative — so a tighter
+                # tolerance would be testing the ratio chosen here, not the solver.
+                np.testing.assert_allclose(
+                    state.compression_m[active], geometric[active], rtol=1e-5
+                )
+                self.assertLess(float(np.max(np.abs(state.slip_m))), 1e-8)
+                np.testing.assert_allclose(
+                    state.force_n,
+                    float(ring_force_n(self.SPEC, self.RADIAL, delta)),
+                    rtol=1e-5,
+                )
+
+    def test_it_is_inert_while_only_one_claw_touches(self):
+        """A lone segment sits at theta = 0, where the contact force is purely radial and
+        sin(theta) is zero. Nothing to splay, so the answer must be bit-for-bit the radial
+        one — this is why the flat-plate fit at design load is unaffected."""
+        delta = 0.5 * self.SECOND_CLAW_M
+        state = solve_equilibrium_2dof(self.SPEC, self.RADIAL, self.TANGENTIAL, delta)
+        self.assertEqual(int(state.in_contact.sum()), 1)
+        self.assertEqual(float(np.max(np.abs(state.slip_m))), 0.0)
+        self.assertAlmostEqual(
+            state.force_n, float(ring_force_n(self.SPEC, self.RADIAL, delta)), places=9
+        )
+
+    def test_it_softens_the_ring_once_a_second_claw_engages(self):
+        """Past the threshold the off-centre claws splay, so the wheel carries less at the
+        same indentation. Measured: 3% softer at 12 mm, 17% at 25 mm."""
+        delta = 0.018
+        # Compared against the *same* solver with a rigid tangential spring, so the
+        # comparison isolates the new freedom rather than straddling the open force-
+        # resolution question in #26.
+        soft = float(ring_force_2dof_n(self.SPEC, self.RADIAL, self.TANGENTIAL, delta))
+        stiff = float(ring_force_2dof_n(
+            self.SPEC, self.RADIAL, SpringLaw(a=1e6 * self.RADIAL.a), delta
+        ))
+        self.assertLess(soft, stiff)
+        self.assertGreater(soft, 0.4 * stiff)
+        state = solve_equilibrium_2dof(self.SPEC, self.RADIAL, self.TANGENTIAL, delta)
+        self.assertGreater(int(state.in_contact.sum()), 1)
+        self.assertGreater(float(np.max(np.abs(state.slip_m))), 0.0)
+
+    def test_splay_is_antisymmetric_about_the_contact_point(self):
+        """A ring is symmetric about the contact point, so the two sides splay opposite ways
+        and the total tangential displacement cancels. A non-zero sum would mean the wheel
+        was walking sideways under a symmetric load."""
+        state = solve_equilibrium_2dof(self.SPEC, self.RADIAL, self.TANGENTIAL, 0.018)
+        self.assertAlmostEqual(float(np.sum(state.slip_m)), 0.0, places=12)
+
+    def test_a_banded_ring_is_refused(self):
+        with self.assertRaises(ValueError):
+            solve_equilibrium_2dof(COUPLED, self.RADIAL, self.TANGENTIAL, 0.004)
+
+    def test_the_tangential_law_resists_both_directions_equally(self):
+        law = SpringLaw(a=500.0, b=2.0e5, c=1.0e7)
+        for x in (0.001, 0.004):
+            self.assertAlmostEqual(
+                float(symmetric_force_n(law, x)), -float(symmetric_force_n(law, -x))
+            )
+        self.assertEqual(float(symmetric_force_n(law, 0.0)), 0.0)
+
+    def test_it_inverts_a_table_with_a_flat_interval(self):
+        """A buckled segment carrying constant load has zero tangent over an interval. That
+        is a legitimate law and a division by zero for a Newton inverse, which is why the
+        solver bisects."""
+        flat = TabulatedLaw(knots_m=uniform_knots(0.008, 4),
+                            slopes_n_per_m=np.array([12000.0, 0.0, 0.0, 9000.0]))
+        state = solve_equilibrium_2dof(self.SPEC, flat, self.TANGENTIAL, 0.018)
+        self.assertTrue(np.all(np.isfinite(state.compression_m)))
+        self.assertTrue(np.all(np.isfinite(state.slip_m)))
+        self.assertGreater(state.force_n, 0.0)
 
 
 if __name__ == "__main__":  # pragma: no cover

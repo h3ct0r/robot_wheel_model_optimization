@@ -55,6 +55,36 @@ class LoadCaseKind(str, Enum):
     RADIAL_FLAT = "radial_flat"
     #: Compression against the corner of a rigid step. The obstacle-climbing case.
     RADIAL_STEP_EDGE = "radial_step_edge"
+    #: Push the tread **radially inward** by a prescribed displacement, with no plate and no
+    #: contact at all. Only meaningful with ``MeshSpec.claw_sector``, where the tread is one
+    #: claw's tip.
+    #:
+    #: This is the ring's own kinematics, expressed in FEA: a ring segment is a *rigid* body
+    #: on a radial slide, so the tread node set is tied to a reference node as a rigid body
+    #: and that node is driven. No contact means no penalty stiffness, no friction
+    #: coefficient, and no stick/slip branch to pick — which is the point. Against the
+    #: plate cases it is the clean check that a measured curve is structure and not contact.
+    TIP_RADIAL = "tip_radial"
+    #: The same, pushed **tangentially**. This is the degree of freedom the ring does not
+    #: have (``docs/plan/TODO.md`` #20), and the one a claw is soft in: a claw points
+    #: radially, so a radial load compresses it as a column and a tangential one bends it as
+    #: a cantilever. Scoped at **576x** apart on the nominal claw, which is why it matters.
+    TIP_TANGENTIAL = "tip_tangential"
+
+    @property
+    def needs_indenter(self) -> bool:
+        """Whether this case presses the wheel against a meshed rigid body.
+
+        The tip cases prescribe a displacement directly and have no contact, so the deck has
+        no indenter, no surface interaction and no friction. Everything that reads a load
+        curve is unchanged, because the driven reference node is still ``NREF``.
+        """
+        return self in (LoadCaseKind.RADIAL_FLAT, LoadCaseKind.RADIAL_STEP_EDGE)
+
+    @property
+    def is_tangential(self) -> bool:
+        """Whether the prescribed displacement runs along the tread rather than into it."""
+        return self is LoadCaseKind.TIP_TANGENTIAL
 
 
 @dataclass(frozen=True, slots=True)

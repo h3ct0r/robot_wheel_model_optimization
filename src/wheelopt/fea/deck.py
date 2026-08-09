@@ -107,7 +107,7 @@ def _set_block(keyword: str, name: str, ids: np.ndarray, per_line: int = 12) -> 
 
 def build_deck(
     mesh: FeaMesh,
-    indenter: IndenterMesh,
+    indenter: IndenterMesh | None,
     params: WheelParams,
     material: MaterialSpec,
     hyper: HyperelasticModel,
@@ -119,8 +119,24 @@ def build_deck(
 ) -> DeckBundle:
     """Assemble the complete ``.inp`` for one load case.
 
+    Two shapes of deck come out of here, chosen by
+    :attr:`~wheelopt.fea.loadcase.LoadCaseKind.needs_indenter`:
+
+    * **Contact.** The wheel is pressed against a meshed rigid indenter. ``indenter`` is
+      required; ``NREF`` is the indenter's reference node.
+    * **Prescribed tip.** No indenter, no contact pair, no friction. The tread node set is
+      itself tied to ``NREF`` as a rigid body and that node is driven. ``indenter`` must be
+      ``None``.
+
+    The second exists because a ring segment *is* a rigid body on a slide, so driving the
+    tread rigidly is the ring's kinematics written out in FEA — and because it removes the
+    contact model from the measurement entirely, which is the only way to tell a structural
+    answer from a contact one. ``NREF`` means the same thing in both, so nothing downstream
+    of the solver changes.
+
     Raises:
-        DeckError: if a required set is empty or the mesh and indenter are inconsistent.
+        DeckError: if a required set is empty, or the indenter is present when it should not
+            be (or absent when it should).
     """
     if mesh.n_elements == 0:
         raise DeckError("mesh has no elements")
@@ -129,8 +145,14 @@ def build_deck(
             raise DeckError(f"mesh node set {name!r} is empty")
     if "spokes" not in mesh.element_sets or len(mesh.element_sets["spokes"]) == 0:
         raise DeckError("mesh element set 'spokes' is empty; stress output impossible")
-    if indenter.n_elements == 0:
-        raise DeckError("indenter has no elements")
+    contact = load_case.kind.needs_indenter
+    if contact and (indenter is None or indenter.n_elements == 0):
+        raise DeckError(f"{load_case.kind.value} presses against an indenter and has none")
+    if not contact and indenter is not None:
+        raise DeckError(
+            f"{load_case.kind.value} prescribes the tread directly and must not be given an "
+            "indenter; an unused rigid body in the deck is a trap for the next reader"
+        )
 
     plane_strain = mesh.element_type.startswith("CPE")
 
@@ -139,7 +161,8 @@ def build_deck(
     n_wheel_nodes = mesh.n_nodes
     ind_node_offset = n_wheel_nodes
     ind_first_node = ind_node_offset + 1
-    ref_node = ind_node_offset + indenter.n_nodes + 1
+    n_ind_nodes = indenter.n_nodes if contact else 0
+    ref_node = ind_node_offset + n_ind_nodes + 1
     rot_node = ref_node + 1
     n_nodes_total = rot_node
 
@@ -171,16 +194,22 @@ def build_deck(
         "*NODE, NSET=NALL",
     ]
     lines += _node_block(mesh.nodes_m, 1)
-    lines += _node_block(indenter.nodes_m, ind_first_node)
-    lines.append(f"{ref_node}, {_fmt(indenter.ref_point_m[0])}, "
-                 f"{_fmt(indenter.ref_point_m[1])}, {_fmt(indenter.ref_point_m[2])}")
-    lines.append(f"{rot_node}, {_fmt(indenter.ref_point_m[0])}, "
-                 f"{_fmt(indenter.ref_point_m[1])}, {_fmt(indenter.ref_point_m[2])}")
+    if contact:
+        lines += _node_block(indenter.nodes_m, ind_first_node)
+        anchor = indenter.ref_point_m
+    else:
+        # The rigid body's reference node. Put it at the centroid of the tread set rather
+        # than anywhere convenient: a rigid body's reference node carries the rotation, so
+        # an off-centre one turns a prescribed translation into a translation plus a moment.
+        anchor = slave_coords.mean(axis=0)
+    for node in (ref_node, rot_node):
+        lines.append(f"{node}, {_fmt(anchor[0])}, {_fmt(anchor[1])}, {_fmt(anchor[2])}")
 
     lines.append(f"*ELEMENT, TYPE={mesh.element_type}, ELSET=EWHEEL")
     lines += _element_block(mesh.elements, 1, 0)
-    lines.append(f"*ELEMENT, TYPE={indenter.element_type}, ELSET=EINDENT")
-    lines += _element_block(indenter.elements, ind_first_elem, ind_node_offset)
+    if contact:
+        lines.append(f"*ELEMENT, TYPE={indenter.element_type}, ELSET=EINDENT")
+        lines += _element_block(indenter.elements, ind_first_elem, ind_node_offset)
 
     lines += _set_block("NSET", "NBORE", mesh.node_sets["bore"])
     lines += _set_block("NSET", "NTREAD", slave)
@@ -188,12 +217,13 @@ def build_deck(
     lines.append(f"*NSET, NSET=NROT\n {rot_node}")
     lines += _set_block("ELSET", "ESPOKES", mesh.element_sets["spokes"])
 
-    # Slave surface is a node set; master is the indenter faces we generated.
-    lines.append("*SURFACE, NAME=SWHEEL, TYPE=NODE")
-    lines.append(" NTREAD")
-    lines.append("*SURFACE, NAME=SINDENT, TYPE=ELEMENT")
-    for e in indenter.contact_elements:
-        lines.append(f" {int(e) + n_wheel_elems}, S{indenter.contact_face}")
+    if contact:
+        # Slave surface is a node set; master is the indenter faces we generated.
+        lines.append("*SURFACE, NAME=SWHEEL, TYPE=NODE")
+        lines.append(" NTREAD")
+        lines.append("*SURFACE, NAME=SINDENT, TYPE=ELEMENT")
+        for e in indenter.contact_elements:
+            lines.append(f" {int(e) + n_wheel_elems}, S{indenter.contact_face}")
 
     # Plane-strain sections carry a thickness on the data line; CalculiX defaults it to 1 m
     # when omitted, which would report forces ~22x too large on a 45 mm wheel and look
@@ -208,23 +238,31 @@ def build_deck(
     lines.append(f"*SOLID SECTION, ELSET=EWHEEL, MATERIAL={WHEEL_MATERIAL}")
     lines += section_data
 
-    lines.append(f"*MATERIAL, NAME={RIGID_MATERIAL}")
-    lines.append("*ELASTIC")
-    lines.append(f" {_fmt(RIGID_E_PA)}, {RIGID_NU}")
-    lines.append(f"*SOLID SECTION, ELSET=EINDENT, MATERIAL={RIGID_MATERIAL}")
-    lines += section_data
-    lines.append(f"*RIGID BODY, ELSET=EINDENT, REF NODE={ref_node}, ROT NODE={rot_node}")
+    if contact:
+        lines.append(f"*MATERIAL, NAME={RIGID_MATERIAL}")
+        lines.append("*ELASTIC")
+        lines.append(f" {_fmt(RIGID_E_PA)}, {RIGID_NU}")
+        lines.append(f"*SOLID SECTION, ELSET=EINDENT, MATERIAL={RIGID_MATERIAL}")
+        lines += section_data
+        lines.append(f"*RIGID BODY, ELSET=EINDENT, REF NODE={ref_node}, ROT NODE={rot_node}")
 
-    lines.append("*SURFACE INTERACTION, NAME=SI1")
-    lines.append("*SURFACE BEHAVIOR, PRESSURE-OVERCLOSURE=LINEAR")
-    lines.append(f" {_fmt(contact_k)}")
-    if load_case.friction_mu > 0:
-        lines.append("*FRICTION")
-        # Stick slope: contact stiffness scaled down keeps the tangential problem
-        # conditioned without making stick artificially compliant.
-        lines.append(f" {load_case.friction_mu}, {_fmt(contact_k * 0.05)}")
-    lines.append("*CONTACT PAIR, INTERACTION=SI1, TYPE=NODE TO SURFACE")
-    lines.append(" SWHEEL, SINDENT")
+        lines.append("*SURFACE INTERACTION, NAME=SI1")
+        lines.append("*SURFACE BEHAVIOR, PRESSURE-OVERCLOSURE=LINEAR")
+        lines.append(f" {_fmt(contact_k)}")
+        if load_case.friction_mu > 0:
+            lines.append("*FRICTION")
+            # Stick slope: contact stiffness scaled down keeps the tangential problem
+            # conditioned without making stick artificially compliant.
+            lines.append(f" {load_case.friction_mu}, {_fmt(contact_k * 0.05)}")
+        lines.append("*CONTACT PAIR, INTERACTION=SI1, TYPE=NODE TO SURFACE")
+        lines.append(" SWHEEL, SINDENT")
+    else:
+        # The tread *is* the rigid body. That is the modelling claim, not a convenience: a
+        # ring segment is rigid and rides on a slide, so tying the tip to one driven node
+        # reproduces the ring's kinematics exactly, and the reaction at that node is the
+        # segment force the ROM wants. It also means the tip cannot rotate or deform
+        # locally, which is the difference from a plate and the reason both are measured.
+        lines.append(f"*RIGID BODY, NSET=NTREAD, REF NODE={ref_node}, ROT NODE={rot_node}")
 
     # The axle. Fixing the whole bore surface is slightly stiffer near the hub than a
     # kinematically coupled shaft would be; negligible for radial stiffness, and it avoids
@@ -235,8 +273,26 @@ def build_deck(
     # rejected outright.
     lines.append(" NBORE, 1, 2, 0.0" if plane_strain else " NBORE, 1, 3, 0.0")
     lines.append(f" {rot_node}, 1, 3, 0.0")
-    lines.append(f" {ref_node}, 1, 1, 0.0")
-    lines.append(f" {ref_node}, 3, 3, 0.0")
+    # Which reference-node DOF is driven, and — the part that is easy to get wrong — which of
+    # the others are held.
+    #
+    # Radial: drive 2, hold 1. A ring segment on a radial slide has no tangential freedom, so
+    # holding it is the model, not a convenience.
+    #
+    # Tangential: drive 1 and leave **2 free**. This was first written holding 2 as well, on
+    # the reasoning that a free radial coordinate would let the claw "relieve" the push. That
+    # reasoning is backwards and the number said so: a claw bending tangentially sweeps its
+    # tip along an *arc*, so it must come radially inward, and forbidding that forces the claw
+    # to stretch along its own axis instead. It then reports the axial mode — measured
+    # 7.35 N/mm against a beam-theory 0.0585, off by 125x, and constant with displacement
+    # because nothing was bending. With 2 free the measurement is the tip compliance
+    # ``1/C_tt``, which is what a step edge actually loads.
+    driven = 1 if load_case.kind.is_tangential else 2
+    held = (3,) if load_case.kind.is_tangential else (1, 3)
+    for dof in held:
+        if dof == 3 and plane_strain:
+            continue  # CalculiX supplies the out-of-plane constraint itself; DOF 3 is rejected
+        lines.append(f" {ref_node}, {dof}, {dof}, 0.0")
 
     lines.append("*AMPLITUDE, NAME=SWEEP")
     lines.append(" 0.0, 0.0, 1.0, 1.0, 2.0, 0.0")
@@ -261,14 +317,15 @@ def build_deck(
         f"{solver.min_increment}, {solver.max_increment}"
     )
     lines.append("*BOUNDARY, AMPLITUDE=SWEEP")
-    lines.append(f" {ref_node}, 2, 2, {_fmt(delta)}")
+    lines.append(f" {ref_node}, {driven}, {driven}, {_fmt(delta)}")
 
     lines.append("*NODE PRINT, NSET=NREF, TIME POINTS=TP, TOTALS=ONLY")
     lines.append(" RF")
     lines.append("*NODE PRINT, NSET=NREF, TIME POINTS=TP")
     lines.append(" U")
-    lines.append("*CONTACT PRINT, TIME POINTS=TP")
-    lines.append(" CSTR, CDIS, CNUM")
+    if contact:
+        lines.append("*CONTACT PRINT, TIME POINTS=TP")
+        lines.append(" CSTR, CDIS, CNUM")
     lines.append("*EL PRINT, ELSET=ESPOKES, TIME POINTS=TP")
     lines.append(" S")
     lines.append("*NODE FILE, TIME POINTS=TP")
@@ -283,7 +340,7 @@ def build_deck(
         slave_nodes=slave,
         slave_coords_m=slave_coords,
         n_nodes=n_nodes_total,
-        n_elements=n_wheel_elems + indenter.n_elements,
+        n_elements=n_wheel_elems + (indenter.n_elements if contact else 0),
     )
 
 

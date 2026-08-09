@@ -30,10 +30,25 @@ to extract.
 
 **Scoped 2026-08-08, and it is bigger than it reads.** A claw points radially, so a radial tip
 load compresses it as a *column* and a tangential one bends it as a *cantilever*. At the
-nominal claw and the knocked-down modulus the FEA deck uses (8.99 MPa): radial `EA/L` =
-**33.70 N/mm**, tangential `3EI/L³` = **0.0585 N/mm** — a factor of **576**. The ring models
-the stiff one and omits the soft one entirely, so for a claw this is not a refinement, it is
-the missing dominant compliance.
+nominal claw, **measured** with the contact-free `TIP_RADIAL` / `TIP_TANGENTIAL` cases:
+**24.81 N/mm against 0.1851 N/mm — a factor of 134**. The ring models the stiff one and omits
+the soft one entirely, so for a claw this is not a refinement, it is the missing dominant
+compliance.
+
+**The FEA half and the analytic ROM half are done** (2026-08-08/09). `solve_equilibrium_2dof`
+gives a bandless ring a tangential freedom, solved per segment by bisection. Measured: exactly
+inert until a second claw engages at `R(1 − cos π/n)` — 11.4 mm for twelve claws — then 3%
+softer at 12 mm and 17% at 25 mm. So the flat-plate fit **at design load is unaffected** (24.5 N
+is δ ≈ 1 mm) and the whole benefit is at a step.
+
+The `ROM_VERSION` bump landed with #26 (`rom-0.4.0`), and the five step-climb signatures were
+re-run across the re-fit: still **5/5** on `--tiny`. #26 no longer blocks anything here.
+
+What remains is the **MJCF joint**, so MuJoCo has the tangential freedom too. Today the
+analytic ring can splay and the simulated one cannot, which means the two now disagree
+*deliberately* above 11.4 mm — and the step-climb rig is the simulated one, so the 5/5 above
+was judged without any of the splay this issue is about. Until the joint exists, the tangential
+freedom changes no result the project actually reports.
 
 It is also loaded exactly where it hurts. Flat rolling presses a claw radially, into the stiff
 mode, and the ring is fine; a step edge and drive torque load it tangentially, which the ring
@@ -189,6 +204,7 @@ Kept so the numbering stays unambiguous. The evidence for each is in
 | 18 | Per-claw FEA sector, and a ROM whose segments are the claws | 2026-08-08 — segments are claws |
 | 25 | `scripts/explore.py`, the manual playground and its HTML report | 2026-08-08 — a manual playground |
 | 24 | Separate tip slip from structural response in the claw curve | 2026-08-08 — stick or slip |
+| 26 | Settle how the ring resolves a frictionless contact force | 2026-08-09 — MuJoCo settles #26 |
 
 Three of these closed differently from how their titles read, which is worth knowing before
 trusting one:
@@ -212,3 +228,9 @@ trusting one:
   on the stick branch, insensitive to friction above mu=0.2 and mesh-converged to under 1%.
 - **#4 and #6 both concern `configs/robot.yaml` and neither froze it.** `meta.frozen` is
   still `false`; see the standing gaps above.
+- **#26 closed against the incumbent, and the correction is small on today's designs.**
+  MuJoCo matched `f_r/cos θ` to 6e-11 and `f_r·cos θ` to 25%, so the ring was wrong — but the
+  tiny design's fitted `a` moves only 3.6% at 24 segments and under 0.3% at 36 and 48, because
+  its patch is three segments wide. The correction scales with how far the patch spreads
+  (14.1% at ±30°), so it matters for claws and barely at all for `T3`. Do not cite it as a
+  reason previous `T3` numbers were wrong.
