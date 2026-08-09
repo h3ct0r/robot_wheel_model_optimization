@@ -20,6 +20,40 @@ weeks; this file says what is blocking the next fortnight of it.
 
 ## Next
 
+### #27 — The ring's tangential element is a slide; it must be a hinge at the claw root
+
+**Highest priority in the claw direction.** Retitled 2026-08-09 after the measurement below
+overturned the day's earlier reading of it — the log entry of the same date is the record.
+
+**What was thought.** `k_r/k_t = (L/t)²` exactly for a rectangular section (69.4 predicted,
+75.5 measured on the driven R 60 claw), so compliance and torque capacity are one parameter,
+and a linear `k_t` = 0.2277 N/mm puts 93.5 mm of tip deflection under the platform's 21.3 N.
+That read as a structural impossibility for `T7`.
+
+**What is actually true.** The claw *stiffens*: pushed to a full claw length its secant rises
+**3.6×** and its tangent **13×**, because it rotates toward the load and carries it axially
+rather than in bending. It reaches 21.3 N at about **36 mm**, not 93.5. The `(L/t)²` identity
+still holds and is still a genuine tension in the family, but it is a small-deflection
+statement and the claw does not stay in small deflection, so it does not settle the design.
+
+**What actually blocks the rolling model.** The segment's *kinematics*. A two-slide segment
+moves its tip along a straight line, so the tip's distance from the hub centre is `√(R² + v²)`
+and **grows** with splay; a hinged claw's tip swings on an arc and the distance **shrinks**.
+Error on the R 60 claw: +2.1% of R at 10 mm of splay, +8.4% at 20 mm, **+30.1% at 36 mm** —
+and outward is the destabilising sign, because a segment pressing harder into the ground
+splays further. It is a property of the element, so no timestep, joint range or damping
+touches it.
+
+**Work: replace the tangential slide with a root hinge and a rotational spring.** The measured
+`TIP_TANGENTIAL` curve is already a moment-rotation curve of exactly that hinge. A hinge keeps
+the claw length fixed by construction, and it removes the feedback. Expect to lose the clean
+per-segment factorisation of `solve_equilibrium_2dof`, which is what bought the slide.
+
+**What survives untouched:** the flat-plate work, where splay stays small — the geometric
+error is 0.0% of R at δ = 12 mm and 1.5% at 18 mm. Read the 25 mm entry of the softening table
+with a 6% caveat. The static MuJoCo-vs-analytic agreement at 1e-9 is also untouched and was
+never evidence about this: both models share the same kinematics, which is why they agreed.
+
 ### #20 — Add tangential claw compliance to the ring ROM
 
 Every segment in `src/wheelopt/rom/ring.py` and its MJCF realisation has a **radial slide
@@ -35,35 +69,30 @@ nominal claw, **measured** with the contact-free `TIP_RADIAL` / `TIP_TANGENTIAL`
 the soft one entirely, so for a claw this is not a refinement, it is the missing dominant
 compliance.
 
-**The FEA half and the analytic ROM half are done** (2026-08-08/09). `solve_equilibrium_2dof`
-gives a bandless ring a tangential freedom, solved per segment by bisection. Measured: exactly
-inert until a second claw engages at `R(1 − cos π/n)` — 11.4 mm for twelve claws — then 3%
-softer at 12 mm and 17% at 25 mm. So the flat-plate fit **at design load is unaffected** (24.5 N
-is δ ≈ 1 mm) and the whole benefit is at a step.
+**The FEA half, the analytic ROM half and the MJCF joint are all done** (2026-08-08/09), and
+the issue is still open because the driven rig will not run with it.
 
-The `ROM_VERSION` bump landed with #26 (`rom-0.4.0`), and the five step-climb signatures were
-re-run across the re-fit: still **5/5** on `--tiny`. #26 no longer blocks anything here.
+`solve_equilibrium_2dof` gives a bandless ring a tangential freedom, solved per segment by
+bisection; `ring_bodies(..., tangential=True)` gives MuJoCo the same freedom, refused on a
+banded spec because the band tendons couple radial joints only. The two agree per segment to
+**1e-9** on both Kuhn-Tucker conditions in the static press, and on totals to 0.02-0.07%. The
+`ROM_VERSION` bump landed with #26.
 
-What remains is the **MJCF joint**, so MuJoCo has the tangential freedom too. Today the
-analytic ring can splay and the simulated one cannot, which means the two now disagree
-*deliberately* above 11.4 mm — and the step-climb rig is the simulated one, so the 5/5 above
-was judged without any of the splay this issue is about. Until the joint exists, the tangential
-freedom changes no result the project actually reports.
+**What blocks it: the wheel folds over under drive.** At the platform's 21.3 N per wheel a claw
+at the measured `k_t` needs **144 mm** of tangential deflection (188 mm at stall) against a
+±30 mm joint range on a 60 mm wheel. The claws lie flat and the run is meaningless. That is
+the model being honest, not a bug — the tractive force at a planted tip is perpendicular to
+the claw, so it bends it as a cantilever, and 134x below radial is far too soft to carry it.
 
-It is also loaded exactly where it hurts. Flat rolling presses a claw radially, into the stiff
-mode, and the ring is fine; a step edge and drive torque load it tangentially, which the ring
-cannot move in at all. Obstacle traversal is the whole point of the project.
+Step 1 of the plan here — measure `k_t` on the design actually being driven — was done the same day and produced **#27**, which now blocks the rest. The measured `k_t` is 0.2277 N/mm (ratio 75.5x, not the nominal claw's 134x), the wheel still folds at that value, and the reason is structural rather than a parameter choice. There is no point putting the tangential freedom into the five signatures until there is a claw model that survives the load.
+
+Also unresolved and cheap: `run_step` graded a collapsed wheel **4/5**, because it accepts any
+run whose history stays finite. `fraction_beyond_fit` did say 100%, but the headline did not.
 
 The spike's 50 mm-versus-20 mm headline was measured on a **banded `T3`** design, where the
 band carries tangential load between segments — that result stands, and it does **not**
 transfer to claws. Any claw climb number from the current ROM is a lower bound on compliance,
 so probably pessimistic.
-
-Work: a tangential degree of freedom per segment (a second slide, or a hinge at the root),
-stiffness fitted to a tangential tip-load FEA case; in MJCF, one more joint per segment plus
-its force law. Check whether it moves the step-climb signatures in `scripts/run_step.py` — the
-climb result is the most likely to change, since a claw that cannot bend backwards cannot
-hook. Bump `ROM_VERSION`.
 
 ---
 

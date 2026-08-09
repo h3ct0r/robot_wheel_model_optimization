@@ -62,6 +62,7 @@ __all__ = [
     "RingFit",
     "fit_spring_law",
     "fit_tabulated_law",
+    "law_from_claw_curve",
     "nnls",
     "ring_from_claw_curve",
 ]
@@ -545,6 +546,24 @@ def ring_from_claw_curve(
             f"through it and one claw's curve is not a segment law. rim_thickness_mm is "
             f"{params.rim_thickness_mm:g}"
         )
+    spec = RingSpec(radius_m=params.outer_radius_mm * 1e-3, n_segments=params.n_spokes)
+    return spec, law_from_claw_curve(delta_m, force_n)
+
+
+def law_from_claw_curve(delta_m: np.ndarray, force_n: np.ndarray) -> TabulatedLaw:
+    """One claw's measured tip curve, as a segment law. No fit, no deconvolution.
+
+    Shared by :func:`ring_from_claw_curve`, which uses the **radial** curve, and by the
+    tangential path, which uses the curve from ``LoadCaseKind.TIP_TANGENTIAL``. Both are one
+    claw's own load-deflection data standing for one segment's spring, so the arithmetic is
+    the same and the difference is only which case produced the numbers.
+
+    A table rather than a stiffness, and for the tangential direction that is not a
+    refinement. Measured 2026-08-09 on the R 60 mm claw: the tangential secant rises **3.6×**
+    and the tangent **13×** between 4 mm and 40 mm of deflection, because the claw rotates
+    toward the load and starts carrying it axially. A single ``k_t`` describes that curve only
+    below about 10 mm, and the deflections under drive torque are several times that.
+    """
     d = np.asarray(delta_m, dtype=np.float64).ravel()
     f = np.asarray(force_n, dtype=np.float64).ravel()
     if d.shape != f.shape:
@@ -566,8 +585,7 @@ def ring_from_claw_curve(
     # an extrapolation back to the origin from the first two samples' worth of data.
     knots = np.concatenate([[0.0], d])
     forces = np.concatenate([[0.0], f])
-    spec = RingSpec(radius_m=params.outer_radius_mm * 1e-3, n_segments=params.n_spokes)
-    return spec, TabulatedLaw.from_forces(knots, forces)
+    return TabulatedLaw.from_forces(knots, forces)
 
 
 def _clean(delta_m: np.ndarray, force_n: np.ndarray, n_parameters: int,

@@ -901,6 +901,17 @@ def solve_equilibrium_2dof(
 
         y(u, v) = (R - δ) - (R - u) cos θ + v sin θ
 
+    **Valid only while ``v`` is small against the claw length, and this is not a refinement
+    to note later.** The tip here translates along a straight line, so its distance from the
+    hub centre *grows* as ``√(R² + v²)``; a real claw hinges at its root, so its tip swings on
+    an arc and the distance *shrinks*. Measured on the R 60 mm claw (root 20 mm, L 40 mm), the
+    two disagree by +0.1% of R at 2 mm of splay, +2.1% at 10 mm, +8.4% at 20 mm and **+30% at
+    36 mm** — and the sign is the dangerous one: a segment that moves outward as it splays
+    presses harder into the ground, which splays it further. Under drive torque, where
+    deflections reach a claw length, that feedback tears the rolling model apart.
+    On the flat-plate sweeps this stays small: 1.5% of R at δ = 18 mm and 6.4% at 25 mm.
+    See ``docs/plan/TODO.md`` #27 — the fix is a hinge at the root, not a slide at the tip.
+
     and it may not go below the plate. On a frictionless plate the contact force is purely
     **vertical**, so it drives both freedoms, weighted by how much each changes the height:
     ``∂y/∂u = cos θ`` and ``∂y/∂v = sin θ``. Stationarity of

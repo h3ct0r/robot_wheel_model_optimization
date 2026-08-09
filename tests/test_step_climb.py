@@ -20,11 +20,13 @@ from wheelopt.cad.materials import MaterialSpec
 from wheelopt.cad.params import WheelParams
 from wheelopt.rom.ring import RingSpec, SpringLaw, ring_for_design
 from wheelopt.sim.step_climb import (
+    EXPLICIT_STABILITY_LIMIT,
     RigSpec,
     build_scenario_mjcf,
     ring_axle_inertia_kg_m2,
     run_step,
     segment_damping_n_s_per_m,
+    stable_timestep_s,
 )
 
 try:
@@ -100,6 +102,44 @@ class TestDamping(unittest.TestCase):
             segment_damping_n_s_per_m(LAW, SPEC, 0.0, 0.15)
 
 
+class TestExplicitStability(unittest.TestCase):
+    """The timestep bound on a segment law driven through ``qfrc_applied``.
+
+    Measured 2026-08-09 on the bandless R 60 mm claw ring, 2 g segments, k = 19.76 kN/m
+    (ω = 3143 rad/s): ω·h = 0.251 and below run clean, 0.314 and above diverge inside 5 ms.
+    The radial-only rig had been running at ω·h = 0.63 and surviving, because an out-of-contact
+    radial segment sits at exactly u = 0 with exactly zero force and nothing excites it. The
+    tangential joint's axis sweeps through gravity as the wheel turns, so it is excited every
+    revolution and the marginal mode grows.
+    """
+
+    def test_a_soft_law_does_not_move_the_timestep(self):
+        soft = SpringLaw(a=180.0)  # omega = 300 rad/s, needs 6.7e-4
+        self.assertEqual(stable_timestep_s([soft], 0.002, 2.0e-4), 2.0e-4)
+
+    def test_a_stiff_law_tightens_it_to_the_measured_bound(self):
+        stiff = SpringLaw(a=19760.0)
+        got = stable_timestep_s([stiff], 0.002, 2.0e-4)
+        self.assertAlmostEqual(got, 6.3628e-05, places=8)
+        omega = np.sqrt(19760.0 / 0.002)
+        self.assertAlmostEqual(omega * got, EXPLICIT_STABILITY_LIMIT, places=12)
+        # Comfortably under the divergence observed at omega*h = 0.314.
+        self.assertLess(omega * got, 0.251)
+
+    def test_the_stiffest_law_wins_and_none_is_ignored(self):
+        stiff, soft = SpringLaw(a=19760.0), SpringLaw(a=180.0)
+        self.assertEqual(stable_timestep_s([stiff, soft], 0.002, 2.0e-4),
+                         stable_timestep_s([soft, stiff], 0.002, 2.0e-4))
+        self.assertEqual(stable_timestep_s([soft, None], 0.002, 2.0e-4),
+                         stable_timestep_s([soft], 0.002, 2.0e-4))
+
+    def test_no_laws_leaves_the_request_alone(self):
+        """The rigid wheel has no segment springs, so it must not be slowed down to match
+        the compliant one — that would change the comparator to fix the subject."""
+        self.assertEqual(stable_timestep_s([], 0.002, 2.0e-4), 2.0e-4)
+        self.assertEqual(stable_timestep_s([None], 0.002, 2.0e-4), 2.0e-4)
+
+
 class TestScenarioMjcf(unittest.TestCase):
     def test_the_rigid_wheel_has_no_ring_and_no_band(self):
         xml = build_scenario_mjcf(SPEC, RIG, rigid=True)
@@ -119,6 +159,24 @@ class TestScenarioMjcf(unittest.TestCase):
         # about +y, because the contact point moves at -omega*R in x.
         self.assertIn('name="axle" type="hinge" axis="0 1 0"', build_scenario_mjcf(
             SPEC, RIG, rigid=False))
+
+    def test_the_tangential_freedom_is_refused_on_a_banded_ring(self):
+        """`SPEC` is the tiny `T3`, which has a band. The band tendons couple radial joints
+        only, so tangential slides would let the segments shear with nothing resisting — the
+        one deformation a shear band exists to carry. Refused rather than silently softened,
+        matching `solve_equilibrium_2dof`.
+        """
+        self.assertTrue(SPEC.is_coupled)
+        with self.assertRaises(ValueError):
+            build_scenario_mjcf(SPEC, RIG, rigid=False, tangential=True)
+
+    def test_a_bandless_ring_gets_one_extra_joint_per_segment(self):
+        bandless = replace(SPEC, band_bending_n_per_m=0.0, band_hoop_n_per_m=0.0)
+        plain = build_scenario_mjcf(bandless, RIG, rigid=False)
+        splayed = build_scenario_mjcf(bandless, RIG, rigid=False, tangential=True)
+        self.assertNotIn('name="t0"', plain)
+        for i in range(bandless.n_segments):
+            self.assertIn(f'name="t{i}"', splayed)
 
     def test_the_step_top_sits_at_the_requested_height(self):
         rig = replace(RIG, step_height_m=0.05)

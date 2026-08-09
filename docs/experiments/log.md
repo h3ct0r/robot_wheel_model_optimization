@@ -1967,3 +1967,268 @@ from literal angles rather than through `segment_angles`/`penetrations`, and by 
 arbitration above kept as a regression test.
 
 **Gates.** Unit suite **525/525** (4 new), ruff at the standing 71.
+
+## 2026-08-09 — The MJCF tangential joint works statically and folds the wheel under drive
+
+**Hypothesis.** Give the MuJoCo ring the tangential freedom the analytic ring got yesterday,
+and the step-climb signatures will move. Second half of TODO #20.
+
+### The joint, and what validates it
+
+One extra slide per segment along `(cos θ, 0, sin θ)` — the in-plane perpendicular to the
+segment's own radius, chosen so that moving a segment by `v` raises its tip by `v sin θ`,
+exactly the term in the analytic height equation. Opt-in, and **off means absent rather than
+locked**, so every result that predates it is still reproducible from the same XML.
+
+**Refused on a banded spec**, matching `solve_equilibrium_2dof`. Not a solver limitation —
+MuJoCo would integrate it happily — but `coupling_tendons` couples the *radial* joints only,
+so a banded ring with tangential slides would let its segments shear past each other with
+nothing resisting, which is the one deformation a shear band exists to carry.
+
+Validated per segment, not on totals, for the same reason as #26: MuJoCo's capsules engage a
+different set of segments than the analytic point geometry. Reading back its own `u_i`, `v_i`
+and `λ_i` on the static press (12 claws, R 85 mm, k_r 24.81 N/mm, k_t 0.1851 N/mm), both
+Kuhn-Tucker conditions hold at **1e-9 or better** at every contact and every depth:
+
+| δ, mm | seg | u, mm | v, mm | λ, N | `f_r − λcos θ` | `f_t − λsin θ` |
+|---|---|---|---|---|---|---|
+| 18 | 0 | 17.911 | 0.000 | 444.310 | −5.7e-14 | 0 |
+| 18 | ±1 | 0.205 | ±15.832 | 5.861 | 3.4e-10 | ∓5.3e-10 |
+| 25 | ±1 | 0.381 | ±29.510 | 10.925 | 5.9e-10 | ∓1.0e-9 |
+
+Totals agree too — 456.03 N measured against 456.10 N analytic at 18 mm (0.016%), 639.47
+against 639.89 at 25 mm (0.066%). The off-axis claws **fold rather than compress**: 15.8 mm of
+splay against 0.2 mm of compression, which is the whole phenomenon and is what a joint on the
+wrong axis would not produce.
+
+### Two records corrected
+
+**`R(1 − cos π/n)` is wrong; the pitch is `2π/n`.** The *number* — 11.4 mm for twelve 85 mm
+claws — is right, the formula written beside it is not, and `tests/test_rom.py` had encoded the
+formula: `SECOND_CLAW_M = 0.085 * (1 - cos(π/12))` = **2.90 mm**, a quarter of the truth.
+Nothing failed, because the only test using it halves it first and 1.45 mm is below both
+thresholds. A wrong constant that happens to be conservative is still wrong. Now asserted
+against the segment grid.
+
+**"3% softer at 12 mm, 17% at 25 mm" does not reproduce.** Against the corrected radial-only
+ring the softening is far larger:
+
+| δ, mm | radial-only, N | 2-dof, N | ratio |
+|---|---|---|---|
+| 11 | 272.88 | 272.88 | 1.000 |
+| 12 | 338.18 | 298.57 | 0.883 |
+| 18 | 883.93 | 456.10 | 0.516 |
+| 25 | 1520.65 | 639.89 | 0.421 |
+
+Part of that is #26 moving the baseline, but the 2-dof numbers moved too (318.4 → 298.57 at
+12 mm), which #26 does not touch. The likeliest cause is that yesterday's table was taken
+**before** the `_invert` sign bug was fixed — that bug left one side of the ring unable to
+splay, which under-reports exactly this. The magnitudes are now pinned in the test rather than
+only the direction, so a third set cannot appear silently.
+
+### A timestep bound that was there all along
+
+Driving the joint in the **rolling** rig diverged immediately. It is not the force law: the
+joint diverges with *no force applied to it at all*, and it diverges **faster** at higher
+stiffness, which is the signature of an explicit-integration limit rather than a sign error.
+
+`qfrc_applied` is an *external* force, so `implicitfast` integrates it explicitly even though
+it integrates a joint's own `damping` attribute implicitly. Measured on the bandless R 60 mm
+claw ring, k = 19.76 kN/m on 2 g segments (ω = 3143 rad/s):
+
+| ω·h | result |
+|---|---|
+| 0.377, 0.314 | diverges inside 5 ms |
+| 0.251, 0.220, 0.189, 0.157 | clean over 0.6 s |
+
+**The radial-only rig has been running at ω·h = 0.63 and surviving by luck**: an out-of-contact
+radial segment sits at exactly `u = 0` where the law returns exactly zero, so nothing excites
+the mode. A tangential joint's axis sweeps through gravity every revolution, so it is excited
+continuously. Fixed with `stable_timestep_s`, which tightens the step to `ω·h ≤ 0.2` — about
+25% under the observed boundary. Two alternatives also work and were rejected: **native joint
+damping** (`c ≥ 5 N·s/m`) is dissipation no material supplied, and cost of transport is one of
+the five signatures; **heavier segments** (`≥ 20 g` against 2 g) would move the rigid
+comparator too, since it matches ring mass. Re-running the radial-only baseline at the tighter
+step changed nothing that matters (edge patch 26.9 mm both ways, CoT 0.0197 → 0.0201, peak
+compression 7.51 → 8.05 mm, 5/5 either way), which is the check that the bound is a numerical
+fix and not a physical one.
+
+### And then the wheel folds over
+
+With the timestep sound, the driven run is still unusable, and now for a reason the model is
+entitled to give. At the platform's per-wheel load the tractive force is 21.3 N, and a claw at
+`k_t = 0.1475 N/mm` needs
+
+    21.3 / 147.5 = 144 mm of tangential deflection (188 mm at stall)
+
+against a joint range of ±30 mm and a wheel radius of 60 mm. The claws lie flat, the reported
+"contact patch" becomes 404 mm, and the signature table prints **4/5** for a wheel that has
+collapsed — worth noting on its own, since `run_step` grades any run whose history stays
+finite. `fraction_beyond_fit` did report 100%.
+
+**This is a design finding, not only a modelling one.** A tip-loaded claw cantilever at the
+measured stiffness cannot transmit drive torque: the tractive force at a planted tip is
+perpendicular to the claw, so it bends it, and 134× below radial is far too soft at this load.
+Either the claw family needs a much stiffer tangential path than the nominal claw has, or
+torque is not transmitted the way this ROM assumes. **Not resolved here** — the 134× was
+measured on one claw (R 85, 7 mm root, 0.15 taper) and scaled onto a different design, so the
+first thing to do is measure `k_t` on the design actually being driven.
+
+**What stands and what does not.** The joint is built, refused where it would be wrong, and
+validated against the analytic ring to 1e-9 in the static press. The rolling rig with it does
+**not** produce a usable number, so the five step-climb signatures are still the radial-only
+ones. #20 stays open.
+
+**Gates.** Unit suite **535/535** (6 new), ruff at the standing 71.
+
+## 2026-08-09 — A claw's torque capacity and its compliance are the same number, and they trade as `(L/t)²`
+
+**Hypothesis.** The driven rig folded the wheel flat using a `k_t` scaled from the nominal
+claw's 134× ratio. Measure `k_t` on the design actually being driven before concluding
+anything. TODO #20 step 1.
+
+### The measurement
+
+`TIP_RADIAL` and `TIP_TANGENTIAL` on the driven design's own claw sector — R 60 mm, 12 claws,
+6 mm root, taper 0.6, hub 20 mm, TPU_95A at 40% infill, plane strain, δ to 4 mm:
+
+| | measured, first secant | closed form | agreement |
+|---|---|---|---|
+| radial | **17.20 N/mm** | `EA/L` = 17.03 | +1.0% |
+| tangential | **0.2277 N/mm** | `12EI/L³` = 0.2453 | −7.2% |
+
+Both land where a tapered claw should: the radial secant falls from 17.20 to 7.78 N/mm over
+4 mm as the column starts to buckle, and the tangential one is flat to 0.6% across the sweep,
+which is what a cantilever in small deflection does.
+
+**Ratio 75.5×, not 134×.** The 134× belongs to the *nominal* claw (7 mm root, taper 0.15) and
+does not transfer. So the number driven into the rig yesterday, `k_r/134` = 0.1475 N/mm, was
+1.5× too soft — and rerunning at the measured 0.2277 N/mm makes no difference: the wheel still
+collapses, 691 mm of "contact patch", peak compression 6481 mm.
+
+### Why it could not have been rescued by a better claw
+
+The two closed forms have a ratio with everything cancelled out of it:
+
+    k_r / k_t = (EA/L) / (12EI/L³) = A L² / (12 I) = (L/t)²   for a rectangular section
+
+`L/t = 8.33` here, so `(L/t)² = 69.4` against the measured 75.5 — 9% apart, the taper. **The
+stiffness ratio is the slenderness squared, and nothing else.** Not the modulus, not the width,
+not the radius.
+
+That closes off the obvious fix. Holding tip deflection to 5 mm under the platform's 21.3 N per
+wheel needs `k_t ≥ 4.26 N/mm`, i.e. `k_t/k_r ≥ 0.248`, i.e. **`L/t ≤ 2.01`**. A cantilever twice
+as long as it is thick is not a compliant claw; it is a bump on a hub. **A claw is compliant
+because it is slender, and slender is exactly what makes it unable to carry tractive load
+through tip bending.** The two properties are one parameter.
+
+Measured deflections at the platform load, for the record: 93.5 mm at 21.3 N, 121.7 mm at the
+1.661 N·m stall torque — against a 60 mm wheel radius.
+
+### What this does and does not establish
+
+**Does:** for the `T7` family as currently drawn — a straight radial cantilever whose *tip* is
+the running surface — compliance and drive-torque capacity cannot be chosen independently, and
+at this platform's load they are irreconcilable. That is a design-space result and it belongs
+in `04-design-space.md`, not only in the ROM.
+
+**Does not:** it does not say a claw wheel cannot work. It says the tip-loaded cantilever model
+of one cannot. Two escapes are visible and neither is tested here. A claw deflecting 90 mm does
+not stay a small-deflection cantilever — it folds and then bears along its *side*, which
+geometrically stiffens and is plausibly how such wheels actually carry torque. And the load per
+claw is shared over however many are in contact, which for a bandless 12-claw wheel is one to
+three, not one.
+
+**And it exposes a ROM validity limit, which is the part that matters immediately.** The ring
+gives each segment a linear spring on a straight slide. A tangential deflection of order the
+wheel radius is outside anything a linearised segment model can represent, so **the ring ROM
+cannot be used to evaluate a claw wheel under drive torque at all** — not "gives a pessimistic
+number", cannot be used. The 5/5 signatures on this design remain the radial-only ones, and
+they are only meaningful because the radial mode stays small (8.05 mm peak, inside its fitted
+range).
+
+Filed as **#27**. #20's remaining work is blocked behind it: there is no point adding the
+tangential freedom to the signatures until there is a model of the claw that survives the load.
+
+**Gates.** Unit suite 535/535, ruff at the standing 71. No code changed for this entry — it is
+a measurement and an identity.
+
+## 2026-08-09 — The claw does stiffen, so the earlier collapse verdict was wrong; the real fault is the segment's kinematics
+
+**Hypothesis.** The linear `k_t` says the wheel folds 93.5 mm under load. Push the claw's own
+`TIP_TANGENTIAL` sweep out to a full claw length and see whether it stiffens geometrically
+before it gets there. TODO #27.
+
+**Bias declared before running:** the tread node set is a rigid body, so the tip cannot rotate.
+A guided tip forces double curvature and *over*-states stiffening, so a null result would have
+been strong and a positive one is weakened by the same bias.
+
+### It stiffens, hard
+
+R 60 mm claw, `*STEP, NLGEOM` already on, tangential sweep to 40 mm = one claw length:
+
+| v, mm | F, N | secant, N/mm | tangent, N/mm | secant vs linear |
+|---|---|---|---|---|
+| 4 | 0.916 | 0.2291 | 0.239 | 1.00× |
+| 12 | 2.919 | 0.2433 | 0.281 | 1.06× |
+| 20 | 5.590 | 0.2795 | 0.421 | 1.22× |
+| 28 | 10.159 | 0.3628 | 0.845 | 1.58× |
+| 36 | 21.114 | 0.5865 | 2.343 | 2.56× |
+| 40 | 32.992 | 0.8248 | 2.970 | **3.60×** |
+
+Secant 3.6×, **tangent 13×**. The claw rotates toward the load and starts carrying it axially
+instead of in bending. It passes the platform's 21.3 N at about **36 mm**, not 93.5 mm.
+
+**So yesterday's verdict was wrong and is withdrawn.** "A structural impossibility" and "the
+ring ROM cannot evaluate a claw wheel under drive torque" were both extrapolations of a linear
+stiffness through a curve that is anything but linear. The `(L/t)²` identity still holds —
+it is a statement about the *small-deflection* stiffnesses and it is still a real design
+tension — but it does not settle the design, because the claw does not stay in small
+deflection.
+
+Acted on: `law_from_claw_curve` factored out of `ring_from_claw_curve`, and `run_step.py
+--tangential` now **measures** the tangential law by a `TIP_TANGENTIAL` sweep on the design's
+own claw sector and tabulates it, instead of taking a stiffness on the command line. Measured
+rather than chosen, invariant 2, and a table rather than a number because of the row above.
+
+### And the rig still explodes, for a better reason
+
+With the tabulated law the wheel still collapses — 321 mm "contact patch", 6823 mm of radial
+compression. That is not the force law any more. It is the **segment's kinematics**.
+
+The two-slide segment translates its tip along a straight line perpendicular to the radius, so
+the tip's distance from the hub centre is `√(R² + v²)` and **grows** with splay. A real claw
+hinges at its root, so its tip swings on an arc and the distance **shrinks**. On the R 60 mm
+claw (root 20 mm, L 40 mm):
+
+| splay, mm | slide model | hinged claw | error | as % of R |
+|---|---|---|---|---|
+| 2 | 60.03 | 59.98 | +0.05 | +0.1% |
+| 10 | 60.83 | 59.58 | +1.25 | +2.1% |
+| 20 | 63.25 | 58.19 | +5.06 | +8.4% |
+| 36 | 69.97 | 51.94 | **+18.03** | **+30.1%** |
+
+**The sign is the whole problem.** A segment that moves *outward* as it splays presses harder
+into the ground, which splays it further. That feedback is built into the element, so no
+timestep, joint range or damping fixes it — and at the deflections drive torque produces it is
+30% of a wheel radius.
+
+**Where the existing 2-dof numbers stand.** The same check at the flat-plate indentations
+already published: **+0.0% of R at δ = 12 mm, +1.5% at 18 mm, +6.4% at 25 mm**. So the static
+softening table (11.7% / 48.4% / 57.9%) is sound at 12 and 18 mm and should be read with a
+6% geometric caveat at 25 mm. The static press validation against MuJoCo is unaffected — both
+models share the same wrong kinematics there, which is exactly why they agreed to 1e-9 and why
+that agreement was never evidence about *this*.
+
+### The fix, named
+
+**A hinge at the claw root with a rotational spring, not a slide at the tip.** TODO #20's
+original wording offered "a second slide, or a hinge at the root" and the slide was chosen
+because it factorises the analytic solve. That was the wrong trade. A hinge gets the arc right
+by construction, keeps the claw's length fixed, and is what the measured `TIP_TANGENTIAL`
+curve is a moment-rotation curve of anyway.
+
+Both `solve_equilibrium_2dof` and `ring_bodies(tangential=True)` now carry the validity bound
+in their docstrings with these numbers, rather than only in this log.
+
+**Gates.** Unit suite 535/535, ruff at the standing 71.

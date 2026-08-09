@@ -25,11 +25,17 @@ contaminating a stiffness this project is trying to measure.
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 
 import numpy as np
 
-from .ring import RingSpec, SpringLaw, curvature_operator, segment_angles
+from .ring import (
+    RadialLaw,
+    RingSpec,
+    curvature_operator,
+    segment_angles,
+    symmetric_force_n,
+)
 
 __all__ = [
     "MissingMuJoCo",
@@ -61,15 +67,23 @@ class RingModel:
     #: Joint ids of the radial segment slides, in segment order.
     segment_joints: np.ndarray
     spec: RingSpec
-    law: SpringLaw
+    law: RadialLaw
+    #: Joint ids of the tangential slides, in segment order. Empty when the model was built
+    #: without a tangential law — empty rather than absent, so a caller that indexes it gets
+    #: no forces rather than an attribute error, and a radial-only ring stays radial-only.
+    tangential_joints: np.ndarray = field(
+        default_factory=lambda: np.empty(0, dtype=np.int64)
+    )
+    tangential_law: RadialLaw | None = None
 
 
 def build_mjcf(
     spec: RingSpec,
-    law: SpringLaw,
+    law: RadialLaw,
     *,
     segment_half_width_m: float = 0.015,
     indentation_m: float = 0.0,
+    tangential: bool = False,
 ) -> str:
     """Emit the MJCF for one ring.
 
@@ -105,7 +119,8 @@ def build_mjcf(
          'contype="0" conaffinity="0"/>'),
     ]
 
-    parts += ring_bodies(spec, segment_half_width_m=segment_half_width_m, indent=6)
+    parts += ring_bodies(spec, segment_half_width_m=segment_half_width_m,
+                         tangential=tangential, indent=6)
     parts += ["    </body>", "  </worldbody>"]
     parts += coupling_tendons(spec)
     parts += ["</mujoco>"]
@@ -119,6 +134,7 @@ def ring_bodies(
     segment_mass_kg: float = SEGMENT_MASS_KG,
     contype: int = 1,
     conaffinity: int = 0,
+    tangential: bool = False,
     indent: int = 6,
 ) -> list[str]:
     """The ``N`` segment bodies, to be nested inside whatever carries the hub.
@@ -127,7 +143,41 @@ def ring_bodies(
     :mod:`wheelopt.sim`, so that a wheel driven at a step is the *same* ring that was fitted
     to the FEA and not a second one that has drifted. Everything positional is relative to
     the parent body's origin, which is the hub centre.
+
+    ``tangential`` adds a **second slide per segment**, along ``(cos θ, 0, sin θ)`` — the
+    in-plane perpendicular to the segment's own radius, which is the freedom
+    :func:`~wheelopt.rom.ring.solve_equilibrium_2dof` calls ``v``.
+
+    **A slide is the wrong element past small ``v``, and a driven wheel is not small ``v``.**
+    See :func:`~wheelopt.rom.ring.solve_equilibrium_2dof` for the measurement: a sliding tip
+    moves *outward* as it splays where a hinged one moves inward, by 30% of the wheel radius
+    at one claw length of deflection, and that is a positive feedback against the ground. Use
+    this for static presses and small-splay work; a rolling wheel under drive torque needs the
+    root hinge of ``TODO.md`` #27 instead. The axis is chosen so the
+    two models are the same model: moving a segment by ``v`` along it raises its tip by
+    ``v sin θ``, exactly the term in the analytic height equation. A claw's tangential
+    stiffness is 134× below its radial one (2026-08-08), so this is not a refinement for the
+    claw topology — it is the compliance a step edge actually loads.
+
+    Off by default, and off means *absent* rather than locked: a ring built without it is the
+    same XML it was before the joint existed, so nothing that predates this has silently
+    become a two-freedom result. Whoever adds the joint must also drive it — MuJoCo gets no
+    force law from the XML, only from ``qfrc_applied`` (invariant 8).
+
+    **Refused on a banded spec**, matching
+    :func:`~wheelopt.rom.ring.solve_equilibrium_2dof`. The refusal is not a limitation of the
+    solver here — MuJoCo would happily integrate it — it is that the model would be wrong.
+    :func:`coupling_tendons` couples the *radial* joints only, because the analytic band is an
+    energy in the compressions; give the segments a tangential freedom as well and they can
+    shear past each other with **nothing resisting**, which is the one deformation a shear
+    band exists to carry. A silently softer ring is exactly the failure this project keeps
+    finding, so it raises instead.
     """
+    if tangential and spec.is_coupled:
+        raise ValueError(
+            "a tangential freedom needs a band that shears; coupling_tendons couples only "
+            "the radial joints, so a banded ring with tangential slides would shear for free"
+        )
     theta = segment_angles(spec)
     r = spec.radius_m
     seg_r = 0.5 * spec.segment_arc_m
@@ -155,6 +205,17 @@ def ring_bodies(
             # far outside anything physical, so hitting one means a bug, not a design.
             (f'{pad}  <joint name="j{i}" type="slide" axis="{ux:.9f} 0 {uz:.9f}" '
              f'range="{-0.9 * r:.9f} {0.5 * r:.9f}" limited="true"/>'),
+        ]
+        if tangential:
+            # Perpendicular to the radius, in the wheel's plane. Segment 0 points down, so
+            # its tangential axis is +x, along the rolling direction — which is the direction
+            # a claw bends when it catches a step, and the reason this joint exists.
+            tx, tz = float(np.cos(angle)), float(np.sin(angle))
+            lines.append(
+                f'{pad}  <joint name="t{i}" type="slide" axis="{tx:.9f} 0 {tz:.9f}" '
+                f'range="{-0.5 * r:.9f} {0.5 * r:.9f}" limited="true"/>'
+            )
+        lines += [
             # The capsule spans the wheel's WIDTH, i.e. along y, the axle direction.
             # Laying it along x instead makes each segment a 30 mm bar in the rolling
             # direction: neighbours 15.7 mm apart then overlap permanently, and the model
@@ -215,28 +276,47 @@ def coupling_tendons(spec: RingSpec, *, indent: int = 2) -> list[str]:
     return lines
 
 
-def _load(spec: RingSpec, law: SpringLaw, **kwargs) -> tuple[RingModel, object, object]:
+def _load(
+    spec: RingSpec,
+    law: RadialLaw,
+    *,
+    tangential_law: RadialLaw | None = None,
+    **kwargs,
+) -> tuple[RingModel, object, object]:
     try:
         import mujoco
     except ImportError as exc:  # pragma: no cover - environment dependent
         raise MissingMuJoCo("MuJoCo is not installed; pip install -e '.[sim]'") from exc
 
-    xml = build_mjcf(spec, law, **kwargs)
+    xml = build_mjcf(spec, law, tangential=tangential_law is not None, **kwargs)
     model = mujoco.MjModel.from_xml_string(xml)
     data = mujoco.MjData(model)
-    segs = np.array(
-        [mujoco.mj_name2id(model, mujoco.mjtObj.mjOBJ_JOINT, f"j{i}")
-         for i in range(spec.n_segments)],
-        dtype=np.int64,
+
+    def ids(prefix: str) -> np.ndarray:
+        return np.array(
+            [mujoco.mj_name2id(model, mujoco.mjtObj.mjOBJ_JOINT, f"{prefix}{i}")
+             for i in range(spec.n_segments)],
+            dtype=np.int64,
+        )
+
+    ring = RingModel(
+        xml=xml,
+        segment_joints=ids("j"),
+        spec=spec,
+        law=law,
+        tangential_joints=(ids("t") if tangential_law is not None
+                           else np.empty(0, dtype=np.int64)),
+        tangential_law=tangential_law,
     )
-    return RingModel(xml=xml, segment_joints=segs, spec=spec, law=law), model, data
+    return ring, model, data
 
 
 def static_load_deflection(
     spec: RingSpec,
-    law: SpringLaw,
+    law: RadialLaw,
     delta_m: np.ndarray,
     *,
+    tangential_law: RadialLaw | None = None,
     settle_steps: int = 3000,
     damping: float = 4.0,
 ) -> np.ndarray:
@@ -250,6 +330,10 @@ def static_load_deflection(
     off its rigid-body reference node.
 
     Args:
+        tangential_law: if given, each segment also gets the in-plane perpendicular freedom
+            and this law resists it, **symmetrically** — a claw bends the same either way, so
+            the force is ``sign(v)·f(|v|)`` and not ``f(v)``, which would make one direction
+            free and the other doubled.
         settle_steps: steps per δ, with the segments damped. Quasi-static by construction —
             the hub cannot move, so this is a relaxation, not a dynamic run.
         damping: joint damping, N·s/m. Sets how fast it settles, not where it settles.
@@ -261,13 +345,25 @@ def static_load_deflection(
     force6 = np.zeros(6, dtype=np.float64)
 
     for k, delta in enumerate(deltas):
-        _, model, data = _load(spec, law, indentation_m=float(delta))
-        dofs = model.jnt_dofadr[:]
-        qpos = model.jnt_qposadr[:]
+        ring, model, data = _load(spec, law, tangential_law=tangential_law,
+                                  indentation_m=float(delta))
+        # Indexed by joint rather than by the whole dof block: with two joints per segment the
+        # block is interleaved, and `model.jnt_dofadr[:]` on its own no longer says which
+        # entry is radial. Getting that wrong would drive a tangential dof with a radial law
+        # — 134x too stiff on a claw, and it would read as a contact bug.
+        radial_dof = model.jnt_dofadr[ring.segment_joints]
+        radial_qpos = model.jnt_qposadr[ring.segment_joints]
+        tan_dof = model.jnt_dofadr[ring.tangential_joints]
+        tan_qpos = model.jnt_qposadr[ring.tangential_joints]
 
         for _ in range(settle_steps):
-            u = -data.qpos[qpos]
-            data.qfrc_applied[dofs] = law.force_n(u) - damping * data.qvel[dofs]
+            u = -data.qpos[radial_qpos]
+            data.qfrc_applied[radial_dof] = (law.force_n(u)
+                                             - damping * data.qvel[radial_dof])
+            if tangential_law is not None:
+                v = data.qpos[tan_qpos]
+                data.qfrc_applied[tan_dof] = (-symmetric_force_n(tangential_law, v)
+                                              - damping * data.qvel[tan_dof])
             mujoco.mj_step(model, data)
 
         total = 0.0

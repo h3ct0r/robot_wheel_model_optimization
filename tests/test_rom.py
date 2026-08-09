@@ -703,6 +703,109 @@ class TestMjcf(unittest.TestCase):
         # 1/cos^2(30) = 1.333. A test that only ever touched one segment would pass either way.
         self.assertEqual(len(touching), 5)
 
+    def test_the_tangential_joint_is_absent_unless_asked_for(self):
+        """Off means absent, not locked. Every result that predates the joint must still be
+        reproducible by the same XML, so a radial-only ring is byte-identical to what it was.
+        """
+        from wheelopt.rom.mjcf import build_mjcf
+
+        plain = build_mjcf(SPEC, self.LAW)
+        self.assertNotIn('name="t0"', plain)
+        model = mujoco.MjModel.from_xml_string(plain)
+        self.assertEqual(model.njnt, SPEC.n_segments)
+
+        both = mujoco.MjModel.from_xml_string(build_mjcf(SPEC, self.LAW, tangential=True))
+        self.assertEqual(both.njnt, 2 * SPEC.n_segments)
+
+    def test_the_tangential_axis_raises_the_tip_by_v_sin_theta(self):
+        """The axis is what makes the MJCF ring and the analytic ring the *same* model.
+
+        `solve_equilibrium_2dof` writes the tip height as ``(R-δ) - (R-u)cos θ + v sin θ``.
+        So displacing a segment along its tangential joint by ``v`` must raise it by exactly
+        ``v sin θ`` and move it horizontally by ``v cos θ``. Checked by moving the joint and
+        reading the body position, which tests the compiled model rather than the string.
+        """
+        from wheelopt.rom.mjcf import build_mjcf
+
+        model = mujoco.MjModel.from_xml_string(build_mjcf(SPEC, self.LAW, tangential=True))
+        data = mujoco.MjData(model)
+        mujoco.mj_forward(model, data)
+        theta = segment_angles(SPEC)
+        before = np.array(data.xpos[1:], copy=True)  # body 0 is world, body 1 the hub
+        v = 0.004
+        for i in range(SPEC.n_segments):
+            data.qpos[model.jnt_qposadr[
+                mujoco.mj_name2id(model, mujoco.mjtObj.mjOBJ_JOINT, f"t{i}")]] = v
+        mujoco.mj_forward(model, data)
+        after = np.array(data.xpos[1:], copy=True)
+        moved = after - before
+        for i in range(SPEC.n_segments):
+            body = mujoco.mj_name2id(model, mujoco.mjtObj.mjOBJ_BODY, f"seg{i}") - 1
+            with self.subTest(segment=i):
+                self.assertAlmostEqual(moved[body, 2], v * np.sin(theta[i]), places=9)
+                self.assertAlmostEqual(moved[body, 0], v * np.cos(theta[i]), places=9)
+                self.assertAlmostEqual(moved[body, 1], 0.0, places=12)
+
+    def test_the_two_freedom_ring_satisfies_the_analytic_equilibrium(self):
+        """MuJoCo's two-freedom ring against the conditions `solve_equilibrium_2dof` imposes.
+
+        Per segment, not on the total, for the same reason as the #26 arbitration: MuJoCo's
+        capsules engage a different set of segments than the analytic point geometry, so a
+        comparison of sums would confound the joint with the discretisation. The conditions
+        are ``f_r(u) = λ cos θ`` and ``f_t(v) = λ sin θ``, and MuJoCo is told neither — it is
+        given two force laws on two joints and left to find the equilibrium.
+        """
+        from wheelopt.rom.mjcf import build_mjcf
+
+        spec = RingSpec(radius_m=0.085, n_segments=12)
+        radial, tangential = SpringLaw(a=24807.0), SpringLaw(a=185.1)
+        model = mujoco.MjModel.from_xml_string(
+            build_mjcf(spec, radial, indentation_m=0.018, tangential=True)
+        )
+        data = mujoco.MjData(model)
+
+        def addr(prefix):
+            ids = [mujoco.mj_name2id(model, mujoco.mjtObj.mjOBJ_JOINT, f"{prefix}{i}")
+                   for i in range(spec.n_segments)]
+            return model.jnt_qposadr[ids], model.jnt_dofadr[ids]
+
+        rq, rd = addr("j")
+        tq, td = addr("t")
+        for _ in range(20000):
+            data.qfrc_applied[rd] = radial.force_n(-data.qpos[rq]) - 2.0 * data.qvel[rd]
+            data.qfrc_applied[td] = (-symmetric_force_n(tangential, data.qpos[tq])
+                                     - 2.0 * data.qvel[td])
+            mujoco.mj_step(model, data)
+        self.assertLess(float(np.max(np.abs(data.qvel))), 1e-8, "not settled")
+
+        theta = segment_angles(spec)
+        floor = mujoco.mj_name2id(model, mujoco.mjtObj.mjOBJ_GEOM, "floor")
+        lam = np.zeros(spec.n_segments)
+        wrench = np.zeros(6)
+        for c in range(data.ncon):
+            con = data.contact[c]
+            mujoco.mj_contactForce(model, data, c, wrench)
+            i = int(mujoco.mj_id2name(
+                model, mujoco.mjtObj.mjOBJ_GEOM,
+                int(con.geom2 if con.geom1 == floor else con.geom1))[1:])
+            lam[i] += float((con.frame.reshape(3, 3).T @ wrench[:3])[2])
+
+        touching = np.flatnonzero(lam > 1e-6)
+        self.assertGreater(len(touching), 1, "no off-axis segment carries load")
+        u, v = -data.qpos[rq], data.qpos[tq]
+        for i in touching:
+            with self.subTest(segment=int(i)):
+                self.assertAlmostEqual(float(radial.force_n(u[i])),
+                                       lam[i] * np.cos(theta[i]), delta=1e-6 * lam[i])
+                self.assertAlmostEqual(float(symmetric_force_n(tangential, v[i])),
+                                       lam[i] * np.sin(theta[i]), delta=1e-6 * lam[i])
+        # A claw at 30 deg is 134x softer sideways than radially, so it folds rather than
+        # compresses: 15.8 mm of splay against 0.2 mm of compression. That is the whole
+        # phenomenon, and a joint on the wrong axis would not produce it.
+        off_axis = [i for i in touching if abs(theta[i]) > 1e-9]
+        for i in off_axis:
+            self.assertGreater(abs(v[i]), 20.0 * abs(u[i]))
+
     def test_indentation_lowers_the_hub(self):
         from wheelopt.rom.mjcf import build_mjcf
 
@@ -1098,7 +1201,23 @@ class TestTwoDegreeOfFreedomRing(unittest.TestCase):
     RADIAL = SpringLaw(a=24807.0)
     TANGENTIAL = SpringLaw(a=185.1)
     #: 12 claws on an 85 mm wheel: the second tip reaches the plate at R(1 - cos 30) = 11.4 mm.
-    SECOND_CLAW_M = 0.085 * (1.0 - np.cos(np.pi / 12))
+    #: The pitch is ``2π/n``, not ``π/n`` — this constant read ``np.pi / 12`` until 2026-08-09
+    #: and evaluated to 2.90 mm, a quarter of the truth. Nothing failed, because the only test
+    #: using it halves it first and 1.45 mm is below both thresholds. A wrong constant that
+    #: happens to be conservative is still wrong; asserted against the segment grid below so
+    #: it cannot drift again.
+    SECOND_CLAW_M = 0.085 * (1.0 - np.cos(2.0 * np.pi / 12))
+
+    def test_the_engagement_threshold_matches_the_segment_grid(self):
+        """``SECOND_CLAW_M`` restated from the model rather than from a formula in a comment.
+
+        Below it exactly one segment reaches the plate; above it, three.
+        """
+        self.assertAlmostEqual(self.SECOND_CLAW_M, 0.0113878, places=7)
+        neighbour = float(np.abs(segment_angles(self.SPEC))[1])
+        self.assertAlmostEqual(neighbour, 2.0 * np.pi / self.SPEC.n_segments, places=12)
+        self.assertEqual(contact_segments(self.SPEC, 0.999 * self.SECOND_CLAW_M), 1)
+        self.assertEqual(contact_segments(self.SPEC, 1.001 * self.SECOND_CLAW_M), 3)
 
     def test_a_rigid_tangential_spring_recovers_the_radial_kinematics(self):
         """The limit that makes this a generalisation: infinitely stiff tangentially *is* a
@@ -1144,17 +1263,26 @@ class TestTwoDegreeOfFreedomRing(unittest.TestCase):
 
     def test_it_softens_the_ring_once_a_second_claw_engages(self):
         """Past the threshold the off-centre claws splay, so the wheel carries less at the
-        same indentation. Measured: 3% softer at 12 mm, 17% at 25 mm."""
+        same indentation.
+
+        Measured 2026-08-09: **11.7% softer at 12 mm, 48.4% at 18 mm, 57.9% at 25 mm**. An
+        earlier record of "3% and 17%" does not reproduce and was almost certainly taken
+        before the `_invert` sign bug was fixed — that bug left one side of the ring unable to
+        splay, which under-reports exactly this effect. The magnitudes are pinned here, not
+        just the direction, so a third set of numbers cannot appear without a test failing.
+        """
+        # Compared against the *same* solver with a rigid tangential spring, so the comparison
+        # isolates the new freedom rather than mixing in any other difference between solvers.
+        expected = {0.012: 0.883, 0.018: 0.516, 0.025: 0.421}
+        for delta, ratio in expected.items():
+            soft = float(ring_force_2dof_n(self.SPEC, self.RADIAL, self.TANGENTIAL, delta))
+            stiff = float(ring_force_2dof_n(
+                self.SPEC, self.RADIAL, SpringLaw(a=1e6 * self.RADIAL.a), delta
+            ))
+            with self.subTest(delta=delta):
+                self.assertLess(soft, stiff)
+                self.assertAlmostEqual(soft / stiff, ratio, places=3)
         delta = 0.018
-        # Compared against the *same* solver with a rigid tangential spring, so the
-        # comparison isolates the new freedom rather than straddling the open force-
-        # resolution question in #26.
-        soft = float(ring_force_2dof_n(self.SPEC, self.RADIAL, self.TANGENTIAL, delta))
-        stiff = float(ring_force_2dof_n(
-            self.SPEC, self.RADIAL, SpringLaw(a=1e6 * self.RADIAL.a), delta
-        ))
-        self.assertLess(soft, stiff)
-        self.assertGreater(soft, 0.4 * stiff)
         state = solve_equilibrium_2dof(self.SPEC, self.RADIAL, self.TANGENTIAL, delta)
         self.assertGreater(int(state.in_contact.sum()), 1)
         self.assertGreater(float(np.max(np.abs(state.slip_m))), 0.0)
