@@ -1,0 +1,67 @@
+[project]
+name = "wheelopt"
+version = "0.0.0"
+description = "Automatic optimisation of compliant wheel geometry for mobile terrestrial robots"
+requires-python = ">=3.11"
+
+# Dependencies are declared as the corresponding pipeline stage is implemented.
+# Intended stack, per docs/decisions/:
+#   CAD        build123d          (ADR-0003)
+#   assets     coacd, trimesh     (ADR-0007)
+#   FEA        CalculiX + gmsh    (ADR-0005, external binaries)
+#   sim        mujoco             (ADR-0001)
+#   ground truth  pychrono        (ADR-0004)
+#   optimiser  ax-platform / botorch  (ADR-0006)
+#   config     hydra-core
+#   store      duckdb, pyarrow
+dependencies = [
+  "numpy>=1.24",
+  # `wheelopt.platform` reads configs/robot.yaml, the platform spec every stage is scaled
+  # against, so this belongs in the core rather than an extra: a screening-only worker
+  # still has to know what load it is screening for. hydra-core will pull it in anyway.
+  "pyyaml>=6",
+]
+
+[project.optional-dependencies]
+# The CAD kernel is optional on purpose: constraint screening, centreline geometry and
+# mass properties all run without OCCT, so a screening-only worker needs no heavy install.
+cad = [
+  "build123d>=0.11,<0.12",
+]
+# Meshing only. The solver itself (`ccx`) is an external binary and is NOT pip-installable —
+# it comes from conda-forge (`calculix=2.23`). See ADR-0005: FEA is a subprocess with file
+# I/O, not an in-process library call, so the solver never needs to share a Python prefix.
+fea = [
+  "gmsh>=4.13,<5",
+]
+# The dynamic tier. MuJoCo hosts the *reduced-order* ring model — ordinary rigid bodies and
+# joints, never `flex` and never soft contact as a compliance stand-in (invariant 8,
+# ADR-0001). The fitting and the analytic ring response in `wheelopt.rom` are pure numpy and
+# import without this, which is what keeps them testable on a machine with no simulator.
+sim = [
+  "mujoco>=3.1,<4",
+]
+# Report plots only. Optional on purpose: a screening worker or a solver batch never needs
+# a plotting stack, and `wheelopt.viz` imports it lazily so nothing here sits on the import
+# path of a run.
+viz = [
+  "matplotlib>=3.8",
+]
+dev = [
+  "ruff",
+  "pytest",
+]
+
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.ruff]
+line-length = 100
+target-version = "py311"
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]

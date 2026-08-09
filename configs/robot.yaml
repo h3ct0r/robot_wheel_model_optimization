@@ -1,0 +1,132 @@
+# Robot platform specification — THE FROZEN SPEC
+#
+# Everything downstream depends on this file. Phase 0, step 1 is to fill it in and stop
+# changing it. If it changes later, every cached result is invalid.
+#
+# Units: SI throughout (m, kg, s, N, N·m, rad). No millimetres in this file.
+#
+# STATUS: PROVISIONAL — the *chassis envelope* is a real requirement (400 x 300 x 200 mm,
+# given 2026-08-07); everything else is derived to be self-consistent with it and is NOT
+# measured. `frozen` stays false: a campaign run against these numbers is a pipeline test,
+# not a result. Every value carries its provenance below.
+#
+# HISTORY: 2026-08-07 the platform was re-specified from a ~4 kg, 300 x 220 x 120 mm class
+# robot on 70 mm wheels to the 10 kg, 400 x 300 x 200 mm four-wheel rover below. Nominal
+# wheel load went 14.0 -> 24.5 N, which moved the whole wheel design space; see
+# docs/experiments/log.md 2026-08-07 for what that invalidated.
+#
+# NOTE: nothing in the codebase reads this file yet. `PlatformLimits` in
+# src/wheelopt/cad/constraints.py duplicates a subset of it and is what actually
+# constrains screening today — but as of this revision the two agree, so the duplication is
+# no longer also a contradiction. Wiring the loader is what first-week step 1 really is.
+
+meta:
+  name: rover-400x300               # 400 x 300 x 200 mm four-wheel skid-steer research rover
+  frozen: false                     # pipeline should refuse to run a campaign while false
+  frozen_date: null
+  provenance: >
+    Chassis footprint and height are a stated platform requirement. Mass, drivetrain
+    layout and driving direction were chosen 2026-08-07: 10 kg all-up, four-wheel skid
+    steer, 400 mm in the driving direction. Everything below is derived from those four
+    facts to be mutually consistent. Motors, battery and inertia are class-typical
+    estimates, not measurements.
+
+chassis:
+  mass: 8.8                         # kg, total robot mass EXCLUDING wheels
+                                    #   10.0 kg all-up minus 4 x ~0.30 kg wheels.
+                                    #   0.30 kg is the computed mass of the nominal TPU
+                                    #   wheel below at 40% infill — derived from geometry,
+                                    #   not assumed (invariant 2).
+  length: 0.40                      # m, the driving direction
+  width: 0.30                       # m
+  height: 0.20                      # m
+  com_offset: [0.0, 0.0, 0.0]       # m, assumed geometric centre until measured
+  inertia: [0.0953, 0.1467, 0.1833] # kg·m², uniform-box formula on the dims above:
+                                    #   Ixx = m(w²+h²)/12, Iyy = m(l²+h²)/12,
+                                    #   Izz = m(l²+w²)/12
+  ground_clearance_min: 0.070       # m, under nominal load. Roughly the wheel radius: the
+                                    #   axles sit near the bottom of the chassis.
+
+drivetrain:
+  configuration: skid_steer
+  n_driven_wheels: 4                # no caster. A caster is a liability on a step edge,
+                                    #   which is the scenario this project exists to study.
+  wheelbase: 0.26                   # m, front axle to rear axle (±130 mm about centre)
+  track_width: 0.35                 # m, wheels outboard of the 300 mm chassis
+
+motor:
+  # Per driven wheel, at the wheel output (i.e. after the gearbox).
+  # Sized from the climbing requirement: tractive force of ~1.3x vehicle weight needs
+  # 4 x 4.0 N·m x 0.7 / 0.085 m = 132 N against a 98 N vehicle.
+  stall_torque: 4.0                 # N·m at the output
+  no_load_speed: 14.0               # rad/s at the output = 134 rpm -> 1.19 m/s unloaded
+  gear_ratio: 100.0                 # motor:output
+  gearbox_efficiency: 0.65          # planetary stack at this reduction
+  motor_constant_kt: 0.030          # N·m/A at the motor shaft
+  winding_resistance: 1.8           # ohm
+  torque_safety_factor: 0.7
+
+power:
+  battery_voltage: 22.2             # V, 6S LiPo. 24 V class rather than 12 V: four motors
+                                    #   at 100:1 draw more than a 3S pack should deliver.
+  battery_capacity: 111.0           # Wh, 5000 mAh at 22.2 V
+
+wheel_interface:
+  # Fixed geometry the wheel must mate to. NOT optimised.
+  shaft_diameter: 0.008             # m, 8 mm D-shaft.
+                                    #   Matches PlatformLimits.shaft_radius_mm = 4.0 and
+                                    #   WheelParams.hub_bore_radius_mm = 4.0.
+  hub_bore_depth: 0.030             # m
+  mounting: d-shaft
+  bolt_circle_diameter: null        # not applicable to a D-shaft
+
+wheel_envelope:
+  # Hard geometric limits on any candidate wheel. These now agree with PARAM_BOUNDS in
+  # src/wheelopt/cad/params.py and with PlatformLimits — the three-way disagreement that
+  # this file used to document is resolved.
+  max_radius: 0.100                 # m. **Set by the print bed, not the robot.** A 100 mm
+                                    #   radius is a 200 mm disc on a 220 mm bed. The
+                                    #   chassis would accept a larger wheel; the printer
+                                    #   will not.
+  min_radius: 0.060                 # m, below this the wheel cannot clear the obstacles
+                                    #   in the scenario suite
+  max_width: 0.070                  # m, keeps the track inside 0.44 m
+  min_width: 0.030                  # m
+  wheel_well_radius: 0.105          # m. Nothing encloses the wheels — they hang outboard —
+                                    #   so this is clearance to the chassis corner, not a
+                                    #   well. It is deliberately just inside the bed limit.
+  max_mass_fraction: 0.05           # per wheel, as fraction of chassis mass -> 0.44 kg.
+                                    #   Was 0.15 when the robot was 4 kg; at 8.8 kg that
+                                    #   would permit a 1.3 kg wheel, which is not a limit.
+
+operating_point:
+  nominal_wheel_load: 24.5          # N, static load per wheel.
+                                    #   10.0 kg x 9.81 = 98.1 N total, four wheels, mass
+                                    #   centred -> 24.5 N each. This is the value
+                                    #   LoadCase.nominal_load_n uses and therefore what
+                                    #   every FEA sweep is scaled against.
+                                    #   The buckling constraint asks for 2.5x = 61.3 N.
+  target_speed: 0.6                 # m/s
+  payload_range: [0.0, 3.0]         # kg, additional payload
+
+manufacturing:
+  printer: ender-3-class            # 0.4 mm nozzle, direct-drive conversion
+  bed_size: [0.220, 0.220, 0.250]   # m. Now also PlatformLimits.bed_size_mm.
+  nozzle_diameter: 0.0004           # m
+  extruder: direct-drive            # TPU requires direct-drive
+  max_print_time_hours: 24          # a 200 mm TPU wheel is an overnight print
+  max_material_grams: 450           # the nominal wheel is ~300 g; feasible designs at this
+                                    #   load run 250-350 g. The old 200 g cap predates the
+                                    #   larger robot and would reject every valid design.
+  min_wall_thickness_tpu: 0.0016    # m
+  min_wall_thickness_rigid: 0.0012  # m
+  max_overhang_deg_tpu: 45
+  max_overhang_deg_rigid: 50
+  max_bridge_length_tpu: 0.015      # m
+  min_interspoke_gap: 0.002         # m, nozzle traversal clearance
+
+# REMAINING GAP, the structural one: this file is *meant* to be the single source of truth —
+# src/wheelopt/cad/constraints.py says so in the PlatformLimits docstring — but nothing
+# loads it, so PlatformLimits is authoritative in practice. Editing this file still changes
+# nothing about what the pipeline does. The values now match by hand; a loader would make
+# them match by construction. That is first-week step 1's actual content.

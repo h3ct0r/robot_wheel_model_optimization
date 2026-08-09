@@ -1,0 +1,51 @@
+# Artifact cache — content-addressed, regenerable, large
+data/cache/
+data/runs/
+# Rendered frames and GIFs from scripts/render_step.py. Regenerable, and large.
+data/renders/
+*.duckdb
+*.parquet
+
+# Generated geometry and simulation assets
+*.stl
+*.step
+*.stp
+*.3mf
+*.gcode
+*.xml.generated
+
+# FEA artifacts
+*.frd
+*.dat
+*.cvg
+*.sta
+*.12d
+*.inp.generated
+
+# Rendered media
+*.mp4
+*.gif
+
+# Python
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+*.egg-info/
+dist/
+build/
+.pytest_cache/
+.ruff_cache/
+.mypy_cache/
+
+# Hydra
+outputs/
+multirun/
+.hydra/
+
+# OS / editor
+.DS_Store
+.vscode/
+.idea/
+data/explore/
+data/explore_*/
