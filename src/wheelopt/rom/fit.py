@@ -49,6 +49,7 @@ from .ring import (
     SpringLaw,
     TabulatedLaw,
     penetrations,
+    ring_force_hinge_n,
     ring_force_n,
     solve_equilibrium,
     uniform_knots,
@@ -67,6 +68,7 @@ __all__ = [
     "law_from_claw_curve",
     "nnls",
     "ring_from_claw_curve",
+    "validate_ring",
 ]
 
 #: One law per fitted coefficient, each with that coefficient set to 1 and the rest to 0.
@@ -726,6 +728,71 @@ def hinge_kinematics_check(
         )
     phi = np.arcsin(np.clip(d / claw_length_m, -1.0, 1.0))
     return measured, claw_length_m * (1.0 - np.cos(phi))
+
+
+def validate_ring(
+    spec: RingSpec,
+    law: RadialLaw,
+    delta_m: np.ndarray,
+    force_n: np.ndarray,
+    *,
+    hinge_law: RadialLaw | None = None,
+) -> RingFit:
+    """Measure a ring against a curve it was **never fitted to**, and report it as a `RingFit`.
+
+    A fit error is a ring's agreement with its own training data, and for
+    :func:`ring_from_claw_curve` there is no such number at all — nothing was fitted, so the
+    honest fit error is zero and it means nothing. This is the replacement, and it is a
+    stronger claim rather than a substitute for a weaker one: build the ring from **one
+    claw's** curve, then ask it to predict the **whole wheel's**, which is a different
+    experiment on a different mesh. The CLAUDE.md watch list asks every model for at least one
+    check against a number it did not produce; for a claw ring this is that check.
+
+    It returns a :class:`RingFit` so that everything downstream — ``ok``, ``summary()``, the
+    report plots — works unchanged and gates on the held-out error instead of the training
+    one. ``iterations`` is **0**, which is how a caller tells the two apart: no optimiser ran.
+
+    Measured on the R 60 mm, 12-claw, taper 0.6 design (2026-08-10), and the result is a cliff
+    rather than a slope. While one claw carries the wheel the claw-built ring reproduces the
+    whole wheel to **0.036%** over five points — there is nothing to fit, so it is exact.
+    Past second-claw engagement it collapses: at 9.6 mm the radial-only ring reads **+62.7%**
+    and the hinge **−49.5%**, both from the same law that was exact below. Two idealisations
+    bracketing the truth from opposite sides is a statement about the *element*, not the law:
+    a claw at ±2π/n meets a flat plate off its own radius and beds onto its flank, and neither
+    a pure radial column nor a pure root hinge is that. See ``docs/plan/TODO.md`` #29.
+
+    Args:
+        spec: the ring, already built.
+        law: its radial segment law.
+        delta_m: held-out indentations, metres.
+        force_n: the vertical reaction measured at them, newtons.
+        hinge_law: if given, evaluate the hinged-claw ring (:func:`ring_force_hinge_n`)
+            instead of the radial-only one. The element must match the one the scenario will
+            run, or this validates a ring nobody drives.
+
+    Raises:
+        FitFailure: if the curve is unusable — shapes disagreeing, or nothing in contact.
+    """
+    d, f = _clean(delta_m, force_n, 1, "points needed")
+    if hinge_law is None:
+        predicted = np.asarray(ring_force_n(spec, law, d), dtype=np.float64)
+    else:
+        predicted = np.asarray(ring_force_hinge_n(spec, law, hinge_law, d), dtype=np.float64)
+    residual = predicted - f
+    peak = float(np.max(np.abs(f)))
+    rms = float(np.sqrt(np.mean(residual**2)))
+    return RingFit(
+        spec=spec,
+        law=law,
+        rms_error_n=rms,
+        rms_error_fraction=rms / peak if peak > 0 else float("inf"),
+        max_error_n=float(np.max(np.abs(residual))),
+        delta_m=d,
+        force_n=f,
+        fitted_force_n=predicted,
+        iterations=0,
+        converged=True,
+    )
 
 
 def _clean(delta_m: np.ndarray, force_n: np.ndarray, n_parameters: int,

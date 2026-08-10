@@ -27,6 +27,7 @@ from wheelopt.rom.fit import (
     hinge_law_from_tip_curve,
     nnls,
     ring_from_claw_curve,
+    validate_ring,
 )
 from wheelopt.rom.ring import (
     RadialLaw,
@@ -46,6 +47,7 @@ from wheelopt.rom.ring import (
     ring_force_2dof_n,
     ring_force_hinge_n,
     ring_force_n,
+    second_contact_delta_m,
     segment_angles,
     solve_equilibrium,
     solve_equilibrium_2dof,
@@ -1235,6 +1237,93 @@ class TestRingFromClawCurve(unittest.TestCase):
         self.assertEqual(contact_segments(spec, float(self.DELTA.max())), 1)
         np.testing.assert_allclose(ring_force_n(spec, law, self.DELTA), self.FORCE,
                                    rtol=1e-9)
+
+
+class TestSecondContactDelta(unittest.TestCase):
+    """R(1-cos 2pi/n), and the reason it is a named function rather than an expression.
+
+    It is one factor of two inside a cosine away from `polygon_drop_m`, and doubling the
+    drop is the natural wrong guess: on the R 60 mm, 12-claw design that gives 4.09 mm
+    against the true 8.04 mm. Both are plausible millimetre-scale numbers on a 60 mm wheel.
+    """
+
+    SPEC = RingSpec(radius_m=0.060, n_segments=12, root_radius_m=0.020)
+
+    def test_it_is_the_closed_form(self):
+        self.assertAlmostEqual(second_contact_delta_m(self.SPEC),
+                               0.060 * (1.0 - np.cos(np.pi / 6.0)))
+        self.assertAlmostEqual(second_contact_delta_m(self.SPEC) * 1e3, 8.038, places=3)
+
+    def test_it_is_not_twice_the_polygon_drop(self):
+        """The confusion the docstring warns about, pinned as a test so it stays wrong."""
+        self.assertNotAlmostEqual(second_contact_delta_m(self.SPEC),
+                                  2.0 * polygon_drop_m(0.060, 12), places=4)
+
+    def test_the_ring_really_does_engage_a_second_segment_there(self):
+        """Against the ring's own contact set rather than against the same formula twice."""
+        engage = second_contact_delta_m(self.SPEC)
+        self.assertEqual(contact_segments(self.SPEC, 0.999 * engage), 1)
+        self.assertEqual(contact_segments(self.SPEC, 1.001 * engage), 3)
+
+    def test_more_segments_engage_sooner(self):
+        fine = replace(self.SPEC, n_segments=36)
+        self.assertLess(second_contact_delta_m(fine), second_contact_delta_m(self.SPEC))
+
+
+class TestValidateRing(unittest.TestCase):
+    """A held-out error, not a fit error. `iterations == 0` is how a caller tells them apart."""
+
+    SPEC = RingSpec(radius_m=0.060, n_segments=12, root_radius_m=0.020)
+    LAW = SpringLaw(a=2.0e4)
+
+    def _curve(self, deltas):
+        return deltas, ring_force_n(self.SPEC, self.LAW, deltas)
+
+    def test_a_ring_measured_against_its_own_prediction_has_no_error(self):
+        deltas = np.array([0.002, 0.004, 0.006, 0.008])
+        fit = validate_ring(self.SPEC, self.LAW, *self._curve(deltas))
+        self.assertAlmostEqual(fit.rms_error_fraction, 0.0, places=12)
+        self.assertTrue(fit.ok)
+
+    def test_nothing_was_fitted_and_it_says_so(self):
+        deltas = np.array([0.002, 0.004, 0.006, 0.008])
+        fit = validate_ring(self.SPEC, self.LAW, *self._curve(deltas))
+        self.assertEqual(fit.iterations, 0)
+        self.assertTrue(fit.converged)
+
+    def test_a_wrong_law_is_reported_as_wrong(self):
+        """The point of a held-out check: it has to be able to fail. A fit error cannot.
+
+        The size is pinned against the closed form rather than a guessed threshold. A law
+        1.5x too stiff on a single-segment contact overpredicts every point by exactly half
+        its force, so the reported fraction is `0.5 * rms(f) / max(f)` — 34.2% here, not the
+        50% the stiffness error would suggest, because the denominator is the peak.
+        """
+        deltas = np.array([0.002, 0.004, 0.006, 0.008])
+        _, force = self._curve(deltas)
+        self.assertEqual(contact_segments(self.SPEC, float(deltas.max())), 1)
+        fit = validate_ring(self.SPEC, SpringLaw(a=3.0e4), deltas, force)
+        expected = 0.5 * float(np.sqrt(np.mean(force**2)) / np.max(force))
+        self.assertAlmostEqual(fit.rms_error_fraction, expected, places=12)
+        self.assertFalse(fit.ok)
+
+    def test_the_hinge_element_is_validated_when_asked_for(self):
+        """Validating the radial-only ring when the scenario will run a hinge would check a
+        ring nobody drives. Measured on the claw design, the two differ by more than 100% of
+        each other above second-claw engagement, so this is not a formality."""
+        deltas = np.array([0.010, 0.012, 0.014])
+        _, force = self._curve(deltas)
+        hinge = SpringLaw(a=5.0)          # N.m/rad — a nearly free root
+        radial_only = validate_ring(self.SPEC, self.LAW, deltas, force)
+        hinged = validate_ring(self.SPEC, self.LAW, deltas, force, hinge_law=hinge)
+        self.assertAlmostEqual(radial_only.rms_error_fraction, 0.0, places=12)
+        self.assertGreater(hinged.rms_error_fraction, 0.05)
+
+    def test_an_unusable_curve_raises_rather_than_returning_a_flattering_number(self):
+        with self.assertRaises(FitFailure):
+            validate_ring(self.SPEC, self.LAW, np.array([0.002, 0.004]), np.array([1.0]))
+        with self.assertRaises(FitFailure):
+            validate_ring(self.SPEC, self.LAW, np.array([0.002, 0.004]), np.zeros(2))
 
 
 class TestTwoDegreeOfFreedomRing(unittest.TestCase):

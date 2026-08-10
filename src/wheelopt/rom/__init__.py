@@ -43,6 +43,14 @@ See docs/plan/06-compliance-rom.md.
 #:   δ = 25 mm and the flat-plate fits are effectively unchanged; what moves is where the tips
 #:   are, which only a rolling contact sees. The slide is kept and reachable, as the thing the
 #:   hinge is compared against.
-ROM_VERSION = "rom-0.5.0"
+#: - ``rom-0.6.0`` — a bandless claw ring may now take its segment law from a **claw-sector**
+#:   sweep with no fit in it at all (``fit.ring_from_claw_curve``, wired up as
+#:   ``run_step.py --law claw``), and the whole-wheel curve becomes a held-out check
+#:   (``fit.validate_ring``) instead of training data. Nothing in the ring's arithmetic
+#:   changed, so a spec plus a law evaluates identically to 0.5.0 — but the same design now
+#:   yields a **different law**, and on the R 60 mm claw the step climb moves from 60 mm to
+#:   30 mm because of it. That is exactly what invariant 5 exists for: which law a design gets
+#:   is part of the ROM, not an input to it.
+ROM_VERSION = "rom-0.6.0"
 
 __all__ = ["ROM_VERSION"]

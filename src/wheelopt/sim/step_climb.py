@@ -72,6 +72,7 @@ __all__ = [
     # because this is where it was found and where the rig reads it.
     "EXPLICIT_STABILITY_LIMIT",
     "TPU_LOSS_FACTOR",
+    "ClimbProfile",
     "RigSpec",
     "Signature",
     "StepResult",
@@ -86,6 +87,7 @@ __all__ = [
     "run_step",
     "segment_damping_n_s_per_m",
     "stable_timestep_s",
+    "step_climb_profile",
 ]
 
 #: Loss factor (tan δ) of printed TPU at room temperature and rolling frequencies.
@@ -640,39 +642,104 @@ def default_step_heights_m(spec: RingSpec) -> np.ndarray:
     return np.arange(0.01, 1.5 * spec.radius_m + 1e-12, 0.01)
 
 
+@dataclass(frozen=True, slots=True)
+class ClimbProfile:
+    """Which step heights a wheel cleared — the "climbs better" signature, in full.
+
+    The maximum alone is not enough, for two reasons the sweep itself creates.
+
+    **The predicate is not monotone.** A wheel can bounce over an obstacle it cannot roll
+    over, so a bare maximum cannot tell "cleared everything up to 60 mm" from "failed 40 and
+    flew over 60". Only the pattern distinguishes them, and the pattern costs nothing extra
+    to keep.
+
+    **The sweep can run out.** A maximum equal to the top of the range is the range's answer,
+    not the wheel's; :attr:`censored` says so rather than leaving the caller to compare
+    floats.
+    """
+
+    heights_m: np.ndarray
+    #: True where the wheel got over. Aligned with :attr:`heights_m`.
+    climbed: np.ndarray
+    #: True where the run itself failed — diverged, or MuJoCo missing. Distinct from "did not
+    #: climb", which is a result; this is the absence of one, and averaging the two together
+    #: is how a broken sweep comes to look like a poor wheel.
+    failed: np.ndarray
+
+    @property
+    def tallest_m(self) -> float:
+        """Tallest height cleared, metres. Zero if none were."""
+        got = self.heights_m[self.climbed]
+        return float(np.max(got)) if len(got) else 0.0
+
+    @property
+    def censored(self) -> bool:
+        """Whether the tallest cleared height is the top of the swept range."""
+        return bool(len(self.heights_m)) and self.tallest_m >= float(self.heights_m[-1])
+
+    @property
+    def monotone(self) -> bool:
+        """Whether every height below the tallest was also cleared.
+
+        False means the wheel bounced over something it could not climb, and the maximum is
+        then not a capability — read the pattern.
+        """
+        below = self.climbed[self.heights_m <= self.tallest_m + 1e-12]
+        return bool(np.all(below)) if len(below) else True
+
+    def summary(self) -> str:  # pragma: no cover - display only
+        marks = "".join("E" if f else ("#" if c else ".")
+                        for c, f in zip(self.climbed, self.failed))
+        note = "  <- AT THE SWEEP CEILING; the true value is >= this" if self.censored else ""
+        if not self.monotone:
+            note += "  <- NOT MONOTONE; it cleared a step it failed below, so read the pattern"
+        return (f"{self.tallest_m * 1e3:5.0f} mm  [{marks}] "
+                f"{self.heights_m[0] * 1e3:.0f}-{self.heights_m[-1] * 1e3:.0f} mm{note}")
+
+
+def step_climb_profile(spec: RingSpec, law: RadialLaw, rig: RigSpec, *,
+                       rigid: bool = False, fit_max_m: float = float("inf"),
+                       heights_m: np.ndarray | None = None,
+                       tangential_law: RadialLaw | None = None,
+                       tangential_element: TangentialElement | None = None) -> ClimbProfile:
+    """Run the whole sweep and keep every outcome. See :class:`ClimbProfile`.
+
+    A sweep rather than a bisection, because bisecting a non-monotone predicate silently
+    returns whichever side it happened to land on.
+
+    Resolution is 10 mm, and it is coarse enough to matter: on the R 60 mm claw a **1%** change
+    in the fitted radial law — the difference the #12 contact floor makes, 0.3% in peak force
+    and 1.2% in ``k(0)`` — moves the answer one whole bucket, 50 mm to 60 mm. Quote it to one
+    bucket, and do not read a one-bucket difference between two designs as a ranking.
+    """
+    heights = default_step_heights_m(spec) if heights_m is None else np.asarray(heights_m)
+    climbed = np.zeros(len(heights), dtype=bool)
+    failed = np.zeros(len(heights), dtype=bool)
+    for i, height in enumerate(heights):
+        result = run_step(spec, law, replace(rig, step_height_m=float(height)),
+                          rigid=rigid, fit_max_m=fit_max_m,
+                          tangential_law=tangential_law,
+                          tangential_element=tangential_element)
+        climbed[i] = bool(result.ok and result.climbed)
+        failed[i] = not result.ok
+    return ClimbProfile(heights_m=heights, climbed=climbed, failed=failed)
+
+
 def highest_step_climbed(spec: RingSpec, law: RadialLaw, rig: RigSpec, *,
                          rigid: bool = False, fit_max_m: float = float("inf"),
                          heights_m: np.ndarray | None = None,
                          tangential_law: RadialLaw | None = None,
                          tangential_element: TangentialElement | None = None) -> float:
-    """Tallest step this wheel gets over, metres. The "climbs better" signature.
+    """Tallest step this wheel gets over, metres.
 
-    A sweep rather than a bisection: the climb is not guaranteed monotone in step height —
-    a wheel can bounce over an obstacle it cannot roll over — and bisecting a non-monotone
-    predicate silently returns whichever side it happened to land on. The sweep returns the
-    tallest height that succeeded, and its cost is a handful of seconds per point.
-
-    **Compare the answer against the top of the swept range before quoting it.** Returning the
-    last height in ``heights_m`` means the sweep ran out, not that the wheel did; see
-    :func:`default_step_heights_m`. ``scripts/run_step.py`` prints a warning in that case.
-
-    Resolution is 10 mm, and it is coarse enough to matter: on the R 60 mm claw a **1%** change
-    in the fitted radial law — the difference the #12 contact floor makes, 0.3% in peak force
-    and 1.2% in ``k(0)`` — moves the answer one whole bucket, 50 mm to 60 mm. Quote the number
-    to one bucket, not to the millimetre, and do not read a one-bucket difference between two
-    designs as a ranking.
+    Kept as the one-number form for callers that only rank. **Prefer
+    :func:`step_climb_profile`**: this discards exactly the information needed to tell a climb
+    from a bounce, and to tell a real answer from a sweep that ran out of range.
     """
-    if heights_m is None:
-        heights_m = default_step_heights_m(spec)
-    best = 0.0
-    for height in heights_m:
-        result = run_step(spec, law, replace(rig, step_height_m=float(height)),
-                          rigid=rigid, fit_max_m=fit_max_m,
-                          tangential_law=tangential_law,
-                          tangential_element=tangential_element)
-        if result.ok and result.climbed:
-            best = float(height)
-    return best
+    return step_climb_profile(
+        spec, law, rig, rigid=rigid, fit_max_m=fit_max_m, heights_m=heights_m,
+        tangential_law=tangential_law, tangential_element=tangential_element,
+    ).tallest_m
 
 
 @dataclass(frozen=True, slots=True)

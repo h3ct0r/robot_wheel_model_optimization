@@ -103,9 +103,15 @@ class PlatformSpec:
     """The parsed platform spec. All lengths in **metres**, all masses in kg, loads in N.
 
     Only the fields something downstream consumes, or that a cross-check needs, are
-    modelled. Motor and battery values are read but not exposed yet: nothing computes an
-    actuation constraint today, and a field that exists but is never read is how the
-    duplication this module exists to remove got started.
+    modelled. A field that exists but is never read is how the duplication this module
+    exists to remove got started, so each block below names its consumer.
+
+    The **vehicle** block arrived with the four-wheel rover scenario (2026-08-09). Before it,
+    the single-wheel rig invented its drive from ``RigSpec.torque_ratio = 1.3`` — a heuristic
+    that happens to reproduce this platform's own sizing rationale, but is not the platform's
+    motor. A rover has to use the real one, and it has to know where the axles are.
+
+    Battery values are still read-and-discarded: nothing computes an energy budget yet.
     """
 
     #: --- provenance -------------------------------------------------------------------
@@ -124,6 +130,24 @@ class PlatformSpec:
     configuration: str
     n_driven_wheels: int
     track_width_m: float
+    #: Front axle to rear axle, metres. Needed to place wheels; unused by screening.
+    wheelbase_m: float
+
+    #: --- vehicle dynamics, for `wheelopt.sim` -----------------------------------------
+    #: Principal moments of the chassis about its own centre of mass, kg·m². The uniform-box
+    #: formula on the chassis dimensions, per `robot.yaml` — an estimate, like the mass.
+    chassis_inertia_kg_m2: tuple[float, float, float]
+    #: Centre of mass relative to the chassis geometric centre, metres.
+    com_offset_m: tuple[float, float, float]
+    #: Axle height above the ground under nominal load, metres. A box chassis will belly out
+    #: on a step taller than this, which is a real and wanted behaviour rather than a bug.
+    ground_clearance_m: float
+    #: Per driven wheel, **at the output** — after the gearbox. `motor.stall_torque` and
+    #: `motor.no_load_speed` in the YAML.
+    stall_torque_n_m: float
+    no_load_speed_rad_s: float
+    #: `operating_point.target_speed`, m/s.
+    target_speed_m_s: float
 
     #: --- interface --------------------------------------------------------------------
     shaft_diameter_m: float
@@ -261,6 +285,49 @@ class PlatformSpec:
                 "of the range fits"
             )
 
+        # The wheelbase against the chassis it sits under. Axles inside the footprint is the
+        # normal case; a wheelbase longer than the chassis means the wheels stick out fore and
+        # aft, which is legal but is almost always a units slip.
+        if self.wheelbase_m > self.chassis_length_m:
+            out.append(
+                f"drivetrain.wheelbase = {self.wheelbase_m:g} m exceeds the "
+                f"{self.chassis_length_m:g} m chassis length, so the axles are outside the body"
+            )
+
+        # The stated inertia against the uniform-box formula the YAML says it came from. Not
+        # derived, so that a measured inertia can replace it, but a stated one that no longer
+        # matches its own stated provenance is the quiet-wrong-number failure in a new place.
+        box = (
+            self.chassis_mass_kg * (self.chassis_width_m**2 + self.chassis_height_m**2) / 12.0,
+            self.chassis_mass_kg * (self.chassis_length_m**2 + self.chassis_height_m**2) / 12.0,
+            self.chassis_mass_kg * (self.chassis_length_m**2 + self.chassis_width_m**2) / 12.0,
+        )
+        for axis, stated, expected in zip("xyz", self.chassis_inertia_kg_m2, box):
+            if expected > 0 and abs(stated - expected) > 0.05 * expected:
+                out.append(
+                    f"chassis.inertia I{axis}{axis} = {stated:g} kg·m² is more than 5% from "
+                    f"the uniform-box value {expected:.4f} its own comment claims"
+                )
+
+        # A motor that cannot turn the wheel it is on. Torque at the biggest permitted wheel
+        # against the load it carries: below about mu = 0.3 of tractive coefficient the robot
+        # cannot climb anything, whatever the wheel is made of.
+        traction = (self.n_driven_wheels * self.stall_torque_n_m / self.max_radius_m)
+        weight = self.chassis_mass_kg * _G
+        if weight > 0 and traction < 0.3 * weight:
+            out.append(
+                f"motor.stall_torque = {self.stall_torque_n_m:g} N·m over "
+                f"{self.n_driven_wheels} wheels gives {traction:.0f} N of tractive force at "
+                f"the largest permitted wheel, under 0.3x the {weight:.0f} N vehicle weight"
+            )
+
+        if self.no_load_speed_rad_s * self.min_radius_m < self.target_speed_m_s:
+            out.append(
+                f"operating_point.target_speed = {self.target_speed_m_s:g} m/s is above the "
+                f"{self.no_load_speed_rad_s * self.min_radius_m:.2f} m/s a "
+                f"{self.no_load_speed_rad_s:g} rad/s output reaches on the smallest wheel"
+            )
+
         if self.frozen and not self.frozen_date:
             out.append("meta.frozen is true but meta.frozen_date is unset")
 
@@ -325,6 +392,13 @@ def load_platform(path: str | Path | None = None) -> PlatformSpec:
         configuration=str(_require(raw, "drivetrain.configuration")),
         n_driven_wheels=n_driven,
         track_width_m=_number(raw, "drivetrain.track_width"),
+        wheelbase_m=_number(raw, "drivetrain.wheelbase"),
+        chassis_inertia_kg_m2=_triple(raw, "chassis.inertia"),
+        com_offset_m=_triple(raw, "chassis.com_offset"),
+        ground_clearance_m=_number(raw, "chassis.ground_clearance_min"),
+        stall_torque_n_m=_number(raw, "motor.stall_torque"),
+        no_load_speed_rad_s=_number(raw, "motor.no_load_speed"),
+        target_speed_m_s=_number(raw, "operating_point.target_speed"),
         shaft_diameter_m=_number(raw, "wheel_interface.shaft_diameter"),
         min_radius_m=_number(raw, "wheel_envelope.min_radius"),
         max_radius_m=_number(raw, "wheel_envelope.max_radius"),

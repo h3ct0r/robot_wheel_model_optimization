@@ -2733,3 +2733,287 @@ found it the bound is no longer active: 70 mm fails.
 
 **Gates after all of it.** Unit suite 594/594, ruff at the standing 71, `verify_fea.py` 11/11,
 `run_step.py --tiny` 5/5, the claw run 5/5.
+
+## 2026-08-09 — #20's two leftovers: the climb metric gets a profile, and widening the fit makes it worse
+
+Two follow-ups from #20, and the second is a negative result that partly retracts a reading
+given earlier the same day.
+
+### The climb metric now reports a profile
+
+`highest_step_climbed` returned one number from a sweep whose own docstring says the predicate
+is **not monotone** — a wheel can bounce over an obstacle it cannot roll over. A maximum cannot
+tell "cleared everything up to 60 mm" from "failed 40 and flew over 60", and it cannot tell a
+real answer from a sweep that ran out of range.
+
+`step_climb_profile` keeps every outcome and `ClimbProfile` exposes `tallest_m`, `censored`
+(the tallest cleared height is the top of the swept range) and `monotone` (every height below
+the tallest was also cleared). `run_step.py --sweep` prints the pattern:
+
+    compliant     60 mm  [######...] 10-90 mm (1.00 R)
+    rigid         20 mm  [##.......] 10-90 mm (0.33 R)
+
+so the claw wheel's 60 mm is visibly a climb rather than a bounce. `highest_step_climbed`
+stays as the one-number form and now delegates. Six tests, all pure — the record is a record,
+so none of them needs MuJoCo, and the bounce-versus-climb case is asserted directly: two
+profiles with the same maximum, one monotone and one not.
+
+### Widening the fitted range removes the extrapolation and breaks the fit
+
+**Hypothesis.** The claw climb ran 13-19% of its loaded samples past a 6 mm fit, so the number
+was partly an extrapolation of the radial table. Widen the `RADIAL_FLAT` sweep and re-run; if
+the climb moves, the old one was the extrapolation talking.
+
+**It does not move — and that is not the interesting part.** At `--delta-max 0.012` the step
+run reports **0% of loaded samples beyond the fitted range** (peak 9.36 mm against a 12 mm fit)
+and still **60 mm against the rigid wheel's 20**, same monotone profile. But the fit it rests
+on is one the fitter refuses. R 60 mm, 12 claws, taper 0.6, 12 segments:
+
+| δ_max, mm | points | FEA peak N | intervals | fit RMS | `ok` | k(0) N/mm | δ at 24.5 N |
+|---|---|---|---|---|---|---|---|
+| 6 | 6 | 18.354 | 3 | **3.74%** | **True** | 12.308 | 8.23 mm |
+| 6 | 10 | 18.354 | 5 | 5.35% | False | 15.334 | 8.19 mm |
+| 9 | 6 | 36.468 | 3 | 13.30% | False | 7.659 | 8.30 mm |
+| 9 | 10 | 36.702 | 5 | 10.85% | False | 11.459 | 8.28 mm |
+| 12 | 6 | 52.628 | 3 | 10.79% | False | 5.818 | **never** |
+| 12 | 10 | 51.298 | 5 | 8.61% | False | 8.027 | **never** |
+
+**Only the original 6 mm / 6-point combination passes the 5% gate.** Everything wider or
+better-resolved fails it, and both 12 mm fits produce a law that cannot carry the platform's
+own 24.5 N per wheel within 50 mm of indentation — the same thing as the `loaded radius ->
+6.00 mm` collapse the widened step run printed and which should have been read as a broken law
+rather than a soft wheel.
+
+Two things fall out that matter more than the climb number.
+
+**The design load was already outside the valid fit.** At 24.5 N the ring sits at δ ≈ **8.2 mm**
+and the only passing fit was taken to 6 mm. That 8.2 mm is stable across every row while the
+fits around it degrade, so it is a property of the design and not of the fit.
+
+**More data makes the fit worse, at fixed parameters-per-datum.** `n_intervals` is
+`min(8, len(d)//2)`, so 6 points get 3 intervals and 10 points get 5 — the ratio is unchanged,
+and the RMS still rises 3.74% -> 5.35% at the same 6 mm range. That is the deconvolution being
+ill-posed, already recorded for *banded* wheels and now showing up on a bandless one at low
+segment count, where the patch is one to three claws wide. `--n-points` is not a
+post-processing knob: it changes the `*TIME POINTS` grid, so it is a different solve.
+
+**So #20 item 1 does not close.** The honest statement is that the 60 mm climb survives
+widening, but no fit of this design over its working range passes the gate, and the narrow fit
+that does pass does not reach the design load. Either the ring needs more segments than the
+claw count for this topology, or "segments are claws" caps the achievable resolution and the
+claw curve needs a different treatment. Filed as #29.
+
+### And an hour lost to a relative path
+
+The sweep above took about an hour when it should have taken minutes on a warm cache. The
+scratchpad scripts pass `cache_root="data/cache/fea"` as a **relative** path and were run after
+`cd` into the scratchpad, so they solved everything cold into
+`scratchpad/data/cache/fea` — 1.5 GB and 52 entries that the repo's own cache cannot see — and
+a later probe from the repo root solved two of the same cases again. Nothing the hour bought
+was reusable. Not a code defect; a reminder that the cache root is a path and a path is
+relative to wherever the process happens to be standing. Scratchpad scripts should pass an
+absolute one.
+
+**Gates.** Unit suite 606/606, ruff at the standing 71.
+
+## 2026-08-10 — The whole robot, on rigid wheels, and it climbs three times what one wheel does
+
+**Hypothesis.** Put the platform in `configs/robot.yaml` on four wheels and drive it at a step,
+rigid wheels first, to get the chassis rig working and measure what it costs before paying for
+four compliant rings. Expect the numbers to resemble the single-wheel rig's.
+
+**They do not, and the gap is the finding.** Same rigid wheel, same friction, same obstacle:
+
+| rig | wheel | tallest step cleared | in radii |
+|---|---|---|---|
+| single-wheel (`run_step.py`) | R 60 mm | 20 mm | **0.33 R** |
+| four-wheel rover (`run_rover.py`) | R 60 mm | 60 mm | **1.00 R** |
+| four-wheel rover | R 85 mm | 90–100 mm | **1.06–1.18 R** |
+
+A rigid wheel on the robot climbs **three times** what the same rigid wheel climbs on the test
+rig, measured in its own radii. Nothing about the wheel changed. What changed is that three
+other driven wheels are pushing while one climbs, and a rigid chassis lets the rear axle lever
+the front one up — precisely the effects `step_climb.py` excludes on purpose, and it says so in
+its own module docstring: a chassis "would add weight transfer, a second wheel's traction and a
+suspension geometry, three more ways for the answer to come out right for the wrong reason."
+
+**Why this matters more than the number.** The spike's headline is a *ratio* — the compliant
+claw clears 60 mm against the rigid wheel's 20 on the single-wheel rig, 3x. If the rigid wheel
+alone recovers to 1.00 R once it is on a robot, then most of that ratio was the rig's missing
+wheels rather than the wheel's compliance. **The comparison has to be re-run on the rover
+before the 3x is quoted as a property of compliance.** That is not a retraction of the
+single-wheel result, which measures what it says it measures; it is a warning about what it
+does *not* transfer to. Recorded as a standing gap and as the reason to finish the compliant
+rover rather than stop here.
+
+The rover's own profile is monotone at both radii — `[######......]` at R 60, `[#########....]`
+at R 85 — so these are climbs and not bounces. At the failing heights the robot rears: peak
+pitch reaches **90°** at a 120 mm step on the 85 mm wheel, the chassis box strikes the riser,
+and it ends up behind where it started. Ground clearance is 70 mm and the chassis is a real
+contact geom, so bellying out is modelled rather than assumed away.
+
+### What was built
+
+`wheelopt.sim.rover` — a free-jointed chassis box carrying the platform's own mass, dimensions,
+centre of mass and inertia, on four hinge axles at `±wheelbase/2 × ±track/2`, each with the
+platform's own torque-speed curve. **Nothing dimensional is invented**: the previous rig sized
+its drive from `RigSpec.torque_ratio = 1.3`, a per-wheel heuristic that happens to reproduce
+this platform's sizing rationale and is not the same statement as `motor.stall_torque = 4.0`.
+`scripts/run_rover.py` runs it, sweeps it and films it.
+
+Three enabling pieces, each small:
+
+- **The platform loader was missing every field a vehicle needs.** `wheelbase`,
+  `chassis.inertia`, `com_offset`, `ground_clearance_min`, `motor.stall_torque`,
+  `motor.no_load_speed` and `operating_point.target_speed` all sat in `robot.yaml` unread.
+  They are now required, not defaulted — a default wheelbase would place four wheels somewhere
+  plausible and wrong. Four new consistency checks came with them, including one that compares
+  the *stated* `chassis.inertia` against the uniform-box formula its own comment cites, since a
+  stated value that has drifted from its own provenance is the quiet-wrong-number failure in a
+  new place.
+- **`ring_bodies` and `coupling_tendons` now take a `prefix`.** MJCF names are global, so four
+  wheels nesting the same subtree collide on `seg0`. The tendon builder needs the *same* prefix
+  or a banded rover wires every wheel's band to the first wheel's joints — a model that
+  compiles and is wrong, which is worse than one that does not.
+- **`observe_step` grew a sibling.** `observe_rover` takes the same `observer(k, model, data)`
+  hook, so the renderer films the measured run.
+
+### Two scenario bugs, both caught by measurement rather than inspection
+
+**The step was shorter than the run.** A 4 m step box against a robot doing 1.19 m/s for 6 s —
+6.9 m of travel — meant the robot climbed the step, crossed it, and drove off the far end. The
+final frame then showed it back on the floor at *exactly* its 170 mm ride height, and the climb
+predicate read that as "never climbed". Every number in the row was plausible. The step is now
+sized from the reachable distance, and a test asserts it outruns the robot.
+
+**The climb predicate passed a leaner.** "Past the step face and above 0.6 of ride height"
+is satisfied by a robot nose-up against a 100 mm riser, which is 113 mm above the upper ground
+without being on it. It now requires the chassis centre a full half-length beyond the face
+*and* within a fifth of its ride height of where it would stand. Both halves were wrong alone.
+
+A third, found by a test rather than a run: `duration_s` below `settle_s` indexed past the end
+of the history and died inside the summary with an `IndexError`. `RoverSpec` now refuses it and
+says why — no torque is commanded until the robot has settled, so a shorter run measures a
+stationary robot.
+
+**Still not modelled, and all three bite the *compliant* rover rather than this one:** the ring
+is planar and has no out-of-plane freedom, so a wheel loaded by roll or by dropping off an edge
+is rigid; skid steer scrubs and lateral scrub of a segmented capsule ring is validated against
+nothing, which is why only straight-line driving is supplied; and the chassis has no suspension
+at all, by choice, so the wheel is the whole story.
+
+**Gates.** Unit suite 624/624 (18 new), ruff at the standing 71.
+
+---
+
+## 2026-08-10 — #29: the law was never the problem, and the claw climb is 30 mm, not 60
+
+**Hypothesis.** #29 recorded that no fit of the driven claw design passes the 5% gate over its
+working range, and diagnosed it as the deconvolution being ill-posed — the same failure already
+established for *banded* wheels, now appearing on a bandless one. Its candidate 2 was to stop
+deconvolving: measure **one claw** on the same plate and use that curve as the segment law
+directly (`ring_from_claw_curve`, built for #18 and never wired into the step rig). Prediction:
+the gate stops failing because nothing is fitted.
+
+**Design throughout:** R 60 mm, width 45 mm, 12 claws, 6 mm root, taper 0.6, hub 22 mm,
+bandless, phase −90°, plane strain, μ = 0.8, 12 mm sweep at 10 points. One design, one mesh
+setting, both tiers. (Plane-strain force scales linearly with width, so an earlier pass at
+30 mm gives forces 1.5× smaller and *identical* relative errors; the numbers below are the
+45 mm ones, matching the documented command.)
+
+### The diagnosis was wrong, and the measurement says so twice
+
+**Below second-claw engagement the whole wheel *is* one claw.** Measured, claw sector against
+whole wheel:
+
+| δ | whole wheel | one claw | |
+|---|---|---|---|
+| 1.20 mm | 27.730 N | 27.751 N | +0.1% |
+| 2.40 mm | 38.611 N | 38.620 N | +0.0% |
+| 3.60 mm | 33.144 N | 33.147 N | +0.0% |
+| 4.80 mm | 31.314 N | 31.318 N | +0.0% |
+| 6.00 mm | 30.397 N | 30.401 N | +0.0% |
+
+RMS **0.036%** over five points. So over that range there is no deconvolution to be ill-posed
+about — one segment carries everything — and whatever the fitter was doing wrong, it was not
+that. **#29's stated diagnosis is refuted.**
+
+**What it actually was: under-parameterisation.** `fit_tabulated_law` defaults to
+`n_intervals = min(8, len(d) // 2)`. Restricted to the six points below engagement, where the
+answer is a single measured curve and the exact law is available for comparison:
+
+| intervals | RMS | passes 5% |
+|---|---|---|
+| 2 | 22.92% | no |
+| 3 (**the default at 6 points**) | 10.42% | no |
+| 4 | 1.71% | **yes** |
+| 5 | 1.83% | yes |
+| no fit at all | **0.0000%** | — |
+
+Three intervals cannot represent a curve that peaks at 2.4 mm and softens for the next ten;
+four can. A rule of thumb picked three. That is the whole of the sub-engagement failure.
+
+### But the gate still fails, and now it fails honestly
+
+`ring_from_claw_curve` has no fit error — nothing was fitted, so the honest number is zero and
+it means nothing. **`validate_ring` is the replacement**: build the ring from one claw's curve,
+then ask it to predict the *whole wheel's*, which is a different experiment on a different mesh
+and data the law never saw. The CLAUDE.md watch list asks every model for one check against a
+number it did not produce; for a claw ring this is that check, and it is a stronger claim than
+the fit error it replaces rather than a weaker one. `RingFit.iterations == 0` marks it.
+
+Held out over the full 12 mm: **20.17% of peak**. The gate fails. Where it fails is the point:
+
+| δ | FEA | radial-only ring | hinged ring |
+|---|---|---|---|
+| 6.00 mm | 30.397 N | 30.401 N (+0.0%) | 30.401 N (+0.0%) |
+| 7.20 mm | 36.644 N | 29.778 N (**−18.7%**) | 29.778 N (−18.7%) |
+| 8.40 mm | 52.606 N | 51.582 N (−1.9%) | 30.319 N (−42.4%) |
+| 9.60 mm | 64.898 N | 105.566 N (**+62.7%**) | 32.795 N (**−49.5%**) |
+| 12.00 mm | 87.063 N | 101.198 N (+16.2%) | 36.261 N (−58.4%) |
+
+**Two idealisations bracketing the truth from opposite sides is a statement about the element,
+not about the law.** Both rings run the *same* law, and that law is exact below 6 mm. A radial
+slide makes a claw at ±30° a rigid column and overshoots by 63%; a root hinge lets it fold away
+and undershoots by 50%. The real claw does both at once, and does something neither models: it
+meets a flat plate on its **flank**, not its tip. That shows up independently in the onset —
+the FEA has a second claw carrying at **7.20 mm**, 0.84 mm before the geometric threshold of
+`R(1 − cos 2π/n)` = 8.04 mm, because contact starts before the tip arrives. CLAUDE.md already
+named this as unverified ("a real claw beds onto its side as it folds, and nothing here models
+that"); this is the first time it has a number.
+
+### And the headline moves: 30 mm, not 60
+
+`run_step.py --law claw` on the documented design, `--tangential hinge --sweep`:
+
+```
+compliant     30 mm  [###......] 10-90 mm (0.50 R)
+rigid         20 mm  [##.......] 10-90 mm (0.33 R)
+```
+
+5/5 signatures, matched mass, radius and rotational inertia, both profiles monotone, 0% of
+loaded samples beyond the law's range, peak segment compression 7.47 mm.
+
+**The 60 mm of 2026-08-09 came from `--law table` on a 6 mm fit; this comes from the exact
+measured claw law.** Same design, same rig, same element — a 2× spread in the answer from the
+segment law alone. Neither law is validated over the range the wheel uses, so neither number is
+better than the other by its own error bar; what argues for this one is that it is *exact*
+below 6 mm and the run's peak segment compression is 7.47 mm, so the run spends most of its
+time where this law is right and the fitted one never was. **Quote 30-vs-20 and quote the
+caveat with it.** The old 60-vs-20 is superseded, and so, again, is the 50-vs-20 banded `T3`.
+
+### Also fixed, and found the same way
+
+A first-crossing search written with `np.interp` — which requires an increasing table and
+silently returns a non-crossing when handed a falling one. A claw curve peaks at 2.4 mm and
+softens for the next ten, which is exactly why `is_monotone_nonneg` was dropped as a gate in
+#16, so this was the one input guaranteed to break it. It did not change the printed answer on
+this design, which is the reason to fix it now rather than when it does.
+
+And one of my own, worth recording because the docstring warns about it: the second-claw
+threshold is `R(1 − cos 2π/n)`, not twice `polygon_drop_m` = `2R(1 − cos π/n)`. The wrong one
+gives 4.09 mm against 8.04 mm — a factor of two, both plausible on a 60 mm wheel. It is now
+`ring.second_contact_delta_m` with a test asserting it is *not* the other one, and a second
+test that checks it against the ring's own contact set rather than against the same formula.
+
+**Gates.** Unit suite 633/633 (9 new), ruff at the standing 71.

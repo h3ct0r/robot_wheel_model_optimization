@@ -21,8 +21,10 @@ from wheelopt.cad.params import WheelParams
 from wheelopt.rom.ring import RingSpec, SpringLaw, ring_for_design
 from wheelopt.sim.step_climb import (
     EXPLICIT_STABILITY_LIMIT,
+    ClimbProfile,
     RigSpec,
     build_scenario_mjcf,
+    default_step_heights_m,
     ring_axle_inertia_kg_m2,
     run_step,
     segment_damping_n_s_per_m,
@@ -47,6 +49,63 @@ RIG = RigSpec(payload_kg=0.120, step_height_m=0.036)
 SPEC_BANDLESS = replace(SPEC, band_bending_n_per_m=0.0, band_hoop_n_per_m=0.0,
                         root_radius_m=0.020)
 HALF_WIDTH, SEGMENT_MASS = 0.015, 0.002
+
+
+class TestClimbProfile(unittest.TestCase):
+    """The sweep keeps its pattern, because the maximum alone cannot be read.
+
+    Pure: `ClimbProfile` is a record, so none of this needs MuJoCo. The sweep that fills it
+    is exercised by the runs further down.
+    """
+
+    @staticmethod
+    def profile(marks: str, first_mm: float = 10.0) -> ClimbProfile:
+        """`#` cleared, `.` did not, `E` the run failed. Heights 10 mm apart."""
+        heights = (first_mm + 10.0 * np.arange(len(marks))) * 1e-3
+        return ClimbProfile(
+            heights_m=heights,
+            climbed=np.array([m == "#" for m in marks]),
+            failed=np.array([m == "E" for m in marks]),
+        )
+
+    def test_a_clean_climb_is_monotone_and_uncensored(self):
+        p = self.profile("######...")
+        self.assertAlmostEqual(p.tallest_m, 0.060)
+        self.assertTrue(p.monotone)
+        self.assertFalse(p.censored)
+
+    def test_a_bounce_over_a_step_it_failed_below_is_not_monotone(self):
+        """The reason the profile exists. Both of these report 60 mm; one is a wheel that
+        climbs and one is a wheel that got lucky at a single height, and the maximum cannot
+        tell them apart."""
+        climb, bounce = self.profile("######..."), self.profile("###..#...")
+        self.assertEqual(climb.tallest_m, bounce.tallest_m)
+        self.assertTrue(climb.monotone)
+        self.assertFalse(bounce.monotone)
+
+    def test_a_result_at_the_top_of_the_range_is_censored(self):
+        self.assertTrue(self.profile("######").censored)
+        self.assertFalse(self.profile("#####.").censored)
+
+    def test_a_wheel_that_cleared_nothing_reports_zero_and_is_not_censored(self):
+        p = self.profile("......")
+        self.assertEqual(p.tallest_m, 0.0)
+        self.assertFalse(p.censored)
+
+    def test_a_failed_run_is_not_a_cleared_one_nor_a_refusal(self):
+        """`E` must not read as "did not climb": a diverged sweep would then look like a poor
+        wheel, which is the difference between a result and the absence of one."""
+        p = self.profile("##EE..")
+        self.assertAlmostEqual(p.tallest_m, 0.020)
+        self.assertEqual(int(np.count_nonzero(p.failed)), 2)
+        self.assertFalse(p.monotone is None)
+
+    def test_the_default_range_clears_the_radius(self):
+        """It ran to 1.01 R until 2026-08-09, and the R 60 mm claw clears exactly 60 mm — so
+        the ceiling was active on the very design that found it."""
+        heights = default_step_heights_m(SPEC)
+        self.assertGreater(heights[-1], SPEC.radius_m * 1.4)
+        self.assertLessEqual(float(heights[0]), 0.01)
 
 
 class TestDriveModel(unittest.TestCase):

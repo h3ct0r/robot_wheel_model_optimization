@@ -38,7 +38,7 @@ from wheelopt.cad.cli import (
 )
 from wheelopt.fea.loadcase import LoadCase, LoadCaseKind, MeshSpec, SolverSpec
 from wheelopt.rom.fit import fit_spring_law, fit_tabulated_law
-from wheelopt.rom.ring import ring_for_design, solve_equilibrium
+from wheelopt.rom.ring import ring_for_design, second_contact_delta_m, solve_equilibrium
 from wheelopt.sim.step_climb import judge_signatures, loaded_radius_table
 
 TINY = {"radius": 60.0, "width": 30.0, "spokes": 6, "thickness": 5.0,
@@ -54,9 +54,14 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--delta-max", type=float, default=0.006)
     p.add_argument("--n-points", type=int, default=6)
     p.add_argument("--plane-strain", action="store_true")
-    p.add_argument("--law", choices=("cubic", "table"), default="cubic",
-                   help="spring law family. The table can represent a softening segment, "
-                        "which the cubic cannot; see wheelopt.rom.ring.TabulatedLaw")
+    p.add_argument("--law", choices=("cubic", "table", "claw"), default="cubic",
+                   help="where the segment law comes from. 'cubic' and 'table' both "
+                        "deconvolve the whole-wheel plate curve into segment laws; 'claw' "
+                        "does no fit at all -- it measures ONE claw on the same plate and "
+                        "uses that curve as the segment law directly, which for a bandless "
+                        "wheel is what a segment is (TODO #18). Bandless only, and the "
+                        "whole-wheel curve is then spent on validating it rather than "
+                        "training it (TODO #29)")
     p.add_argument("--payload", type=float, default=None,
                    help="kg on the axle; default puts the wheel at half its fitted range")
     p.add_argument("--step-height", type=float, default=None,
@@ -85,16 +90,15 @@ def build_parser() -> argparse.ArgumentParser:
     return p
 
 
-def _fit_the_ring(args):
-    """FEA -> ring fit. Returns (spec, fit) or (None, message)."""
-    params = params_from_args(args)
-    material = material_from_args(args)
+def _plate_curve(args, params, material, *, claw_sector: bool):
+    """One RADIAL_FLAT sweep. Returns (delta, force) or (None, message)."""
     # One contact penalty for both tiers since #12 (2026-08-09): the plane-strain tier used
     # to need a hand-softened factor of 5 where the 3-D tier ran at the default 20, and 5 is
     # now the default because it costs 0.7-0.8% of the answer on the 3-D tier and buys the
     # conditioning outright. Only the mesh differs.
-    mesh = (MeshSpec(dimension=2, size_spoke_m=0.0025, size_rim_m=0.003, size_hub_m=0.002)
-            if args.plane_strain
+    mesh = (MeshSpec(dimension=2, size_spoke_m=0.0025, size_rim_m=0.003, size_hub_m=0.002,
+                     claw_sector=claw_sector)
+            if args.plane_strain or claw_sector
             else MeshSpec(size_spoke_m=0.008, size_rim_m=0.010, size_hub_m=0.010))
 
     from wheelopt.fea.runner import run_load_case
@@ -106,13 +110,50 @@ def _fit_the_ring(args):
                            cache_root=args.cache)
     if not result.ok:
         return None, f"{result.status.value}: {result.message}"
-
     loading = result.curve.loading
-    delta = result.curve.delta_m[loading]
-    force = result.curve.force_n[loading]
-    spec = ring_for_design(params, material, n_segments=args.segments)
-    fit = (fit_spring_law(spec, delta, force) if args.law == "cubic"
-           else fit_tabulated_law(spec, delta, force))
+    return (result.curve.delta_m[loading], result.curve.force_n[loading]), None
+
+
+def _fit_the_ring(args):
+    """FEA -> ring. Returns (spec, fit) or (None, message).
+
+    Two routes, and `--law claw` is the one with no fit in it. The fitters deconvolve the
+    whole-wheel curve, where every δ mixes several segment compressions; the claw route
+    measures one claw on the same plate and uses that curve as the segment law, which for a
+    bandless wheel is the definition of a segment rather than an approximation to one. The
+    whole-wheel curve is still run, but it becomes a **held-out** check instead of training
+    data — see `wheelopt.rom.fit.validate_ring`.
+    """
+    params = params_from_args(args)
+    material = material_from_args(args)
+    # Refused before either sweep runs, not after the first one: a banded design would
+    # otherwise pay for a whole-wheel solve and then be told the flag was never applicable.
+    if args.law == "claw" and params.has_shear_band:
+        return None, ("--law claw needs a bandless design: with a band the claws share load "
+                      f"through it and one claw's curve is not a segment law. "
+                      f"rim_thickness_mm is {params.rim_thickness_mm:g}")
+
+    curve, message = _plate_curve(args, params, material, claw_sector=False)
+    if curve is None:
+        return None, message
+    delta, force = curve
+
+    if args.law != "claw":
+        spec = ring_for_design(params, material, n_segments=args.segments)
+        fit = (fit_spring_law(spec, delta, force) if args.law == "cubic"
+               else fit_tabulated_law(spec, delta, force))
+        return (spec, fit), None
+
+    claw, message = _plate_curve(args, params, material, claw_sector=True)
+    if claw is None:
+        return None, f"claw sector: {message}"
+    from wheelopt.rom.fit import ring_from_claw_curve, validate_ring
+
+    try:
+        spec, law = ring_from_claw_curve(params, *claw)
+        fit = validate_ring(spec, law, delta, force)
+    except Exception as exc:  # noqa: BLE001 - a bad curve is a result, not a crash
+        return None, f"{type(exc).__name__}: {exc}"
     return (spec, fit), None
 
 
@@ -190,7 +231,33 @@ def main(argv: list[str] | None = None) -> int:
     print(f"ring: {spec.n_segments} segments, R = {spec.radius_m * 1e3:.0f} mm, "
           f"band {spec.band_bending_n_per_m:.3f} / {spec.band_hoop_n_per_m:.1f} N/m")
     caveat = "" if fit.ok else "   <- NOT OK; read every number below as provisional"
-    print(f"fit:  {fit.summary()}{caveat}")
+    # iterations == 0 is `validate_ring`'s marker: nothing was fitted, so the error below is
+    # against a curve the law never saw. Say which, because a 5% held-out error and a 5% fit
+    # error are not the same claim and the summary line looks identical.
+    kind = "held out" if fit.iterations == 0 else "fitted"
+    print(f"fit:  [{kind}] {fit.summary()}{caveat}")
+    if not spec.is_coupled:
+        engage = second_contact_delta_m(spec)
+        probe = np.linspace(1e-5, 0.6 * spec.radius_m, 2000)
+        carried = np.array([solve_equilibrium(spec, fit.law, float(d)).force_n for d in probe])
+        nominal = LoadCase().nominal_load_n
+        # First crossing, walked by hand. `np.interp` wants an increasing table and a claw
+        # curve is not one -- it peaks at ~2.4 mm and softens for the next ten, which is the
+        # whole reason `is_monotone_nonneg` was dropped as a gate. Handed a falling table it
+        # returns a number rather than an error, and that number is not a crossing.
+        hit = np.flatnonzero(carried >= nominal)
+        if hit.size == 0:
+            where = f"beyond {probe[-1] * 1e3:.0f} mm"
+        elif hit[0] == 0:
+            where = f"under {probe[0] * 1e3:.2f} mm"
+        else:
+            k = int(hit[0])
+            span = carried[k] - carried[k - 1]
+            frac = (nominal - carried[k - 1]) / span if span > 0 else 0.0
+            where = f"{(probe[k - 1] + frac * (probe[k] - probe[k - 1])) * 1e3:.2f} mm"
+        print(f"      a second claw engages at R(1-cos 2pi/n) = {engage * 1e3:.2f} mm; "
+              f"below that the wheel is one claw and above it the ROM is unvalidated.\n"
+              f"      the platform's {nominal:.1f} N per wheel sits at {where}")
 
     fit_max = float(np.max(fit.delta_m))
     # Sit the wheel at half its fitted indentation. Loading it to the platform's 24.5 N when
@@ -204,10 +271,9 @@ def main(argv: list[str] | None = None) -> int:
 
     from wheelopt.sim.step_climb import (
         RigSpec,
-        default_step_heights_m,
-        highest_step_climbed,
         run_flat,
         run_step,
+        step_climb_profile,
     )
 
     tangential_law = None
@@ -293,18 +359,15 @@ def main(argv: list[str] | None = None) -> int:
           f"{compliant['step'].fraction_beyond_fit:.0%} of loaded samples beyond it")
 
     if args.sweep:
-        ceiling = float(default_step_heights_m(spec)[-1])
-        print("\ntallest step cleared (sweep, 10 mm resolution):")
+        print("\ntallest step cleared (sweep, 10 mm resolution; # cleared, . did not, "
+              "E run failed):")
         for name, rigid in (("compliant", False), ("rigid", True)):
-            tallest = highest_step_climbed(spec, fit.law, rig, rigid=rigid,
-                                           fit_max_m=fit_max,
-                                           tangential_law=tangential_law,
-                                           tangential_element=args.tangential)
-            # A result at the top of the swept range is the range's answer, not the wheel's.
-            note = "  <- AT THE SWEEP CEILING; the true value is >= this" \
-                if tallest >= ceiling - 1e-12 else ""
-            print(f"  {name:<10} {tallest * 1e3:5.0f} mm  "
-                  f"({tallest / spec.radius_m:.2f} R){note}")
+            profile = step_climb_profile(spec, fit.law, rig, rigid=rigid,
+                                         fit_max_m=fit_max,
+                                         tangential_law=tangential_law,
+                                         tangential_element=args.tangential)
+            print(f"  {name:<10} {profile.summary()} "
+                  f"({profile.tallest_m / spec.radius_m:.2f} R)")
         print("  10 mm buckets, and a 1% change in the fitted law moves the answer one "
               "bucket; read it as a bucket, not a millimetre.")
 

@@ -77,6 +77,7 @@ __all__ = [
     "ring_force_2dof_n",
     "ring_force_hinge_n",
     "ring_force_n",
+    "second_contact_delta_m",
     "segment_angles",
     "solve_equilibrium",
     "solve_equilibrium_2dof",
@@ -922,6 +923,32 @@ def polygon_drop_m(radius_m: float, n_segments: int) -> float:
     if radius_m <= 0.0 or n_segments < 3:
         raise ValueError("need a positive radius and at least three tips")
     return float(radius_m * (1.0 - np.cos(np.pi / n_segments)))
+
+
+def second_contact_delta_m(spec: RingSpec) -> float:
+    """Indentation at which a **second** segment reaches the plate, metres. ``R(1−cos 2π/n)``.
+
+    Below it a bandless wheel on a flat plate is one claw and nothing else, which is why
+    :func:`~wheelopt.rom.fit.ring_from_claw_curve` can take a single claw's measured curve as
+    the segment law and reproduce the whole wheel exactly — 0.05% over six points on the R
+    60 mm, 12-claw design, against 8.61% for the fitter on the same data. Above it two more
+    claws engage at ±2π/n, they meet the plate off their own radius, and the ROM's agreement
+    with the FEA collapses in a way no choice of law repairs.
+
+    So this is the validity boundary of a claw ring on a plate, not a detail of it — and it is
+    an **upper bound** on where the real wheel departs. This is the threshold for *rigid tips
+    on the undeformed circle*; the FEA wheel engages one 1.2 mm sample earlier, at 7.2 mm,
+    where the ring is still on one claw and is already 18.7% soft. A claw at ±2π/n meets a
+    flat plate on its flank rather than its tip, so contact starts before the tip arrives.
+
+    A separate quantity from :func:`polygon_drop_m`, which is ``R(1−cos π/n)`` — the axle's
+    ride-height ripple over *half* a pitch. The two differ only by a factor of two inside a
+    cosine and are routinely confused; doubling the drop gives 4.09 mm here against the true
+    8.04 mm, so the mistake is 2x and reads as plausible.
+    """
+    if spec.n_segments < 3:
+        raise ValueError("a ring needs at least three segments")
+    return float(spec.radius_m * (1.0 - np.cos(2.0 * np.pi / spec.n_segments)))
 
 
 def ride_height_ripple_m(

@@ -144,10 +144,17 @@ chassis:
   length: 0.40
   width: 0.30
   height: 0.20
+  com_offset: [0.0, 0.0, 0.0]
+  inertia: [0.0953, 0.1467, 0.1833]
+  ground_clearance_min: 0.070
 drivetrain:
   configuration: skid_steer
   n_driven_wheels: 4
   track_width: 0.35
+  wheelbase: 0.26
+motor:
+  stall_torque: 4.0
+  no_load_speed: 14.0
 wheel_interface:
   shaft_diameter: 0.008
 wheel_envelope:
@@ -159,6 +166,7 @@ wheel_envelope:
   max_mass_fraction: 0.05
 operating_point:
   nominal_wheel_load: 24.5
+  target_speed: 0.6
 manufacturing:
   bed_size: [0.220, 0.220, 0.250]
   min_interspoke_gap: 0.002
@@ -188,6 +196,25 @@ class TestLoaderRejectsBadSpecs(SpecFileCase):
         spec = self.load(MINIMAL)
         self.assertEqual(spec.name, "test-rig")
         self.assertEqual(spec.consistency_warnings(), [])
+
+    def test_the_vehicle_fields_are_read(self):
+        """The block `wheelopt.sim`'s rover needs. Every one of these sat in `robot.yaml`
+        unread until 2026-08-09, so the single-wheel rig invented its drive from a heuristic
+        instead of the platform's own motor."""
+        spec = self.load(MINIMAL)
+        self.assertAlmostEqual(spec.wheelbase_m, 0.26)
+        self.assertEqual(spec.chassis_inertia_kg_m2, (0.0953, 0.1467, 0.1833))
+        self.assertEqual(spec.com_offset_m, (0.0, 0.0, 0.0))
+        self.assertAlmostEqual(spec.ground_clearance_m, 0.070)
+        self.assertAlmostEqual(spec.stall_torque_n_m, 4.0)
+        self.assertAlmostEqual(spec.no_load_speed_rad_s, 14.0)
+        self.assertAlmostEqual(spec.target_speed_m_s, 0.6)
+
+    def test_a_spec_without_a_wheelbase_is_refused(self):
+        """Required, not defaulted. A default wheelbase would place four wheels somewhere
+        plausible and wrong, which is worse than refusing."""
+        self.assert_rejects(MINIMAL.replace("  wheelbase: 0.26\n", ""),
+                            contains="drivetrain.wheelbase")
 
     def test_missing_file(self):
         with self.assertRaises(PlatformSpecError):
@@ -273,6 +300,27 @@ class TestConsistencyWarnings(SpecFileCase):
     def test_wheel_well_smaller_than_the_largest_wheel(self):
         spec = self.load(MINIMAL.replace("wheel_well_radius: 0.105", "wheel_well_radius: 0.080"))
         self.assertTrue(any("wheel_well_radius" in w for w in spec.consistency_warnings()))
+
+    def test_wheelbase_longer_than_the_chassis(self):
+        spec = self.load(MINIMAL.replace("wheelbase: 0.26", "wheelbase: 0.50"))
+        self.assertTrue(any("wheelbase" in w for w in spec.consistency_warnings()))
+
+    def test_inertia_that_no_longer_matches_its_own_provenance(self):
+        """`chassis.inertia` is stated, not derived, so that a measurement can replace the
+        formula. The cost is that it can drift from the formula its comment still cites."""
+        spec = self.load(MINIMAL.replace("inertia: [0.0953, 0.1467, 0.1833]",
+                                         "inertia: [0.0953, 0.9000, 0.1833]"))
+        self.assertTrue(any("uniform-box" in w for w in spec.consistency_warnings()))
+        # And the untouched axes must not also complain, or the check says nothing.
+        self.assertEqual(sum("uniform-box" in w for w in spec.consistency_warnings()), 1)
+
+    def test_a_motor_that_cannot_move_the_robot(self):
+        spec = self.load(MINIMAL.replace("stall_torque: 4.0", "stall_torque: 0.4"))
+        self.assertTrue(any("tractive force" in w for w in spec.consistency_warnings()))
+
+    def test_a_target_speed_the_drivetrain_cannot_reach(self):
+        spec = self.load(MINIMAL.replace("target_speed: 0.6", "target_speed: 3.0"))
+        self.assertTrue(any("target_speed" in w for w in spec.consistency_warnings()))
 
     def test_track_narrower_than_the_chassis(self):
         spec = self.load(MINIMAL.replace("track_width: 0.35", "track_width: 0.25"))

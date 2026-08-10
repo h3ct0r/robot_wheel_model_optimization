@@ -238,6 +238,7 @@ def ring_bodies(
     tangential: TangentialElement | None = None,
     radial_damping: float = 0.0,
     tangential_damping_c: float = 0.0,
+    prefix: str = "",
     indent: int = 6,
 ) -> list[str]:
     """The ``N`` segment bodies, to be nested inside whatever carries the hub.
@@ -298,6 +299,13 @@ def ring_bodies(
     damping is not the "dissipation no material supplied" that
     :func:`stable_timestep_s` rejects — it is the same dissipation, integrated stably.
 
+    ``prefix`` namespaces every emitted name — bodies, joints and geoms alike. Empty by
+    default, so a single-wheel model is the XML it always was. It exists because MJCF names
+    are global: a four-wheel rover nesting this subtree four times collides on ``seg0`` and
+    the model will not compile. Pass the *same* prefix to :func:`coupling_tendons`, which
+    references these joints by name and would otherwise wire every wheel's band to the first
+    wheel's joints — a model that compiles and is wrong, which is worse than one that does not.
+
     Raises:
         ValueError: on an unknown element name, on a banded spec, or — for ``"hinge"`` — on a
             spec with no ``root_radius_m``.
@@ -345,13 +353,13 @@ def ring_bodies(
         # Outward radial unit vector for this segment; segment 0 points at the floor.
         ux, uz = float(np.sin(angle)), float(-np.cos(angle))
         px, pz = origin_radius * ux, origin_radius * uz
-        lines.append(f'{pad}<body name="seg{i}" pos="{px:.9f} 0 {pz:.9f}">')
+        lines.append(f'{pad}<body name="{prefix}seg{i}" pos="{px:.9f} 0 {pz:.9f}">')
         if hinged:
             # Before the slide, so the slide's axis rotates with it. Limits at +-pi/2: past
             # that the claw points back into the hub, which this model does not describe, and
             # a run that reaches the stop has already collapsed.
             lines.append(
-                f'{pad}  <joint name="t{i}" type="hinge" axis="0 -1 0" '
+                f'{pad}  <joint name="{prefix}t{i}" type="hinge" axis="0 -1 0" '
                 f'range="{-0.5 * np.pi:.9f} {0.5 * np.pi:.9f}" limited="true"{tan_damp}/>'
             )
         lines.append(
@@ -360,7 +368,7 @@ def ring_bodies(
             # patch bulge, and a joint limit that quietly caps that bulge would look like a
             # stiffness disagreement rather than the constraint it is. Both bounds are now
             # far outside anything physical, so hitting one means a bug, not a design.
-            f'{pad}  <joint name="j{i}" type="slide" axis="{ux:.9f} 0 {uz:.9f}" '
+            f'{pad}  <joint name="{prefix}j{i}" type="slide" axis="{ux:.9f} 0 {uz:.9f}" '
             f'range="{-0.9 * r:.9f} {0.5 * r:.9f}" limited="true"{rad_damp}/>'
         )
         if tangential == "slide":
@@ -369,7 +377,7 @@ def ring_bodies(
             # a claw bends when it catches a step, and the reason this joint exists.
             tx, tz = float(np.cos(angle)), float(np.sin(angle))
             lines.append(
-                f'{pad}  <joint name="t{i}" type="slide" axis="{tx:.9f} 0 {tz:.9f}" '
+                f'{pad}  <joint name="{prefix}t{i}" type="slide" axis="{tx:.9f} 0 {tz:.9f}" '
                 f'range="{-0.5 * r:.9f} {0.5 * r:.9f}" limited="true"{tan_damp}/>'
             )
         # The `+ 0.0` normalises a negative zero: `arm` is exactly 0 without the hinge, and
@@ -380,7 +388,7 @@ def ring_bodies(
             # Laying it along x instead makes each segment a 30 mm bar in the rolling
             # direction: neighbours 15.7 mm apart then overlap permanently, and the model
             # reports tens of newtons of contact force before the floor is even touched.
-            (f'{pad}  <geom name="g{i}" type="capsule" fromto="'
+            (f'{pad}  <geom name="{prefix}g{i}" type="capsule" fromto="'
              f'{gx:.9f} {-segment_half_width_m:.9f} {gz:.9f} '
              f'{gx:.9f} {segment_half_width_m:.9f} {gz:.9f}" '
              f'size="{seg_r * 0.5:.9f}" mass="{segment_mass_kg}" '
@@ -449,7 +457,8 @@ def hinge_arm_m(spec: RingSpec) -> float:
     return segment_body_radius_m(spec) - hinge_pivot_radius_m(spec)
 
 
-def coupling_tendons(spec: RingSpec, *, indent: int = 2) -> list[str]:
+def coupling_tendons(spec: RingSpec, *, prefix: str = "",
+                     indent: int = 2) -> list[str]:
     """The shear band, as fixed tendons: ``N`` bending ones and one hoop.
 
     This is an exact rendering of the analytic band, not an approximation of it, and the
@@ -480,17 +489,20 @@ def coupling_tendons(spec: RingSpec, *, indent: int = 2) -> list[str]:
     if spec.band_bending_n_per_m > 0.0:
         operator = curvature_operator(spec)
         for i in range(spec.n_segments):
-            lines.append(f'    <fixed name="bend{i}" '
+            lines.append(f'    <fixed name="{prefix}bend{i}" '
                          f'stiffness="{spec.band_bending_n_per_m:.9g}" springlength="0">')
             # Only the three non-zero entries of the row; a coef of 0 is legal but makes the
             # XML N times bigger and hides which segments are actually neighbours.
             for j in sorted({(i - 1) % spec.n_segments, i, (i + 1) % spec.n_segments}):
-                lines.append(f'      <joint joint="j{j}" coef="{operator[i, j]:.9g}"/>')
+                lines.append(
+                    f'      <joint joint="{prefix}j{j}" coef="{operator[i, j]:.9g}"/>')
             lines.append("    </fixed>")
     if spec.band_hoop_n_per_m > 0.0:
-        lines.append(f'    <fixed name="hoop" stiffness="{spec.band_hoop_n_per_m:.9g}" '
+        lines.append(f'    <fixed name="{prefix}hoop" '
+                     f'stiffness="{spec.band_hoop_n_per_m:.9g}" '
                      'springlength="0">')
-        lines += [f'      <joint joint="j{i}" coef="1"/>' for i in range(spec.n_segments)]
+        lines += [f'      <joint joint="{prefix}j{i}" coef="1"/>'
+                  for i in range(spec.n_segments)]
         lines.append("    </fixed>")
     lines.append("  </tendon>")
     return lines
