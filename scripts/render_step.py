@@ -34,7 +34,7 @@ from wheelopt.cad.cli import (
     params_from_args,
 )
 from wheelopt.fea.loadcase import LoadCase, LoadCaseKind, MeshSpec, SolverSpec
-from wheelopt.rom.fit import fit_spring_law
+from wheelopt.rom.fit import fit_spring_law, fit_tabulated_law
 from wheelopt.rom.ring import ring_for_design, solve_equilibrium
 
 TINY = {"radius": 60.0, "width": 30.0, "spokes": 6, "thickness": 5.0,
@@ -52,6 +52,13 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--plane-strain", action="store_true")
     p.add_argument("--payload", type=float, default=None)
     p.add_argument("--height", type=float, default=None, help="step height in mm")
+    p.add_argument("--law", choices=("cubic", "table"), default="cubic",
+                   help="spring law family, as in run_step.py. The claw designs need 'table'")
+    p.add_argument("--tangential", nargs="?", const="hinge", default=None,
+                   choices=("hinge", "slide"),
+                   help="give every claw its second in-plane freedom, as in run_step.py. "
+                        "Bandless rings only")
+    p.add_argument("--tangential-max", type=float, default=None, metavar="M")
     p.add_argument("--duration", type=float, default=3.0, help="seconds to render")
     p.add_argument("--fps", type=int, default=25)
     p.add_argument("--pixels", type=int, default=640,
@@ -85,33 +92,28 @@ def _fit_the_ring(args):
         return None, f"{result.status.value}: {result.message}"
     loading = result.curve.loading
     spec = ring_for_design(params, material, n_segments=args.segments)
-    return (spec, fit_spring_law(spec, result.curve.delta_m[loading],
+    fitter = fit_spring_law if args.law == "cubic" else fit_tabulated_law
+    return (spec, fitter(spec, result.curve.delta_m[loading],
                                  result.curve.force_n[loading])), None
 
 
-def _render_run(spec, law, rig, *, rigid, fps, pixels, duration_s):
-    """Integrate and grab a frame every 1/fps. Returns (frames, times, axle_x)."""
+def _render_run(spec, law, rig, *, rigid, fps, pixels, duration_s, fit_max_m,
+                tangential_law=None, tangential_element=None):
+    """Film one run. Returns ``(frames, times, axle_x, result)``.
+
+    The physics is **not** here. `observe_step` runs the same loop `run_step` measures and
+    hands back the live state after every integrator step; this only decides which of those
+    steps become pictures. It had its own loop until 2026-08-09 and had drifted off the rig it
+    was supposed to be showing — no stable timestep, and the loss-factor damping still pushed
+    through `qfrc_applied` where #27 moved it to native joint damping. The frames were of a
+    simulation nobody measured, which is the one thing a renderer must not be.
+    """
     import mujoco
 
-    from wheelopt.sim.step_climb import build_scenario_mjcf, segment_damping_n_s_per_m
-
-    model = mujoco.MjModel.from_xml_string(build_scenario_mjcf(spec, rig, rigid=rigid))
-    data = mujoco.MjData(model)
-    damping = 0.0 if rigid else segment_damping_n_s_per_m(
-        law, spec, rig.payload_kg, rig.loss_factor
-    )
-    segment_qpos = np.array([], dtype=np.int64)
-    segment_dofs = np.array([], dtype=np.int64)
-    if not rigid:
-        ids = [mujoco.mj_name2id(model, mujoco.mjtObj.mjOBJ_JOINT, f"j{i}")
-               for i in range(spec.n_segments)]
-        segment_qpos = model.jnt_qposadr[ids]
-        segment_dofs = model.jnt_dofadr[ids]
-    axle_dof = model.jnt_dofadr[mujoco.mj_name2id(model, mujoco.mjtObj.mjOBJ_JOINT, "axle")]
-    carriage = mujoco.mj_name2id(model, mujoco.mjtObj.mjOBJ_BODY, "carriage")
+    from wheelopt.sim.step_climb import observe_step
 
     height = int(pixels * 9 / 16)
-    renderer = mujoco.Renderer(model, height=height, width=pixels)
+    renderer = None
     camera = mujoco.MjvCamera()
     mujoco.mjv_defaultCamera(camera)
     camera.azimuth, camera.elevation = 90.0, -12.0
@@ -122,23 +124,20 @@ def _render_run(spec, law, rig, *, rigid, fps, pixels, duration_s):
     # only enough to keep an approaching wheel on screen, and stops at the obstacle.
     focus_x = rig.step_x_m - 1.2 * spec.radius_m
 
-    settle_steps = int(0.6 / rig.timestep_s)
-    n_steps = int(duration_s / rig.timestep_s)
-    every = max(1, round(1.0 / (fps * rig.timestep_s)))
+    # The step is chosen by the rig, not by this script: a stiff law tightens it, so the
+    # frame interval has to be derived after the fact rather than from `rig.timestep_s`.
     frames, times, positions = [], [], []
+    state = {"every": None, "carriage": None}
 
-    for k in range(n_steps):
-        if not rigid:
-            compression = -data.qpos[segment_qpos]
-            data.qfrc_applied[segment_dofs] = (
-                law.force_n(compression) - damping * data.qvel[segment_dofs]
-            )
-        data.ctrl[0] = (0.0 if k < settle_steps else
-                        rig.motor_torque_n_m(spec.radius_m, float(data.qvel[axle_dof])))
-        mujoco.mj_step(model, data)
-        if k % every:
-            continue
-        axle_x = float(data.xpos[carriage, 0])
+    def observe(k, model, data):
+        nonlocal renderer
+        if renderer is None:
+            renderer = mujoco.Renderer(model, height=height, width=pixels)
+            state["carriage"] = mujoco.mj_name2id(model, mujoco.mjtObj.mjOBJ_BODY, "carriage")
+            state["every"] = max(1, round(1.0 / (fps * model.opt.timestep)))
+        if k % state["every"] or data.time > duration_s:
+            return
+        axle_x = float(data.xpos[state["carriage"], 0])
         camera.lookat[:] = (min(axle_x + 1.2 * spec.radius_m, focus_x) if axle_x < focus_x
                             else max(focus_x, axle_x - 0.5 * spec.radius_m),
                             0.0,
@@ -146,10 +145,18 @@ def _render_run(spec, law, rig, *, rigid, fps, pixels, duration_s):
         renderer.update_scene(data, camera)
         frames.append(renderer.render().copy())
         times.append(float(data.time))
-        positions.append(float(data.xpos[carriage, 0]))
+        positions.append(axle_x)
 
-    renderer.close()
-    return frames, times, positions
+    # `fit_max_m` is not optional here even though `observe_step` defaults it to infinity:
+    # against infinity `fraction_beyond_fit` is 0% for every run, which reads as "well inside
+    # the fit" and means "not measured". It printed exactly that -- 0% where run_step says
+    # 14% -- for as long as it took to notice.
+    result = observe_step(spec, law, rig, observe, rigid=rigid, fit_max_m=fit_max_m,
+                          tangential_law=tangential_law,
+                          tangential_element=tangential_element)
+    if renderer is not None:
+        renderer.close()
+    return frames, times, positions, result
 
 
 def _label(image, text):
@@ -190,7 +197,25 @@ def main(argv: list[str] | None = None) -> int:
     payload = args.payload if args.payload is not None else static_load / 9.81
     height = (args.height * 1e-3 if args.height is not None
               else round(0.6 * spec.radius_m, 3))
-    rig = RigSpec(payload_kg=payload, step_height_m=height)
+    # The rig's own duration, so the film ends where the measured run ends rather than at a
+    # separate number that could quietly disagree with it.
+    rig = RigSpec(payload_kg=payload, step_height_m=height, duration_s=args.duration)
+
+    # The tangential law comes from run_step's helper, not a copy of it: it is the same sweep,
+    # the same claw sector and the same change of coordinates, and two of those would be two
+    # chances to film a claw the measured run does not have.
+    tangential_law = None
+    if args.tangential:
+        if spec.is_coupled:
+            print("--tangential needs a bandless ring; use --rim-thickness 0")
+            return 1
+        sys.path.insert(0, str(Path(__file__).resolve().parent))
+        from run_step import _measure_tangential_law
+
+        tangential_law, _kinematics, message = _measure_tangential_law(args, spec)
+        if tangential_law is None:
+            print(f"tangential sweep failed: {message}")
+            return 1
 
     print(f"ring {spec.n_segments} segments, R {spec.radius_m * 1e3:.0f} mm, "
           f"fit {fit.rms_error_fraction:.2%}")
@@ -200,11 +225,18 @@ def main(argv: list[str] | None = None) -> int:
     args.out.mkdir(parents=True, exist_ok=True)
     rendered = {}
     for name, rigid in (("compliant", False), ("rigid", True)):
-        frames, times, positions = _render_run(
+        frames, times, positions, result = _render_run(
             spec, fit.law, rig, rigid=rigid, fps=args.fps, pixels=args.pixels,
-            duration_s=args.duration,
+            duration_s=args.duration, fit_max_m=fit_max,
+            tangential_law=tangential_law, tangential_element=args.tangential,
         )
+        if not result.ok:
+            print(f"  {name}: {result.message}")
+            return 1
         rendered[name] = (frames, times, positions)
+        verdict = "CLIMBED" if result.climbed else "did not climb"
+        print(f"  {name:<10} {verdict}, {result.fraction_beyond_fit:.0%} of loaded samples "
+              f"past the fitted range")
         pictures = [_label(frame, f"{name}  t={t:.2f}s  x={x * 1e3:.0f}mm")
                     for frame, t, x in zip(frames, times, positions)]
         path = args.out / f"step_{name}_{height * 1e3:.0f}mm.gif"

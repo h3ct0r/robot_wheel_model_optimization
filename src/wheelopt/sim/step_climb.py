@@ -80,6 +80,7 @@ __all__ = [
     "highest_step_climbed",
     "judge_signatures",
     "loaded_radius_table",
+    "observe_step",
     "ring_axle_inertia_kg_m2",
     "run_flat",
     "run_step",
@@ -275,6 +276,13 @@ def build_scenario_mjcf(spec: RingSpec, rig: RigSpec, *, rigid: bool,
         (f'    <geom friction="{rig.friction:.4g} 0.005 0.0001" '
          f'solref="{rig.contact_solref_s:.9g} 1" solimp="0.98 0.999 0.001" condim="3"/>'),
         "  </default>",
+        # Offscreen framebuffer, for `scripts/render_step.py`. MuJoCo's default is 640x480 and
+        # a larger `--pixels` raises rather than downscaling, so a claw wheel — twelve thin
+        # segments that need the resolution to be legible at all — could not be filmed above
+        # 640 wide. Rendering only; it changes nothing the solver sees.
+        "  <visual>",
+        '    <global offwidth="1920" offheight="1080"/>',
+        "  </visual>",
         # Lights, textures and colours. Visual only — MuJoCo does not integrate any of it, so
         # the model that gets rendered is the model that gets measured, which is the whole
         # point of being able to look at it. The floor checker is not decoration: without
@@ -362,8 +370,17 @@ def build_scenario_mjcf(spec: RingSpec, rig: RigSpec, *, rigid: bool,
 
 
 def _simulate(spec, law, rig, *, rigid, fit_max_m, tangential_law=None,
-              tangential_element=None, settle_s=0.6):
-    """Shared integration loop. Returns the per-step history and the model handles."""
+              tangential_element=None, settle_s=0.6, observer=None):
+    """Shared integration loop. Returns the per-step history and the model handles.
+
+    ``observer``, if given, is called ``observer(k, model, data)`` after every ``mj_step``.
+    It exists so that ``scripts/render_step.py`` can film **this** run rather than a second
+    copy of it. That renderer had its own loop until 2026-08-09 and had drifted: it applied the
+    loss-factor damping through ``qfrc_applied`` and never asked for the stable timestep, so it
+    was still integrating the pre-#27 rig, and every frame it produced was of a simulation
+    nobody was measuring. A renderer whose whole job is to be a differently-shaped check on the
+    numbers has to be looking at the thing the numbers came from.
+    """
     try:
         import mujoco
     except ImportError as exc:  # pragma: no cover - environment dependent
@@ -449,6 +466,8 @@ def _simulate(spec, law, rig, *, rigid, fit_max_m, tangential_law=None,
                   else rig.motor_torque_n_m(spec.radius_m, float(data.qvel[axle_dof])))
         data.ctrl[0] = torque
         mujoco.mj_step(model, data)
+        if observer is not None:
+            observer(k, model, data)
 
         deepest = float(np.max(-data.qpos[segment_qpos])) if not rigid else 0.0
         history[k] = (
@@ -575,6 +594,34 @@ def run_flat(spec: RingSpec, law: RadialLaw, rig: RigSpec, *, rigid: bool = Fals
     return run_step(spec, law, replace(rig, step_height_m=1e-6, step_x_m=1e3),
                     rigid=rigid, fit_max_m=fit_max_m, tangential_law=tangential_law,
                     tangential_element=tangential_element)
+
+
+def observe_step(spec: RingSpec, law: RadialLaw, rig: RigSpec, observer, *,
+                 rigid: bool = False, fit_max_m: float = float("inf"),
+                 tangential_law: RadialLaw | None = None,
+                 tangential_element: TangentialElement | None = None) -> StepResult:
+    """:func:`run_step`, with ``observer(k, model, data)`` called after every integrator step.
+
+    The whole of the renderer's access to the rig. Public so that filming a run cannot drift
+    from measuring one: both go through :func:`_simulate`, so the timestep, the damping and the
+    second freedom are whatever the measured run uses, and a frame is a picture of the state
+    the history row was taken from.
+
+    The observer must not write to ``data`` — it is handed the live arrays for speed, and a
+    write would make the run it is filming a different run again, in a way no test would catch.
+    """
+    try:
+        _model, _data, history, settle = _simulate(
+            spec, law, rig, rigid=rigid, fit_max_m=fit_max_m, tangential_law=tangential_law,
+            tangential_element=tangential_element, observer=observer,
+        )
+    except MissingMuJoCo as exc:
+        return StepResult(ok=False, message=str(exc))
+    except Exception as exc:  # noqa: BLE001 - a diverged scenario is a result, not a crash
+        return StepResult(ok=False, message=f"{type(exc).__name__}: {exc}")
+    if not np.all(np.isfinite(history)):
+        return StepResult(ok=False, message="the scenario diverged (non-finite state)")
+    return _summarise(spec, rig, history, settle, fit_max_m, rigid)
 
 
 def default_step_heights_m(spec: RingSpec) -> np.ndarray:
