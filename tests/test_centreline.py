@@ -281,3 +281,112 @@ class TestClawTaper(unittest.TestCase):
         clipped = self._widths(bandless)[-1]
         self.assertLess(clipped, self.ROOT_MM * 0.35)
         self.assertGreater(clipped, 0.90 * self.ROOT_MM * 0.35)
+
+
+class TestLClaw(unittest.TestCase):
+    """The tangential foot at the tip — family ``T7L``, ``tip_hook_mm != 0``."""
+
+    BASE = WheelParams(outer_radius_mm=60.0, width_mm=45.0, rim_thickness_mm=0.0,
+                       n_spokes=12, spoke_thickness_mm=6.0, claw_taper_ratio=0.6,
+                       spoke_phase_deg=-90.0)
+
+    def hooked(self, hook_mm: float = 12.0, **kwargs) -> WheelParams:
+        return replace(self.BASE, tip_hook_mm=hook_mm, **kwargs)
+
+    def test_zero_hook_is_byte_for_byte_the_plain_claw(self):
+        """The default, and the thing that lets this land without moving any existing result.
+        A new field that perturbs designs which do not use it would invalidate every fit on
+        record through `design_hash`."""
+        plain = spoke_centreline(self.BASE, 0)
+        still_plain = spoke_centreline(replace(self.BASE, tip_hook_mm=0.0), 0)
+        np.testing.assert_array_equal(plain, still_plain)
+
+    def test_the_foot_follows_the_circle_rather_than_a_chord(self):
+        """The reason the foot is built in polar rather than in the spoke's local Cartesian
+        frame. A straight foot at constant local ``u`` is a chord, and a 12 mm chord of a
+        60 mm circle stands 1.2 mm proud of it — so the foot would pierce the running surface
+        and the outline clip would then eat it from outside until, on a tapered tip, the
+        outline crossed itself."""
+        centre = spoke_centreline(self.hooked(20.0), 0)
+        radii = np.linalg.norm(centre, axis=1)
+        foot = radii[radii > radii.max() - 1e-9]
+        self.assertGreaterEqual(len(foot), 2, "there should be a run of constant radius")
+        # Every point of the foot at one radius, to machine precision.
+        self.assertLess(float(np.ptp(radii[-8:])), 1e-9)
+
+    def test_the_outer_face_of_the_foot_lands_on_the_running_surface(self):
+        """Not the centreline: the centreline sits half a tip thickness inside, so that the
+        material — which is what touches the ground — ends exactly at ``outer_radius_mm``."""
+        params = self.hooked(12.0)
+        outline = spoke_outline(params, 0)
+        reach = float(np.linalg.norm(outline, axis=1).max())
+        self.assertLessEqual(reach, params.outer_radius_mm + 1e-9)
+        self.assertGreater(reach, params.outer_radius_mm - 0.05)
+
+    def test_the_bend_is_wide_enough_that_the_offset_cannot_invert(self):
+        """The one geometric condition an offset right angle has to satisfy. Inside a bend of
+        centreline radius rho the offset face has radius ``rho - h``; at ``rho <= h`` the
+        outline turns inside out, which OCCT may accept into a solid with a reversed patch."""
+        for taper in (0.25, 0.6, 1.0):
+            params = self.hooked(12.0, claw_taper_ratio=taper)
+            with self.subTest(taper=taper):
+                self.assertGreater(params.hook_bend_radius_mm,
+                                   0.5 * params.tip_thickness_mm)
+
+    def test_a_short_hook_is_all_fillet_and_the_bend_is_capped(self):
+        """Otherwise the bend would be wider than the foot it is bending into, and the arc
+        would double back past the tip."""
+        params = self.hooked(1.0)
+        self.assertLessEqual(params.hook_bend_radius_mm, 0.5 * abs(params.tip_hook_mm))
+
+    def test_the_sign_reflects_the_claw_about_its_own_ray(self):
+        """A mirror, and exactly a mirror — so the curvature has to flip with it. Flipping the
+        foot alone on a bowed leg gives a C against an S, which are two different claws; the
+        CAD battery has the volume difference (2.3e-5) that makes that concrete."""
+        straight = replace(self.BASE, spoke_curvature_1_per_mm=0.0)
+        left = spoke_centreline(replace(straight, tip_hook_mm=+14.0), 0)
+        right = spoke_centreline(replace(straight, tip_hook_mm=-14.0), 0)
+        # Spoke 0 at phase -90 lies along -y, so its ray is the y axis and the mirror is x.
+        np.testing.assert_allclose(left[:, 0], -right[:, 0], atol=1e-9)
+        np.testing.assert_allclose(left[:, 1], right[:, 1], atol=1e-9)
+
+    def test_the_hook_lengthens_the_claw_by_about_what_was_asked_for(self):
+        """`tip_hook_mm` is an arc length along the running surface, so the claw's total
+        centreline should grow by roughly that much — not by the chord, and not by twice it."""
+        short = spoke_centreline(self.BASE, 0)
+        long = spoke_centreline(self.hooked(15.0), 0)
+        grew = (np.linalg.norm(np.diff(long, axis=0), axis=1).sum()
+                - np.linalg.norm(np.diff(short, axis=0), axis=1).sum())
+        self.assertAlmostEqual(grew, 15.0, delta=1.5)
+
+    def test_the_taper_continues_into_the_foot(self):
+        """Thickness is linear in arc length from the root, and the foot is arc length like
+        any other, so the thinnest material is the end of the foot. That is what makes it
+        conform — a foot at root thickness would be a rigid paddle."""
+        from wheelopt.cad.centreline import _thickness_profile_mm
+
+        params = self.hooked(15.0)
+        thickness = _thickness_profile_mm(params, spoke_centreline(params, 0))
+        self.assertLess(thickness[-1], thickness[0])
+        self.assertAlmostEqual(thickness[-1] / thickness[0], params.claw_taper_ratio,
+                               places=9)
+
+    def test_feet_do_not_run_into_the_next_claw_at_a_screened_length(self):
+        """`hook_reach` and `interspoke_gap` are meant to agree. This checks the geometry the
+        second one measures rather than the formula the first one uses."""
+        self.assertGreater(min_gap_between_spokes(self.hooked(12.0)), 0.5)
+
+    def test_a_foot_shrinks_the_polygon_drop_towards_zero(self):
+        """The point of the topology, as a closed form: contact over an arc means the axle
+        only falls across the gap between feet."""
+        drops = [self.hooked(h).polygon_drop_mm if h else self.BASE.polygon_drop_mm
+                 for h in (0.0, 6.0, 12.0, 20.0)]
+        self.assertEqual(drops, sorted(drops, reverse=True))
+        self.assertLess(drops[-1], 0.2 * drops[0])
+
+    def test_feet_that_meet_leave_no_drop_at_all(self):
+        """`R(1 - cos(pi/n - beta/2))` goes negative inside the cosine once the arcs overlap,
+        and a negative half-gap would give a *negative* drop — a plausible number, in the
+        right units, describing a wheel whose axle rises between claws."""
+        touching = self.hooked(2.0 * np.pi * 60.0 / 12.0)
+        self.assertEqual(touching.polygon_drop_mm, 0.0)

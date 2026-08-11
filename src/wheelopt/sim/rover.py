@@ -36,14 +36,28 @@ behaviour is not. It does not bite for a rigid-wheel run, which is why that come
 
 from __future__ import annotations
 
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
+from pathlib import Path
 
 import numpy as np
 
 from ..platform import PlatformSpec, load_platform
-from ..rom.mjcf import HUB_MASS_KG
-from ..rom.ring import RingSpec
-from .step_climb import TPU_LOSS_FACTOR, ring_axle_inertia_kg_m2
+from ..rom.mjcf import (
+    HUB_MASS_KG,
+    TangentialElement,
+    coupling_tendons,
+    hinge_arm_m,
+    resolve_tangential_element,
+    ring_bodies,
+    stable_timestep_s,
+    tangential_damping,
+)
+from ..rom.ring import RadialLaw, RingSpec, TipEquivalentLaw, symmetric_force_n
+from .step_climb import (
+    TPU_LOSS_FACTOR,
+    ring_axle_inertia_kg_m2,
+    segment_damping_n_s_per_m,
+)
 
 __all__ = [
     "RoverResult",
@@ -54,6 +68,50 @@ __all__ = [
     "run_rover",
     "wheel_mounts",
 ]
+
+
+#: Collision bitmasks. The single-wheel rig needed none of this because its carriage is not a
+#: contact geom; the rover's chassis **is** one, and that turns an ordinary MuJoCo rule into a
+#: trap. MuJoCo excludes contacts between a body and its *parent*, so a rigid tyre — a child of
+#: the chassis — never touches it. A segment's parent is the wheel and the wheel's parent is the
+#: chassis, which is a *grandparent* relationship and is **not** excluded. With R 60 mm wheels
+#: under 70 mm of ground clearance the top half of every wheel sits inside the chassis box, so
+#: every segment jammed against it and the axles could not turn: 28 contacts, 0.01 rad/s, and a
+#: robot that had settled to exactly the right ride height with exactly the right compression.
+#:
+#: So the segments get their own contype bit and the ground carries both. Segment (2, 0) meets
+#: floor (1, 3) because 2 & 3, meets no other segment because 2 & 0, and meets the chassis
+#: (1, 1) not at all because 2 & 1 and 1 & 0 are both zero. Rigid wheels stay on the default
+#: (1, 1) and are unaffected.
+SEGMENT_CONTYPE = 2
+GROUND_CONAFFINITY = 3
+
+#: Rotation taking the CAD wheel frame to the MuJoCo wheel frame, radians about x.
+#:
+#: Measured rather than reasoned (the sign is a coin flip and both look plausible on a
+#: symmetric wheel): build123d lays the wheel in its **x-y** plane with the axle along z and
+#: the part spanning +/-width/2 in z, in millimetres, centroid exactly at the origin. MuJoCo's
+#: wheels lie in **x-z** with the axle along y and segment 0 at the bottom, -z. A rotation of
+#: +pi/2 about x sends CAD -y to MuJoCo -z, so a design with ``spoke_phase_deg = -90`` — which
+#: puts a claw tip at CAD -90 deg, verified off the exported triangles — lands that tip under
+#: the contact point where the ring's segment 0 is. The opposite sign puts it on top, which on
+#: a twelve-fold wheel is a half-pitch error that reads as "fine" in a still frame.
+CAD_TO_WHEEL_EULER_X = 1.5707963267948966
+
+#: Millimetres to metres, for the mesh asset's ``scale``.
+CAD_MESH_SCALE = 0.001
+
+#: Colour of the ring's segment capsules — **the physics**, the thing to look at. Deep amber,
+#: chosen to read against the grey floor, the brown step and the translucent overlay, and to
+#: be nobody's default. It was previously nothing at all: `ring_bodies` emitted no ``rgba``, so
+#: the capsules took MuJoCo's built-in geom colour, which under this scene's lighting comes out
+#: a washed olive-green. The one colour in the render that had not been chosen was the one
+#: carrying the result.
+SEGMENT_RGBA = (0.93, 0.55, 0.13, 1.0)
+
+#: Colour of the translucent CAD overlay — **decoration**, the shape the physics stands for.
+#: Neutral grey on purpose: it should recede behind the capsules rather than compete with them.
+CAD_OVERLAY_RGBA = (0.62, 0.63, 0.67, 0.40)
 
 
 @dataclass(frozen=True, slots=True)
@@ -100,6 +158,13 @@ class RoverSpec:
 
     #: Step height, metres. The obstacle is a box whose top face is the upper ground, as in
     #: the single-wheel rig, and its edge is sharp on purpose.
+    #:
+    #: **Exactly 0 means flat ground**, and it is a scenario rather than a degenerate step:
+    #: no box is emitted at all, and the run measures ride harshness instead of a climb
+    #: (`08-metrics.md` S5, objective 3). A bandless wheel runs on discrete tips, so it is a
+    #: polygon and the axle rises and falls once per tip — the cost compliance is supposed to
+    #: buy back, and the axis on which a wheel with too few claws is supposed to lose. A
+    #: zero-height *box* would be a MuJoCo error, so this is checked rather than passed on.
     step_height_m: float = 0.050
     #: Where the step's face sits, metres. Far enough ahead that the robot is rolling
     #: steadily and has settled onto its wheels before it arrives.
@@ -107,6 +172,11 @@ class RoverSpec:
     #: Ground friction. 1.0 is TPU on concrete — generous, deliberately: a climb that fails
     #: on traction says nothing about the wheel.
     friction: float = 1.0
+    #: Yaw of the robot relative to the step's face, degrees. `08-metrics.md` randomises S1
+    #: over ±15°, because a step met square is the easiest case and a real approach is not.
+    #: The robot still drives straight — this rotates its heading, it does not steer, so it
+    #: stays clear of the unvalidated skid-steer scrub.
+    approach_deg: float = 0.0
     duration_s: float = 6.0
     timestep_s: float = 5.0e-4
     #: Seconds of settling before any torque is commanded. The robot is dropped a whisker
@@ -122,6 +192,18 @@ class RoverSpec:
     def __post_init__(self) -> None:
         if self.timestep_s <= 0:
             raise ValueError("timestep_s must be positive")
+        if self.step_height_m < 0.0:
+            raise ValueError(
+                f"step_height_m {self.step_height_m} is negative: a trench is a different "
+                "scenario (S3 gap) and nothing here models one. Use exactly 0 for flat "
+                "ground, which is the harshness case"
+            )
+        if abs(self.approach_deg) >= 90.0:
+            raise ValueError(
+                f"approach_deg {self.approach_deg} is at or past 90 deg: the robot would "
+                "drive along the step's face rather than at it, and every metric below "
+                "would be about a robot that never met the obstacle"
+            )
         if self.duration_s <= self.settle_s:
             raise ValueError(
                 f"duration_s {self.duration_s} must exceed settle_s {self.settle_s}: the "
@@ -163,8 +245,25 @@ class RoverResult:
     chassis_hit_step: bool = False
     #: Mechanical work at the four axles, joules.
     energy_j: float = 0.0
-    #: (time, x, z, pitch, roll) per step.
-    history: np.ndarray = field(default_factory=lambda: np.empty((0, 5)))
+    #: RMS vertical chassis acceleration over the steady window, m/s². **Objective 3**
+    #: (`08-metrics.md`), and the axis on which a wheel with too few tips is meant to lose.
+    #:
+    #: Read as an accelerometer would: a chassis standing still reads 0, not −g, because this
+    #: is the *net* acceleration the solver produced and gravity is balanced by the contact
+    #: force. It is quoted over a **steady window** (the second half of the driving phase), so
+    #: the launch transient — which is about the motor, not the wheel — is excluded. On a
+    #: climb run it is dominated by the obstacle and says nothing about the wheel; the
+    #: scenario for it is flat ground, ``step_height_m = 0``.
+    harshness_rms_m_s2: float = 0.0
+    #: Mean forward speed over the same steady window, m/s. Harshness scales with speed, so
+    #: the two are only comparable together — a wheel that is smooth because it is slow has
+    #: not won anything.
+    mean_speed_m_s: float = 0.0
+    #: Tip-passing frequency implied by that speed, Hz, or 0 for a wheel with no tip count.
+    #: ``n_segments * v / (2πR)``. The forcing frequency behind the harshness number.
+    tip_frequency_hz: float = 0.0
+    #: (time, x, z, pitch, roll, vertical acceleration) per step.
+    history: np.ndarray = field(default_factory=lambda: np.empty((0, 6)))
 
 
 def build_rover_mjcf(
@@ -175,21 +274,58 @@ def build_rover_mjcf(
     wheel_width_m: float,
     wheel_mass_kg: float,
     spec: RingSpec | None = None,
+    segmented: bool = False,
+    tangential: TangentialElement | None = None,
+    radial_damping: float = 0.0,
+    tangential_damping_c: float = 0.0,
+    visual_mesh: Path | str | None = None,
+    visual_rgba: tuple[float, float, float, float] = CAD_OVERLAY_RGBA,
 ) -> str:
-    """MJCF for the whole robot. Rigid wheels only for now.
+    """MJCF for the whole robot, on rigid wheels or on four segmented rings.
 
-    ``spec`` is accepted and, when given, only used to give the rigid wheels the **ring's**
-    rotational inertia rather than a solid cylinder's. That is the same fairness argument the
-    single-wheel rig makes and it matters more here, not less: four wheels' worth of rotational
-    inertia is a real share of a 10 kg robot's resistance to acceleration, and a solid cylinder
-    has half a ring's. Passing ``None`` gives an honest solid cylinder, which is a different
-    vehicle and should be labelled as one.
+    ``spec`` alone gives **rigid** wheels carrying the *ring's* rotational inertia rather than
+    a solid cylinder's — a solid cylinder has half a ring's, and four wheels' worth is a real
+    share of a 10 kg robot's resistance to acceleration, so the fairness argument the
+    single-wheel rig makes matters more here rather than less. ``spec=None`` gives an honest
+    solid cylinder, which is a different vehicle and should be labelled as one.
+
+    ``segmented=True`` additionally replaces each cylinder with the ring itself: a hub and
+    ``spec.n_segments`` bodies from :func:`~wheelopt.rom.mjcf.ring_bodies`, per wheel,
+    namespaced by ``prefix``. The whole wheel still weighs ``wheel_mass_kg`` — the per-segment
+    mass is derived from it — so the two wheel models remain comparable.
+
+    **Read a segmented rover as a picture, not as a measurement** (``docs/plan/TODO.md`` #30
+    and #31). Two limits bite here that never bit the single-wheel rig. The ring is **planar**:
+    each one lies in its own x-z plane and has no out-of-plane freedom, so a wheel loaded by
+    chassis roll, by an angled approach, or by dropping off an edge is perfectly rigid — and a
+    rover does all three constantly. And above second-claw engagement the ring's element is
+    unvalidated in either form, straddling the FEA by +62.7% with a radial slide and −49.5%
+    with a root hinge. Watching twelve claws fold over a step is still worth having: it is the
+    class of wrongness that five seconds of video catches and no metric flags.
+
+    ``visual_mesh`` draws this design's **real CAD geometry** over each wheel, translucent, as
+    a decoration only. It is the opposite of a modelling change and must stay that way: the
+    geom carries ``contype=0 conaffinity=0 mass=0 density=0``, so it collides with nothing and
+    weighs nothing, and every number the run reports is identical with and without it. The
+    point is to see the ring's capsules — which *are* the physics — against the shape they
+    stand for, and to watch which claw is actually in contact. Handing this mesh to a collision
+    system instead is precisely what ADR-0002 exists to prevent.
 
     The chassis is a box of the platform's own dimensions with the platform's own inertia,
     on a free joint. It is a **contact geom**, not a decoration: a box with 70 mm of ground
     clearance will belly out on a step taller than that, and watching it do so is most of why
     this model exists.
     """
+    if segmented and spec is None:
+        raise ValueError("segmented wheels need a RingSpec; there is nothing to build")
+    segment_mass_kg = (
+        (wheel_mass_kg - HUB_MASS_KG) / max(spec.n_segments, 1) if spec is not None else 0.0
+    )
+    if segmented and segment_mass_kg <= 0.0:
+        raise ValueError(
+            f"wheel_mass_kg {wheel_mass_kg:.4f} does not exceed the {HUB_MASS_KG:.4f} kg hub, "
+            "so the segments would have zero or negative mass"
+        )
     mounts = wheel_mounts(platform)
     half = (0.5 * platform.chassis_length_m, 0.5 * platform.chassis_width_m,
             0.5 * platform.chassis_height_m)
@@ -204,6 +340,12 @@ def build_rover_mjcf(
     reach = scenario.duration_s * platform.no_load_speed_rad_s * wheel_radius_m
     step_half_len = 0.5 * (reach + 2.0 * platform.chassis_length_m)
     step_centre_x = scenario.step_x_m + step_half_len
+    # ...and how far *sideways*, which is not zero the moment the approach is angled. At 15
+    # degrees a 6.9 m run drifts 1.8 m off centre, so a step fixed at the old 1.5 m half-width
+    # would have let the robot climb it and then drive off the side — the same failure as the
+    # step being shorter than the run, in the axis nobody was looking at.
+    yaw = np.deg2rad(scenario.approach_deg)
+    step_half_width = max(1.5, abs(reach * np.sin(yaw)) + platform.chassis_length_m)
     start_z = body_z + 0.0005  # a whisker clear, so it settles rather than bangs
 
     parts = [
@@ -227,20 +369,40 @@ def build_rover_mjcf(
         '    <material name="stepmat" rgba="0.55 0.42 0.32 1"/>',
         '    <material name="wheelmat" rgba="0.20 0.65 0.85 1"/>',
         '    <material name="bodymat" rgba="0.85 0.85 0.88 1"/>',
+        *([] if visual_mesh is None else [
+            (f'    <material name="cadmat" rgba="{visual_rgba[0]:.3f} {visual_rgba[1]:.3f} '
+             f'{visual_rgba[2]:.3f} {visual_rgba[3]:.3f}"/>'),
+            # Absolute path, so the model does not depend on the process's working directory.
+            # `scale` converts the CAD's millimetres to SI at the asset rather than in the
+            # geom, which is the boundary the units policy names.
+            (f'    <mesh name="cadwheel" file="{Path(visual_mesh).resolve()}" '
+             f'scale="{CAD_MESH_SCALE} {CAD_MESH_SCALE} {CAD_MESH_SCALE}"/>'),
+        ]),
         "  </asset>",
         "  <worldbody>",
         '    <light pos="0 -2 3" dir="0 0.4 -1" directional="true" diffuse="0.7 0.7 0.7"/>',
         '    <light pos="2 -1.5 2" dir="-0.5 0.3 -1" diffuse="0.35 0.35 0.35"/>',
-        '    <geom name="floor" type="plane" size="8 3 0.1" material="floormat"/>',
+        (f'    <geom name="floor" type="plane" size="8 3 0.1" contype="1" '
+         f'conaffinity="{GROUND_CONAFFINITY}" material="floormat"/>'),
         # The step runs to beyond anything the robot can reach in the time allowed, so it is
         # an upper *ground* rather than a platform. Sized rather than fixed at 2 m: a robot
         # doing 1.15 m/s for 6 s covers 6.9 m, and a 4 m step let it climb, cross, and drive
         # off the far end — after which the final frame shows it back on the floor at exactly
         # the ride height, which reads as "never climbed" and is the opposite of the truth.
-        (f'    <geom name="step" type="box" pos="{step_centre_x:.9f} 0 '
-         f'{scenario.step_height_m / 2:.9f}" size="{step_half_len:.9f} 1.5 '
-         f'{scenario.step_height_m / 2:.9f}" material="stepmat"/>'),
-        f'    <body name="chassis" pos="0 0 {start_z:.9f}">',
+        # Flat ground emits no step at all rather than a zero-height one. A MuJoCo box of
+        # size 0 is a compile error, and a box of size epsilon would be a lip the robot
+        # bumps over — which is exactly the acceleration the harshness scenario is trying
+        # to measure, contributed by the scenario instead of by the wheel.
+        *([] if scenario.step_height_m <= 0.0 else [
+            (f'    <geom name="step" type="box" pos="{step_centre_x:.9f} 0 '
+             f'{scenario.step_height_m / 2:.9f}" size="{step_half_len:.9f} '
+             f'{step_half_width:.9f} {scenario.step_height_m / 2:.9f}" contype="1" '
+             f'conaffinity="{GROUND_CONAFFINITY}" material="stepmat"/>'),
+        ]),
+        # Yaw about z, MuJoCo's w-x-y-z order. The step's face stays normal to world x, so
+        # the angle is entirely in the robot's heading and "past the face" stays an x test.
+        (f'    <body name="chassis" pos="0 0 {start_z:.9f}" '
+         f'quat="{np.cos(0.5 * yaw):.9f} 0 0 {np.sin(0.5 * yaw):.9f}">'),
         '      <freejoint name="root"/>',
         (f'      <inertial pos="{platform.com_offset_m[0]:.9f} '
          f'{platform.com_offset_m[1]:.9f} {platform.com_offset_m[2]:.9f}" '
@@ -272,15 +434,52 @@ def build_rover_mjcf(
             # +y, so a positive torque rolls the robot toward +x — the same convention the
             # single-wheel rig fixed after driving itself backwards past its own step.
             f'        <joint name="{mount.name}_axle" type="hinge" axis="0 1 0"/>',
-            (f'        <inertial pos="0 0 0" mass="{wheel_mass_kg:.9f}" '
-             f'diaginertia="{transverse:.12g} {inertia:.12g} {transverse:.12g}"/>'),
-            (f'        <geom name="{mount.name}_tyre" type="cylinder" '
-             f'euler="1.5707963 0 0" size="{wheel_radius_m:.9f} '
-             f'{0.5 * wheel_width_m:.9f}" mass="0" density="0" material="wheelmat"/>'),
-            "      </body>",
         ]
+        if segmented:
+            # A hub carrying N segments, exactly as the single-wheel rig builds it — same
+            # `ring_bodies`, so a wheel driven here is the ring that was fitted rather than a
+            # second one that has drifted. `prefix` is what makes four of them coexist: MJCF
+            # names are global, and four subtrees all calling their first segment `seg0`
+            # collide. The per-segment mass is derived so the whole wheel still weighs
+            # `wheel_mass_kg`, which is what keeps the rigid comparator a fair one.
+            parts += [
+                (f'        <geom name="{mount.name}_hub" type="sphere" size="0.005" '
+                 f'mass="{HUB_MASS_KG:.9f}" contype="0" conaffinity="0" '
+                 'material="wheelmat"/>'),
+            ]
+            parts += ring_bodies(
+                spec, segment_half_width_m=0.5 * wheel_width_m,
+                segment_mass_kg=segment_mass_kg, tangential=tangential,
+                radial_damping=radial_damping,
+                tangential_damping_c=tangential_damping_c,
+                contype=SEGMENT_CONTYPE, conaffinity=0, rgba=SEGMENT_RGBA,
+                prefix=f"{mount.name}_", indent=8,
+            )
+        else:
+            parts += [
+                (f'        <inertial pos="0 0 0" mass="{wheel_mass_kg:.9f}" '
+                 f'diaginertia="{transverse:.12g} {inertia:.12g} {transverse:.12g}"/>'),
+                (f'        <geom name="{mount.name}_tyre" type="cylinder" '
+                 f'euler="1.5707963 0 0" size="{wheel_radius_m:.9f} '
+                 f'{0.5 * wheel_width_m:.9f}" mass="0" density="0" material="wheelmat"/>'),
+            ]
+        if visual_mesh is not None:
+            # Decoration, and every attribute here says so. `mass="0" density="0"` keeps it
+            # out of the inertia (a mesh geom would otherwise be given the material default
+            # and quietly change the wheel's mass), and the zeroed collision masks keep it out
+            # of the contact set. Same euler as the rigid cylinder: see CAD_TO_WHEEL_EULER_X.
+            parts.append(
+                f'        <geom name="{mount.name}_cad" type="mesh" mesh="cadwheel" '
+                f'euler="{CAD_TO_WHEEL_EULER_X:.7f} 0 0" contype="0" conaffinity="0" '
+                'mass="0" density="0" material="cadmat"/>'
+            )
+        parts.append("      </body>")
 
-    parts += ["    </body>", "  </worldbody>", "  <actuator>"]
+    parts += ["    </body>", "  </worldbody>"]
+    if segmented and spec.is_coupled:
+        for mount in mounts:
+            parts += coupling_tendons(spec, prefix=f"{mount.name}_")
+    parts += ["  <actuator>"]
     parts += [f'    <motor name="{m.name}_drive" joint="{m.name}_axle" gear="1" '
               'ctrlrange="-100 100"/>' for m in mounts]
     parts += ["  </actuator>", "</mujoco>"]
@@ -296,12 +495,24 @@ def observe_rover(
     wheel_width_m: float,
     wheel_mass_kg: float,
     spec: RingSpec | None = None,
+    law: RadialLaw | None = None,
+    tangential_law: RadialLaw | None = None,
+    tangential_element: TangentialElement | None = None,
+    visual_mesh: Path | str | None = None,
+    visual_rgba: tuple[float, float, float, float] = CAD_OVERLAY_RGBA,
 ) -> RoverResult:
     """Drive the robot straight at the step. ``observer(k, model, data)`` after every step.
 
     The observer hook is the same contract :func:`~wheelopt.sim.step_climb.observe_step` uses,
     and for the same reason: ``scripts/render_rover.py`` must film *this* run rather than a
     second copy of it, because a renderer showing a different simulation checks nothing.
+
+    Passing ``law`` switches all four wheels from rigid cylinders to **segmented rings** driven
+    by that spring law. The mechanics are the single-wheel rig's, deliberately: the same
+    ``ring_bodies``, the same ``qfrc_applied`` per step (MuJoCo gets no force law from the XML,
+    invariant 8), the same ``stable_timestep_s`` bound, and the same loss-factor damping
+    emitted as native joint ``damping`` rather than as an applied force. See
+    :func:`build_rover_mjcf` for what a segmented rover is and is not evidence of.
     """
     try:
         import mujoco
@@ -309,10 +520,46 @@ def observe_rover(
         return RoverResult(ok=False,
                            message=f"MuJoCo is not installed; pip install -e '.[sim]': {exc}")
 
+    if law is not None and spec is None:
+        return RoverResult(ok=False, message="a spring law needs a RingSpec to live on")
+    segmented = law is not None
+    # A rigid wheel has no segments, so it cannot have a tangential freedom either — the same
+    # guard the single-wheel rig makes, for the same reason: honouring the argument silently
+    # would build four cylinders and claim they had claw compliance.
+    tangential_law = tangential_law if segmented else None
+    element = resolve_tangential_element(tangential_law, tangential_element)
+
+    radial_damping = tan_damping = 0.0
+    if segmented:
+        arm = hinge_arm_m(spec) if element == "hinge" else 0.0
+        # A hinge's coordinate is an angle, so the timestep bound and the damping equivalence
+        # are both applied to the law referred to the *tip* and the damping referred back.
+        equivalent_law = (TipEquivalentLaw(tangential_law, arm) if element == "hinge"
+                          else tangential_law)
+        segment_mass = (wheel_mass_kg - HUB_MASS_KG) / max(spec.n_segments, 1)
+        # `qfrc_applied` is an external force, so `implicitfast` integrates it explicitly and a
+        # stiff segment law diverges at the rover's default step. Tightened before the model is
+        # built, because the scenario carries the timestep into the MJCF.
+        scenario = replace(scenario, timestep_s=stable_timestep_s(
+            [law, equivalent_law], segment_mass, scenario.timestep_s))
+        # The payload one wheel carries: the whole robot on four wheels.
+        per_wheel_kg = (platform.chassis_mass_kg + 4.0 * wheel_mass_kg) / 4.0
+        radial_damping = segment_damping_n_s_per_m(
+            law, spec, per_wheel_kg, scenario.loss_factor)
+        tan_damping = 0.0 if tangential_law is None else tangential_damping(
+            spec, element,
+            segment_damping_n_s_per_m(equivalent_law, spec, per_wheel_kg,
+                                      scenario.loss_factor),
+        )
+
     try:
         xml = build_rover_mjcf(platform, scenario, wheel_radius_m=wheel_radius_m,
                                wheel_width_m=wheel_width_m, wheel_mass_kg=wheel_mass_kg,
-                               spec=spec)
+                               spec=spec, segmented=segmented,
+                               tangential=element if segmented else None,
+                               radial_damping=radial_damping,
+                               tangential_damping_c=tan_damping,
+                               visual_mesh=visual_mesh, visual_rgba=visual_rgba)
         model = mujoco.MjModel.from_xml_string(xml)
         data = mujoco.MjData(model)
     except Exception as exc:  # noqa: BLE001 - a bad model is a result, not a crash
@@ -324,18 +571,50 @@ def observe_rover(
                                             f"{m.name}_axle")] for m in mounts],
         dtype=np.int64,
     )
+
+    def joint_addr(letter: str) -> tuple[np.ndarray, np.ndarray]:
+        """Every wheel's segment joints, flattened. One array, one assignment per step."""
+        ids = [mujoco.mj_name2id(model, mujoco.mjtObj.mjOBJ_JOINT,
+                                 f"{m.name}_{letter}{i}")
+               for m in mounts for i in range(spec.n_segments)]
+        return (np.asarray(model.jnt_dofadr[ids], dtype=np.int64),
+                np.asarray(model.jnt_qposadr[ids], dtype=np.int64))
+
+    empty = np.empty(0, dtype=np.int64)
+    segment_dofs, segment_qpos = joint_addr("j") if segmented else (empty, empty)
+    tangential_dofs, tangential_qpos = (joint_addr("t") if tangential_law is not None
+                                        else (empty, empty))
     chassis = mujoco.mj_name2id(model, mujoco.mjtObj.mjOBJ_BODY, "chassis")
     body_geom = mujoco.mj_name2id(model, mujoco.mjtObj.mjOBJ_GEOM, "body")
+    # -1 on a flat run, where there is no step to hit. Geom ids are non-negative, so the
+    # membership test below is simply never true and `chassis_hit_step` stays False.
     step_geom = mujoco.mj_name2id(model, mujoco.mjtObj.mjOBJ_GEOM, "step")
+    # Vertical acceleration straight off the free joint. Its three translational DOFs are the
+    # chassis frame's position in *world* coordinates, so `qacc[+2]` is the world-z
+    # acceleration the solver produced — no differencing of a position history, which at
+    # 5e-4 s would amplify contact noise by 4e6 and measure the integrator.
+    root_z_dof = int(model.jnt_dofadr[
+        mujoco.mj_name2id(model, mujoco.mjtObj.mjOBJ_JOINT, "root")]) + 2
 
     n_steps = int(scenario.duration_s / scenario.timestep_s)
     settle_steps = int(scenario.settle_s / scenario.timestep_s)
-    history = np.zeros((n_steps, 5), dtype=np.float64)
+    history = np.zeros((n_steps, 6), dtype=np.float64)
     energy = 0.0
     hit_step = False
 
     try:
         for k in range(n_steps):
+            if segmented:
+                # All four rings in one assignment. The joints were laid out wheel-major, so a
+                # single flat array covers 4 x n_segments and no wheel can be forgotten.
+                data.qfrc_applied[segment_dofs] = law.force_n(-data.qpos[segment_qpos])
+                if tangential_law is not None:
+                    # Symmetric: a claw bends the same either way, so the restoring force is
+                    # sign(v)*f(|v|). Passing the signed coordinate straight to `force_n` makes
+                    # one direction free and the other doubled, and the wheel drifts under load.
+                    data.qfrc_applied[tangential_dofs] = -symmetric_force_n(
+                        tangential_law, data.qpos[tangential_qpos]
+                    )
             rates = data.qvel[axle_dofs]
             if k < settle_steps:
                 torques = np.zeros(len(mounts))
@@ -354,7 +633,8 @@ def observe_rover(
             pitch = float(np.arctan2(-rot[2, 0], np.hypot(rot[2, 1], rot[2, 2])))
             roll = float(np.arctan2(rot[2, 1], rot[2, 2]))
             history[k] = (data.time, float(data.xpos[chassis, 0]),
-                          float(data.xpos[chassis, 2]), pitch, roll)
+                          float(data.xpos[chassis, 2]), pitch, roll,
+                          float(data.qacc[root_z_dof]))
             if not hit_step:
                 for c in range(data.ncon):
                     pair = (data.contact[c].geom1, data.contact[c].geom2)
@@ -366,15 +646,32 @@ def observe_rover(
 
     if not np.all(np.isfinite(history)):
         return RoverResult(ok=False, message="the scenario diverged (non-finite state)")
-    return _summarise(platform, scenario, history, settle_steps, energy, hit_step)
+    return _summarise(platform, scenario, history, settle_steps, energy, hit_step,
+                      n_tips=0 if spec is None else spec.n_segments,
+                      wheel_radius_m=wheel_radius_m)
 
 
-def _summarise(platform, scenario, history, settle_steps, energy_j, hit_step) -> RoverResult:
+def _summarise(platform, scenario, history, settle_steps, energy_j, hit_step, *,
+               n_tips: int = 0, wheel_radius_m: float = 0.0) -> RoverResult:
     """Turn the history into the handful of numbers worth quoting."""
     x, z = history[:, 1], history[:, 2]
     driving = slice(settle_steps, None)
     ride = platform.ground_clearance_m + 0.5 * platform.chassis_height_m
     clearance = float(z[-1]) - scenario.step_height_m
+
+    # The steady window: the second half of the driving phase. The first half is the launch
+    # transient — the robot leaves rest at stall torque and the largest vertical acceleration
+    # in the whole run is the squat as it does so, which is a fact about the motor and would
+    # otherwise dominate a harshness number meant to be about the wheel.
+    steady_from = settle_steps + (len(history) - settle_steps) // 2
+    steady = slice(steady_from, None)
+    span_s = float(history[-1, 0] - history[steady_from, 0]) if len(history) > steady_from else 0.0
+    speed = float(x[-1] - x[steady_from]) / span_s if span_s > 0.0 else 0.0
+    harshness = float(np.sqrt(np.mean(history[steady, 5] ** 2))) if span_s > 0.0 else 0.0
+    # Tip-passing frequency: n tips per revolution, v/(2πR) revolutions per second. Zero for
+    # a solid cylinder, which has no tips and therefore no polygon forcing at all.
+    tip_hz = (n_tips * abs(speed) / (2.0 * np.pi * wheel_radius_m)
+              if n_tips and wheel_radius_m > 0.0 else 0.0)
 
     # Climbed means the **whole body** got onto the upper ground and settled there, not that
     # some part of it got past the face. Both halves are load-bearing, and each was wrong on
@@ -385,7 +682,10 @@ def _summarise(platform, scenario, history, settle_steps, energy_j, hit_step) ->
     # its ride height of where it would stand.
     on_top = ((x > scenario.step_x_m + 0.5 * platform.chassis_length_m)
               & (np.abs(z - scenario.step_height_m - ride) < 0.2 * ride))
-    climbed = bool(np.any(on_top[driving]))
+    # On flat ground both halves of that test pass the moment the robot has driven a metre,
+    # and reporting `climbed=True` for it would be true of a sentence nobody asked. There is
+    # no obstacle, so there is nothing to have climbed.
+    climbed = bool(np.any(on_top[driving])) and scenario.step_height_m > 0.0
     return RoverResult(
         ok=True,
         climbed=climbed,
@@ -395,14 +695,25 @@ def _summarise(platform, scenario, history, settle_steps, energy_j, hit_step) ->
         peak_roll_rad=float(np.max(np.abs(history[driving, 4]))),
         chassis_hit_step=bool(hit_step),
         energy_j=float(energy_j),
+        harshness_rms_m_s2=harshness,
+        mean_speed_m_s=speed,
+        tip_frequency_hz=float(tip_hz),
         history=history,
     )
 
 
 def run_rover(platform: PlatformSpec | None = None, scenario: RoverSpec | None = None, *,
               wheel_radius_m: float = 0.085, wheel_width_m: float = 0.030,
-              wheel_mass_kg: float = 0.30, spec: RingSpec | None = None) -> RoverResult:
+              wheel_mass_kg: float = 0.30, spec: RingSpec | None = None,
+              law: RadialLaw | None = None, tangential_law: RadialLaw | None = None,
+              tangential_element: TangentialElement | None = None,
+              visual_mesh: Path | str | None = None,
+              visual_rgba: tuple[float, float, float, float] = CAD_OVERLAY_RGBA,
+              ) -> RoverResult:
     """Convenience entry point: load the platform, run one scenario, return the result."""
     return observe_rover(platform or load_platform(), scenario or RoverSpec(),
                          wheel_radius_m=wheel_radius_m, wheel_width_m=wheel_width_m,
-                         wheel_mass_kg=wheel_mass_kg, spec=spec)
+                         wheel_mass_kg=wheel_mass_kg, spec=spec, law=law,
+                         tangential_law=tangential_law,
+                         tangential_element=tangential_element,
+                         visual_mesh=visual_mesh, visual_rgba=visual_rgba)

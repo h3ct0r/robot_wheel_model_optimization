@@ -95,7 +95,77 @@ def spoke_centreline(params: WheelParams, index: int, overlap_mm: float = 0.0) -
         raise ValueError(f"unhandled spoke profile {profile!r}")
 
     points = radii[:, None] * radial[None, :] + offset[:, None] * tangential[None, :]
+    if params.is_l_claw:
+        points = _append_hook(params, points, theta)
     return points
+
+
+#: Minimum samples spent on the right-angle bend of an L claw, whatever its arc length.
+#: The bend is a few millimetres against a span of tens, so proportional allocation gives it
+#: two or three points — and :func:`_unit_normals` takes central differences, so a corner
+#: described by three points has its normal swing 90 degrees in one step. The outline then
+#: has a notch on the inside of the bend instead of a fillet: geometrically a self-intersection,
+#: and a face OCCT refuses.
+HOOK_BEND_SAMPLES = 9
+
+
+def _append_hook(params: WheelParams, leg: np.ndarray, theta: float) -> np.ndarray:
+    """Turn a radial claw centreline into an L: bend, then a foot along the running surface.
+
+    Three pieces, and the second and third are built in **polar** coordinates rather than in
+    the spoke's local Cartesian frame that the leg uses. That is not fussiness. A foot built as
+    a straight line at constant local ``u`` is a *chord*, and a chord of a 60 mm circle stands
+    3.2 mm proud of it at 20 mm out — so the foot would poke through the running surface, and
+    :func:`_clip_to_radius` would then eat it from the outside until, at a tapered tip, the
+    outline crossed itself. The foot follows the circle because the ground does.
+
+    The pieces:
+
+    1. **The leg**, already computed, but shortened: it now ends where the bend begins, at
+       ``sqrt(ρ² − b²)`` rather than at the running surface.
+    2. **The bend**, a circular arc of radius ``b`` tangent to the radial ray *and* internally
+       tangent to the circle ``r = R_c``. Both tangencies at once fix it: the centre sits at
+       radius ``ρ = R_c − b``, at angular offset ``δ = arcsin(b/ρ)``, and the arc sweeps
+       ``π/2 − δ``. Exact, so the join is smooth to machine precision rather than to a
+       tolerance.
+    3. **The foot**, an arc at constant radius ``R_c``.
+
+    ``R_c`` is ``outer_radius_mm`` less half the *tip* thickness, so the foot's outer face lands
+    on the running surface rather than the centreline doing so — which would put half the foot
+    outside the wheel it belongs to.
+    """
+    sign = 1.0 if params.tip_hook_mm > 0 else -1.0
+    r_c = params.outer_radius_mm - 0.5 * params.tip_thickness_mm
+    bend = params.hook_bend_radius_mm
+    rho = r_c - bend
+    if bend <= 0.0 or rho <= bend:
+        # No room to turn the corner. Screening rejects this design; returning the plain claw
+        # keeps the geometry layer total, so a caller that skipped screening gets a wheel
+        # rather than an exception (invariant 3 in spirit — this module never raises either).
+        return leg
+
+    delta = float(np.arcsin(bend / rho))
+    r_leg_end = float(np.sqrt(rho * rho - bend * bend))
+    # The leg is rescaled rather than rebuilt: it keeps its profile offset, which is zero at
+    # both ends, so the bend still starts on a radial heading.
+    scale = r_leg_end / np.linalg.norm(leg[-1])
+    leg = leg * np.linspace(1.0, scale, len(leg))[:, None] if scale < 1.0 else leg
+
+    centre = rho * np.array([np.cos(theta + sign * delta), np.sin(theta + sign * delta)])
+    # Start of the arc is the leg's tangent point; sweep towards the circle's tangent point.
+    start = np.arctan2(*(leg[-1] - centre)[::-1])
+    sweep = sign * (0.5 * np.pi - delta)
+    phi = np.linspace(start, start + sweep, HOOK_BEND_SAMPLES)[1:]
+    corner = centre + bend * np.stack([np.cos(phi), np.sin(phi)], axis=1)
+
+    # The foot, from the circle's tangent point onward along the running surface.
+    beta = abs(params.tip_hook_mm) / r_c
+    n_foot = max(2, int(round(params.spoke_samples * beta * r_c
+                              / max(np.linalg.norm(leg[-1] - leg[0]), 1e-9))))
+    angles = theta + sign * (delta + np.linspace(0.0, beta, n_foot + 1)[1:])
+    foot = r_c * np.stack([np.cos(angles), np.sin(angles)], axis=1)
+
+    return np.vstack([leg, corner, foot])
 
 
 def _unit_normals(points: np.ndarray) -> np.ndarray:

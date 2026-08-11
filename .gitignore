@@ -1,8 +1,14 @@
 # Artifact cache — content-addressed, regenerable, large
 data/cache/
 data/runs/
+# Experiment store — append-only Parquet, regenerable from the campaign
+data/experiments/
 # Rendered frames and GIFs from scripts/render_step.py. Regenerable, and large.
 data/renders/
+# Geometry figures from scripts/plot_geometry.py. Regenerable in seconds from the numpy
+# centreline layer alone — no CAD kernel, no solver — so committing them would only mean a
+# set that quietly disagrees with the bounds it claims to draw.
+data/figures/
 *.duckdb
 *.parquet
 

@@ -32,6 +32,8 @@ if TYPE_CHECKING:  # pragma: no cover
 __all__ = [
     "MissingPlotting",
     "CASE_COLOURS",
+    "TREAD_GROOVES",
+    "draw_wheel_profile",
     "draw_wheel_section",
     "write_design_pdf",
     "write_report_pdf",
@@ -197,6 +199,115 @@ def draw_wheel_section(
     limit = outer_r * 1.2
     ax.set_xlim(-limit, limit)
     ax.set_ylim(-limit, limit)
+    ax.set_aspect("equal")
+    ax.axis("off")
+
+
+#: Circumferential tread grooves cut by ``cad.compliant_spoke._cut_tread``. Mirrored here
+#: rather than imported because that module needs OCCT and this one must draw without it —
+#: which makes the count a number in two places, so ``tests/test_viz.py`` asserts they agree.
+TREAD_GROOVES = 3
+
+
+def draw_wheel_profile(
+    ax: Any,
+    params: WheelParams,
+    *,
+    annotate: bool = True,
+) -> None:
+    """Draw the **axial** section — the r-z plane, cut through a spoke.
+
+    The companion to :func:`draw_wheel_section`, and it exists because two real parameters are
+    invisible in the mid-plane view: ``width_mm`` is the direction that view projects away,
+    and ``tread_depth_mm`` cuts grooves whose axis is that direction. A figure sweeping either
+    of them against the mid-plane section shows a column of identical pictures, which reads as
+    "this parameter does nothing" — the exact shape of mistake this project's watch list is
+    about.
+
+    Radius runs up the page and the full diameter is drawn, mirrored about the axle, so the
+    section reads as a wheel rather than as a quadrant. The tread grooves are the same three
+    that ``_cut_tread`` cuts, at the same widths and offsets, and they are cut **whether or
+    not there is a band** — which is what the solid does, `_cut_tread` being gated on
+    ``tread_depth_mm`` alone. Drawing them only on a banded wheel was the first version and
+    it was wrong: a bandless design with tread would have shown grooves the part has and the
+    picture did not.
+
+    **What this view cannot show, in exchange.** A spoke's *thickness* is in-plane, so it is
+    invisible here; and cut through a spoke, a banded wheel and a bandless one are the same
+    solid block from hub to outer radius. Banded against bandless is a mid-plane question.
+    """
+    from matplotlib.patches import Polygon, Rectangle
+
+    half_w = 0.5 * params.width_mm
+    outer_r = params.outer_radius_mm
+    inner_r = params.rim_inner_radius_mm
+
+    def band(r_lo: float, r_hi: float, z_lo: float, z_hi: float, **kwargs) -> None:
+        """One rectangle and its mirror image below the axle."""
+        for sign in (+1, -1):
+            lo, hi = sorted((sign * r_lo, sign * r_hi))
+            ax.add_patch(Rectangle((z_lo, lo), z_hi - z_lo, hi - lo, **kwargs))
+
+    solid = {"facecolor": _FILL, "alpha": 0.22, "edgecolor": _FILL,
+             "linewidth": 0.9, "zorder": 3}
+    # The spokes run the full width — `extrude(amount=half, both=True)` — so in this view a
+    # spoke is a full-width block, and so is the band above it.
+    band(params.hub_bore_radius_mm, params.hub_radius_mm, -half_w, half_w, **solid)
+
+    # One block from the hub to the running surface, with the grooves taken out of its top —
+    # rather than a spoke block plus a separate banded ring. The grooves must cut whatever is
+    # at the surface, and bandless that is the spoke tip, not a band. Splitting at `inner_r`
+    # first made a bandless groove a zero-height rectangle plus a *positive*-area one below
+    # it, so tread ADDED material: the drawing disagreed with the solid in the direction that
+    # looks fine.
+    groove_w = params.width_mm / (2 * TREAD_GROOVES + 1)
+    cuts = ([(-half_w + groove_w * (2 * i + 1), -half_w + groove_w * (2 * i + 2))
+             for i in range(TREAD_GROOVES)] if params.tread_depth_mm > 0 else [])
+    # One polygon walking the grooved surface, not a row of rectangles per land. Stacked
+    # rectangles each draw their own edge, so the seams between lands appear as vertical
+    # hairlines through a part that is one solid — structure the wheel does not have.
+    floor = outer_r - params.tread_depth_mm
+    top = [(-half_w, outer_r)]
+    for start, end in cuts:
+        top += [(start, outer_r), (start, floor), (end, floor), (end, outer_r)]
+    top.append((half_w, outer_r))
+    outline = [(-half_w, params.hub_radius_mm), *top, (half_w, params.hub_radius_mm)]
+    for sign in (+1, -1):
+        ax.add_patch(Polygon([(z, sign * r) for z, r in outline], closed=True, **solid))
+
+    if params.has_shear_band:
+        # Where the band starts. A hairline rather than an edge: it is one solid, and the
+        # boundary is a fact about how it was authored, not a face.
+        for sign in (+1, -1):
+            ax.plot([-half_w, half_w], [sign * inner_r] * 2, color=_FILL,
+                    linewidth=0.7, alpha=0.55, zorder=4)
+    else:
+        # `inner_r == outer_r` here, so the loop above drew nothing and the block already ends
+        # at the tips. Mark the running surface the way the mid-plane view does — a dashed
+        # circle there, a dashed line here — because it is where the wheel touches the ground
+        # and not where its material ends.
+        for sign in (+1, -1):
+            ax.plot([-half_w, half_w], [sign * outer_r] * 2, color=_MUTED,
+                    linewidth=0.9, linestyle=(0, (4, 4)), zorder=4)
+
+    # The axle, drawn as a segment rather than an `axhline`: a line spanning the whole axes
+    # runs far outside the wheel and, in a row of panels, reads as one rule through all of them.
+    axle = half_w * 1.35
+    ax.plot([-axle, axle], [0.0, 0.0], color=_MUTED, linewidth=0.7,
+            linestyle=(0, (6, 3)), zorder=2)
+
+    if annotate:
+        ax.annotate("", xy=(half_w, -outer_r * 1.08), xytext=(-half_w, -outer_r * 1.08),
+                    arrowprops={"arrowstyle": "<->", "color": _MUTED, "linewidth": 0.8,
+                                "shrinkA": 0, "shrinkB": 0}, zorder=6)
+        ax.text(0, -outer_r * 1.22, f"w {params.width_mm:g} mm", color=_MUTED,
+                fontsize=7.5, ha="center", va="center")
+        if params.tread_depth_mm > 0:
+            ax.text(0, outer_r * 1.10, f"tread {params.tread_depth_mm:g} mm deep, "
+                    f"{TREAD_GROOVES} grooves", color=_MUTED, fontsize=7.5, ha="center")
+
+    ax.set_xlim(-outer_r * 1.25, outer_r * 1.25)   # equal aspect, squared on the radius
+    ax.set_ylim(-outer_r * 1.32, outer_r * 1.25)
     ax.set_aspect("equal")
     ax.axis("off")
 

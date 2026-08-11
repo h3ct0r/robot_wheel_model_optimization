@@ -21,12 +21,15 @@ from .params import WheelParams
 if TYPE_CHECKING:  # pragma: no cover
     from build123d import Part
 
+    from .materials import MaterialSpec
+
 __all__ = [
     "ExportPaths",
     "export",
     "is_watertight",
     "weld_vertices",
     "remesh",
+    "wheel_stl",
     "ANGULAR_TOLERANCE_RAD",
     "PIPELINE_VERSION",
 ]
@@ -187,3 +190,52 @@ def export(
     )
 
     return ExportPaths(step=step_path, stl=stl_path, stem=stem)
+
+
+def wheel_stl(
+    params: WheelParams,
+    material: MaterialSpec,
+    cache_dir: Path,
+    *,
+    stl_tolerance_mm: float = 0.05,
+    rebuild: bool = False,
+) -> Path:
+    """Path to this design's STL, building it only if it is not already there.
+
+    For **visualisation**, and the caller should keep it that way. The simulators run on the
+    reduced-order ring (ADR-0002); this is the real geometry drawn over the top so that the
+    segments can be seen against the shape they stand for. Handing this mesh to a collision
+    system instead would be the thing ADR-0002 exists to prevent.
+
+    Cached on ``params.design_hash()``, which is what :func:`export` already names files by —
+    so a wheel exported by ``scripts/gen_wheel.py`` is found here without rebuilding, and a
+    changed parameter produces a different file rather than a stale one. Building costs a few
+    seconds and needs OCCT; a run that only wants numbers should never call this.
+
+    Raises:
+        ImportError: if build123d is not installed. Callers that treat the overlay as optional
+            should catch it — the simulation is unaffected either way.
+        ValueError: if screening rejected the design, so there is no solid to draw.
+    """
+    from .compliant_spoke import build_wheel
+
+    cache_dir = Path(cache_dir)
+    stem = f"wheel_{params.spoke_profile.value}_{params.design_hash()}"
+    stl_path = cache_dir / f"{stem}.stl"
+    if stl_path.is_file() and not rebuild:
+        return stl_path
+
+    result = build_wheel(params, material, skip_screening=True)
+    if result.part is None:
+        raise ValueError(
+            "no solid to draw: the geometry stage produced nothing for this design"
+        )
+    cache_dir.mkdir(parents=True, exist_ok=True)
+    from build123d import export_stl
+
+    # Meshed explicitly first, for the reason `export` gives: left to `export_stl` alone the
+    # tessellation depends on the shape's meshing history rather than on these arguments.
+    remesh(result.part, stl_tolerance_mm, ANGULAR_TOLERANCE_RAD)
+    export_stl(result.part, str(stl_path), tolerance=stl_tolerance_mm,
+               angular_tolerance=ANGULAR_TOLERANCE_RAD)
+    return stl_path

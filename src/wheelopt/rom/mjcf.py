@@ -78,6 +78,15 @@ TANGENTIAL_ELEMENTS: tuple[str, ...] = ("slide", "hinge")
 #: rather than derived from the wheel's mass, because a *dynamic* run must derive it from
 #: geometry and material (invariant 2) and a placeholder that looks derived is worse than one
 #: that obviously is not.
+def _rgba(colour: tuple[float, float, float, float]) -> str:
+    """An MJCF ``rgba`` attribute value, quoted. Four components, no exceptions."""
+    if len(colour) != 4:
+        raise ValueError(f"rgba needs four components, got {len(colour)}")
+    if any(not 0.0 <= c <= 1.0 for c in colour):
+        raise ValueError(f"rgba components must be in [0, 1]; got {colour}")
+    return '"' + " ".join(f"{c:.3f}" for c in colour) + '"'
+
+
 SEGMENT_MASS_KG = 0.002
 HUB_MASS_KG = 0.05
 
@@ -238,6 +247,7 @@ def ring_bodies(
     tangential: TangentialElement | None = None,
     radial_damping: float = 0.0,
     tangential_damping_c: float = 0.0,
+    rgba: tuple[float, float, float, float] | None = None,
     prefix: str = "",
     indent: int = 6,
 ) -> list[str]:
@@ -392,7 +402,8 @@ def ring_bodies(
              f'{gx:.9f} {-segment_half_width_m:.9f} {gz:.9f} '
              f'{gx:.9f} {segment_half_width_m:.9f} {gz:.9f}" '
              f'size="{seg_r * 0.5:.9f}" mass="{segment_mass_kg}" '
-             f'contype="{contype}" conaffinity="{conaffinity}"/>'),
+             f'contype="{contype}" conaffinity="{conaffinity}"'
+             f'{"" if rgba is None else f" rgba={_rgba(rgba)}"}/>'),
             f"{pad}</body>",
         ]
     return lines

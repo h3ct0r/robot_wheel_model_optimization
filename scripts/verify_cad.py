@@ -51,8 +51,34 @@ def record(name: str, ok: bool, detail: str = "") -> bool:
     return ok
 
 
+def _self_intersects(outline: np.ndarray) -> bool:
+    """Whether a closed polygon crosses itself. O(n^2), which at ~130 points is microseconds.
+
+    Written out rather than delegated to the kernel on purpose. An outline is the centreline
+    offset by half the local thickness, and offsetting a *corner* is where that construction
+    breaks: inside a bend of centreline radius rho the offset face has radius rho - h, which
+    at rho < h turns the polygon inside out. OCCT may refuse such a face, or may accept it and
+    build a solid with a reversed patch whose volume is still plausible — the second is this
+    project's standing failure mode, so the check has to be independent of the kernel.
+    """
+    n = len(outline)
+    a, b = outline, np.roll(outline, -1, axis=0)
+
+    def side(p, q, r):
+        return np.sign((q[0] - p[0]) * (r[1] - p[1]) - (q[1] - p[1]) * (r[0] - p[0]))
+
+    for i in range(n):
+        # Skip the neighbours: consecutive edges share an endpoint by construction.
+        for j in range(i + 2, n - (1 if i == 0 else 0)):
+            p1, p2, p3, p4 = a[i], b[i], a[j], b[j]
+            if (side(p1, p2, p3) * side(p1, p2, p4) < 0
+                    and side(p3, p4, p1) * side(p3, p4, p2) < 0):
+                return True
+    return False
+
+
 #: Sections 4, 5 and 8 do the bulk of the builds and dominate the runtime.
-QUICK_SECTIONS = (1, 2, 3, 6, 7, 9, 10)
+QUICK_SECTIONS = (1, 2, 3, 6, 7, 9, 10, 11)
 #: Section 3 reads the mass properties computed in section 2.
 SECTION_DEPENDS = {3: (2,)}
 
@@ -63,7 +89,7 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     group.add_argument(
         "--only",
         metavar="N[,N...]",
-        help="run only these sections (1-10). Section 1 always runs; dependencies are pulled in.",
+        help="run only these sections (1-11). Section 1 always runs; dependencies are pulled in.",
     )
     group.add_argument(
         "--quick",
@@ -79,7 +105,7 @@ def selected_sections(args: argparse.Namespace) -> set[int]:
     elif args.only:
         wanted = {int(x) for x in args.only.replace(" ", "").split(",") if x}
     else:
-        return set(range(1, 11))
+        return set(range(1, 12))
     for section, deps in SECTION_DEPENDS.items():
         if section in wanted:
             wanted.update(deps)
@@ -380,6 +406,93 @@ def main(argv: list[str] | None = None) -> int:
             record("the gap phase pulls material away from the contact point",
                    gap_lowest > lowest + 1e-3,
                    f"tip phase {lowest:.4f} mm vs gap phase {gap_lowest:.4f} mm")
+
+    # --- 11. the L claw ---------------------------------------------------------------
+    # `tip_hook_mm != 0`: a radial leg, a filleted right angle, and a foot lying along the
+    # running surface (family `T7L`). The section exists because the offset outline is where
+    # this topology fails, and it fails by *self-intersecting* — which OCCT may refuse, or
+    # may accept into a solid with a reversed patch that still reports a plausible volume.
+    if 11 in want:
+        print("\n11. L claw (tangential foot at the tip)")
+        from wheelopt.cad.centreline import spoke_outline
+        from wheelopt.fea.loadcase import phase_for_tip_contact
+
+        hook_mm = 12.0
+        lclaw = WheelParams(
+            outer_radius_mm=60.0, rim_thickness_mm=0.0, n_spokes=12,
+            spoke_thickness_mm=6.0, claw_taper_ratio=0.6,
+            tip_hook_mm=hook_mm,
+            spoke_phase_deg=phase_for_tip_contact(12),
+        )
+        plain = replace(lclaw, tip_hook_mm=0.0)
+        record("screening accepts it", is_feasible(check_design(lclaw, TPU95A)))
+        record("a foot with a shear band is rejected, not ignored",
+               any(x.name == "hook_needs_bandless"
+                   for x in check_design(replace(lclaw, rim_thickness_mm=3.0), TPU95A)))
+
+        # The outline must not cross itself. Checked here rather than trusted to the kernel:
+        # a self-intersecting face is the specific way an offset right angle goes wrong, and
+        # the bend radius (0.75 t_tip against a half-thickness of 0.5) is what prevents it.
+        outline = spoke_outline(lclaw, 0)
+        record("the offset outline does not cross itself",
+               not _self_intersects(outline), f"{len(outline)} points")
+
+        res = build_wheel(lclaw, TPU95A)
+        if record("builds without error", res.ok):
+            n = len(res.part.solids())
+            record("is a single solid", n == 1, f"{n} solids")
+
+            bb = res.part.bounding_box()
+            reach = max(bb.size.X, bb.size.Y) / 2.0
+            record("no material outside the running surface",
+                   reach <= lclaw.outer_radius_mm + 1e-6,
+                   f"{reach:.5f} mm vs R {lclaw.outer_radius_mm:.5f}")
+            # A foot is material the plain claw does not have, at the radius where it is
+            # heaviest. If the hook were silently doing nothing the volumes would match.
+            plain_res = build_wheel(plain, TPU95A)
+            record("the foot adds material",
+                   (res.brep_volume_m3 or 0) > (plain_res.brep_volume_m3 or 0) * 1.02,
+                   f"{(plain_res.brep_volume_m3 or 0) * 1e6:.2f} -> "
+                   f"{(res.brep_volume_m3 or 0) * 1e6:.2f} cm^3")
+
+            _, faces = tessellate(res.part, tolerance_mm=0.05)
+            watertight, n_bad = is_watertight(faces)
+            record("mesh is watertight", watertight,
+                   "closed" if watertight else f"{n_bad} non-manifold edges")
+
+            # The point of the foot: contact over an arc rather than at a point, so the axle
+            # falls less between claws. Closed form, checked against the geometry that
+            # produced it rather than against itself.
+            record("the foot cuts the polygon drop",
+                   lclaw.polygon_drop_mm < 0.5 * plain.polygon_drop_mm,
+                   f"{plain.polygon_drop_mm:.2f} -> {lclaw.polygon_drop_mm:.2f} mm")
+            record("the reported contact patch is the foot, not the tip",
+                   abs(lclaw.contact_patch_mm - hook_mm) < 1e-9,
+                   f"{lclaw.contact_patch_mm:.1f} mm (tip is "
+                   f"{lclaw.tip_thickness_mm:.1f} mm)")
+
+            # Mirroring the whole claw must be exact. **Both signs, not just the hook's** —
+            # this check failed at 2.3e-5 when it flipped the foot alone, and the geometry was
+            # right: with a bowed leg, (+bow, +foot) and (+bow, -foot) are a C and an S, two
+            # genuinely different claws. The true mirror flips the curvature too, and then the
+            # volumes agree to 1e-15. Recorded because a 2e-5 discrepancy is exactly the size
+            # that gets waved through as tolerance when it is really a wrong test.
+            mirrored = build_wheel(
+                replace(lclaw, tip_hook_mm=-hook_mm,
+                        spoke_curvature_1_per_mm=-lclaw.spoke_curvature_1_per_mm),
+                TPU95A,
+            )
+            rel = abs((mirrored.brep_volume_m3 or 0) - (res.brep_volume_m3 or 1)) / (
+                res.brep_volume_m3 or 1)
+            record("mirroring the claw (foot AND bow) is exact", rel < 1e-12, f"{rel:.1e}")
+
+            # ...and flipping only the foot is *not* a mirror, so it must NOT come out equal.
+            # Without this, a hook that silently ignored its sign would pass the check above.
+            foot_only = build_wheel(replace(lclaw, tip_hook_mm=-hook_mm), TPU95A)
+            rel_foot = abs((foot_only.brep_volume_m3 or 0) - (res.brep_volume_m3 or 1)) / (
+                res.brep_volume_m3 or 1)
+            record("flipping only the foot gives a different claw, as it must",
+                   rel_foot > 1e-9, f"{rel_foot:.1e} on a bowed leg")
 
     # --- summary ----------------------------------------------------------------------
     n_fail = sum(1 for c in results if c.status == FAIL)

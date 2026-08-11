@@ -185,6 +185,44 @@ Full statement and sub-questions: `docs/plan/02-research-questions.md`
   strikes the riser, which is modelled because ground clearance is 70 mm and the body is a real
   contact geom. The platform loader now reads the seven vehicle fields that sat unread in the
   YAML, and `ring_bodies`/`coupling_tendons` take a `prefix` so four wheels can coexist.
+- **`T7L`, the L claw: a foot on the tip, built and screened and deliberately not simulated**
+  (2026-08-11, `TODO.md` #35). `WheelParams.tip_hook_mm` bends the last stretch of a claw
+  through a right angle so it lies along the running surface — radial leg, filleted bend,
+  tangential foot. **Zero is the default and byte-identical to the plain `T7` claw**, so no
+  existing `design_hash` moves. Signed like the curvature, because a trailing foot folds closed
+  under drive torque and a leading one is levered open; nothing measures that difference yet.
+  **The point is contact over an arc rather than at a point**: `polygon_drop_mm` now reads
+  `R(1−cos(π/n − β/2))` with `β = |hook|/R`, taking the R 60 twelve-claw drop from **2.04 to
+  0.78 mm** at a 12 mm foot — the harshness axis of the bullet below. Two pieces of geometry are
+  load-bearing rather than cosmetic: the **bend radius** is `0.75 t_tip` against a half-thickness
+  of `0.5 t_tip`, because offsetting a corner of centreline radius ρ gives an inside face of
+  radius `ρ−h` and below `ρ = h` the outline turns **inside out** — which OCCT may accept into a
+  solid with a reversed patch and a plausible volume; and the **foot is built in polar**, since a
+  straight 20 mm foot on R 60 stands 3.2 mm proud of the running surface. `verify_cad.py` §11
+  checks self-intersection independently of the kernel: **60/60**. CAD, screening, the mid-plane
+  figure and the 2-D FEA tier all took it for free (everything reads `spoke_outline`); a 12 mm
+  foot meshes and solves, 90 increments, buckling limit point 30.9 N. **The ring ROM refuses it
+  by name** — every segment element carries contact at a point on its own radius, so a fitted
+  ring would describe a plain radial claw of the same length. That is #31 arriving by design.
+- **Step climb on the rover cannot rank wheels; flat ground can** (2026-08-10, `TODO.md` #33
+  opened, #30 amended). On `run_rover.py --sweep` a 3-claw wheel, a 6-claw, a 12-claw and a
+  plain rigid cylinder **all clear exactly 1.00 R** at R 60 mm — four wheels, one answer, in
+  10 mm buckets. The metric is saturated by the rover's own four-wheel push, not by the
+  wheels. `--obstacle-height 0` is now a *scenario* (no step geom is emitted at all) measuring
+  objective 3, RMS vertical chassis acceleration from `qacc` on the chassis free joint over
+  the second half of the driving phase — the first half is the launch squat, which is about
+  the motor. The same four designs separate **22.64 / 10.31 / 5.00 / 0.00 m/s²**, and axle
+  work separates them 12×. Two checks from outside the sim track it: the closed-form polygon
+  drop `R(1−cos π/n)` and `ring.ride_height_ripple_m`. Compliance cuts the ripple 25% below
+  the rigid polygon at 12 claws and **3% at 3**, because a wheel only rides smoother than its
+  own polygon if it deflects comparably to the drop, and 24.5 N gives ≈1 mm against a 30 mm
+  drop. **Few-clawed numbers are extrapolated and cannot be un-extrapolated**: the law is
+  measured to `--delta-max` (12 mm) and a 3-tip R 60 wheel needs 30; the run prints
+  `EXTRAPOLATED` with the ratio, widening to 18 mm moved the answer 8%, and 35 mm diverges at
+  10 cutbacks. **The metric has no counter-pressure of its own** — it ranks 36 claws above 12
+  above 3 forever, and a smooth cylinder wins outright at 0.00. That floor exists to prove the
+  metric is not measuring the solver, not to propose a wheel; S7's washboard, where compliance
+  should actually win, is #33. Flags and figures: `docs/run_rover.md`.
 - **Two FEA tiers.** 3-D (`MeshSpec.dimension=3`, C3D10) is the reference and is
   **unaffordable at full size**: the nominal design is 50 779 elements / 279 k DOF at ~23 min
   per increment, ≈20 h per sweep, and coarsening does not help because the 3 mm band, 7 mm
@@ -308,14 +346,22 @@ Full statement and sub-questions: `docs/plan/02-research-questions.md`
 | `docs/decisions/` | ADRs — non-obvious decisions and their reasoning. **Read before proposing architecture changes.** |
 | `docs/experiments/log.md` | Append-only run log: hypothesis, config, result, interpretation |
 | `docs/plan/TODO.md` | **Open work, numbered.** What is left and why. Read before picking a task |
+| `docs/run_rover.md` | Every `run_rover.py` flag with figures — the scene, the wheel models, the metrics |
 | `configs/` | Hydra configs. `robot.yaml` is the frozen platform spec everything depends on |
 | `src/wheelopt/cad/` | Parametric geometry (build123d) → STEP + STL + mass properties |
 | `src/wheelopt/fea/` | CalculiX batch driver: STEP → mesh → load cases → ROM parameters |
 | `src/wheelopt/rom/` | Segmented ring. `ring.py`/`fit.py` pure numpy; `mjcf.py` needs MuJoCo |
 | `src/wheelopt/sim/` | MuJoCo scenario runners. `step_climb.py` is the step-5 signature rig |
-| `src/wheelopt/metrics/` | Metric extraction and robust aggregation |
+| `src/wheelopt/store.py` | Experiment store: append-only Parquet, DuckDB queries, the determinism gate |
+| `src/wheelopt/progress.py` | `Stage` / `Bar` — stage timings on stdout, progress bar on stderr |
+| `src/wheelopt/video.py` | MP4 from rendered frames via `ffmpeg` (optional external binary) |
+| `src/wheelopt/rom/build.py` | design → FEA → ring, shared by `run_step.py` and `run_rover.py` |
+| `src/wheelopt/hashing.py` | `plain()` / `content_digest()` — the one way to hash inputs |
+| `src/wheelopt/metrics/` | `aggregate.py` CVaR-25%, `threshold.py` the logistic P=0.9 height |
+| `src/wheelopt/sim/s1_step.py` | Scenario S1: the step ladder × terrain seeds, into store rows |
 | `src/wheelopt/opt/` | Optimiser drivers (Ax/BoTorch, CMA-ES, baselines) |
-| `src/wheelopt/viz.py` | PDF report plots (`--plot-pdf`). matplotlib is optional and lazy |
+| `src/wheelopt/viz.py` | Report plots. `draw_wheel_section` mid-plane, `draw_wheel_profile` axial |
+| `scripts/plot_geometry.py` | One figure per geometry parameter across its range, with verdicts |
 | `src/wheelopt/report.py` | Self-contained HTML reports for `scripts/explore.py`, the manual playground |
 | `data/cache/` | Content-addressed artifact cache. Never committed |
 
@@ -341,6 +387,12 @@ python -m unittest discover -s tests -t .
 
 # Screen a design without building geometry (milliseconds, no OCCT).
 python scripts/gen_wheel.py --screen-only --spokes 14 --thickness 6.0
+
+# Every geometry parameter across its own range, one figure each, with the screening verdict
+# under each design. Mid-plane section, except width and tread depth, which that view cannot
+# see at all -- those get the axial one. Seconds, numpy only, no CAD kernel.
+python scripts/plot_geometry.py --contact-sheet
+python scripts/plot_geometry.py --only taper --format pdf
 
 # Build, export STEP + STL, report mass properties. Needs build123d.
 python scripts/gen_wheel.py --radius 85 --spokes 12 --profile curved --out data/wheels
@@ -375,11 +427,41 @@ python scripts/run_step.py --radius 60 --rim-thickness 0 --spokes 12 --thickness
     --claw-taper 0.6 --spoke-phase -90 --plane-strain --segments 12 --law claw \
     --tangential hinge --delta-max 0.012 --n-points 10 --sweep
 
+# The whole robot at a step, filmed. Add --compliant for four segmented rings instead of four
+# cylinders -- a picture, not a measurement (TODO #30/#31). Every stage reports its own time
+# and the long ones carry a progress bar on stderr.
+python scripts/run_rover.py --obstacle-height 80 --radius 85 --render
+# --obstacle-height 0 is a different scenario, not a small step: no obstacle, and the run
+# reports ride harshness (objective 3) with two analytic checks beside it. This is the metric
+# that separates wheel designs; the step-climb sweep on the rover does not.
+python scripts/run_rover.py --obstacle-height 0 --compliant --radius 60 --rim-thickness 0 \
+    --spokes 3 --thickness 6 --claw-taper 0.6 --spoke-phase -90 --plane-strain --law claw
+# --stl draws the real CAD geometry over each wheel, translucent grey at 40%, so the ring's
+# amber capsules can be seen against the shape they stand for. Decoration: no collision, no
+# mass, and every number is byte-identical with and without it (tests/test_rover.py).
+# --render writes an MP4 (needs ffmpeg on PATH), a GIF and a contact sheet; the MP4 is ~13x
+# smaller and full-colour, so --no-gif is usually what you want.
+python scripts/run_rover.py --compliant --stl --radius 60 --rim-thickness 0 --spokes 12 \
+    --thickness 6 --claw-taper 0.6 --spoke-phase -90 --plane-strain --law claw \
+    --tangential hinge --obstacle-height 50 --render
+
+# Scenario S1: the step ladder across terrain seeds, the P=0.9 height, and every run stored.
+# ~25 s for 80 runs. --repeat 2 --gate is the Phase 0 determinism gate.
+python scripts/run_s1.py
+python scripts/run_s1.py --heights 20:120:20 --repeat 2 --gate
+
 # The manual playground: one design (or several) through the whole chain, into one
 # self-contained HTML page. This is the thing to reach for when turning a knob by hand.
 python scripts/explore.py --spokes 8 --thickness 6 --no-sim     # ~40 s cold, ~2 s cached
 python scripts/explore.py --compare spokes=6,10,14 --no-sim     # shared axes
 python scripts/explore.py --rim-thickness 0 --claw-taper 0.6 --spoke-phase -90
+
+# T7L, the L claw: a tangential foot at the tip. Bandless only; --tip-hook is SIGNED and 0 is
+# the plain radial claw. CAD, screening and the 2-D FEA tier take it; the ring ROM refuses it
+# by name (TODO #35), so --law claw stops rather than fitting a plain claw of the same length.
+python scripts/gen_wheel.py --radius 60 --rim-thickness 0 --spokes 12 --thickness 6 \
+    --claw-taper 0.6 --spoke-phase -90 --tip-hook 12 --out data/wheels
+python scripts/verify_cad.py --only 11
 ```
 
 ### Environment
@@ -397,7 +479,8 @@ ccx -v          # CalculiX 2.23 — the solver is a binary, invoked as a subproc
 ```
 
 `pip install -e .` alone gets the numpy-only layers (screening, centreline, mass properties);
-`[cad]` adds build123d, `[fea]` adds gmsh, `[viz]` adds matplotlib for `--plot-pdf`. Do
+`[cad]` adds build123d, `[fea]` adds gmsh, `[viz]` adds matplotlib for `--plot-pdf`,
+`[store]` adds duckdb + pyarrow for `wheelopt.store`. Do
 **not** use the system `python3` — homebrew's 3.14.6 has a broken `pyexpat` that breaks pip
 itself.
 

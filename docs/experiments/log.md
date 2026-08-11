@@ -3017,3 +3017,384 @@ gives 4.09 mm against 8.04 mm — a factor of two, both plausible on a 60 mm whe
 test that checks it against the ring's own contact set rather than against the same formula.
 
 **Gates.** Unit suite 633/633 (9 new), ruff at the standing 71.
+
+---
+
+## 2026-08-10 — Phase 0, part one: the store, the metric, and S1 driven end to end
+
+**Hypothesis.** Phase 0's remaining bullets are mostly independent, and the store is the one
+everything else writes into, so it goes first. The claim to test at the end of it: the Phase 0
+gate — *identical θ → identical score* — can be made a **query** rather than a procedure, and
+S1 can produce a step-height metric that is continuous rather than bisected.
+
+Both held. What follows is what it cost and the two places a plausible wrong number appeared.
+
+### The store
+
+`wheelopt.store` — append-only Parquet under `runs/`, read through DuckDB. Three calls worth
+recording because each rejects an obvious alternative:
+
+**Parquet files, not one `.duckdb`.** A campaign is many workers running for days and expecting
+interruption (`13-engineering.md`), and DuckDB takes a single writer lock on its database file.
+One file per `append()`, written to `.tmp` and renamed, so a killed worker costs one batch and
+a reader globbing `*.parquet` never sees a partial row — the same trick the FEA cache uses.
+
+**`params` / `metrics` / `diagnostics` are JSON columns**, everything else is a real column.
+The metric set will change; a rigid schema makes each change a migration, and in practice a
+migration means old rows quietly acquire NULLs and nobody can tell which runs predate it.
+
+**`run_id` hashes the inputs and nothing else** — design, scenario, seed, material realisation,
+every pipeline version. No metrics, no timestamp. That is the whole determinism gate: two rows
+with one `run_id` and different metrics is exactly the failure, and it is *inexpressible* if
+the outputs are in the key. `disagreements()` and `repeat_counts()` ship as a pair, because an
+empty disagreement list proves nothing if nothing was repeated — a gate that passes because the
+campaign never ran a design twice is this project's recurring failure in a new place.
+
+`hashing.py` came out of `fea/cache.py` unchanged rather than being written twice. All 17
+cache-key tests still pass, so no key moved.
+
+### The metric, and a 46-metre error bar
+
+`metrics/threshold.py` implements `08-metrics.md`'s threshold fix: a ladder, a logistic fit by
+Newton/IRLS in pure numpy, and the height at P = 0.9 with a delta-method standard error.
+
+The first S1 smoke run — three rungs, two seeds — returned **77.2 ± 46029.6 mm**, and `ok` was
+**True**. It passed every check that existed: finite, converged, not separated, not censored,
+slope the right sign. A 46-metre standard error on a 77-millimetre answer, and nothing about
+the number says so. **It is the ladder that says so**, which is why both new guards are scaled
+by the ladder rather than by a tuned constant: a standard error wider than the whole ladder
+locates the crossing nowhere inside the experiment that was run, and a crossing outside the
+rungs is extrapolation from a curve fitted entirely elsewhere. `ThresholdFit.reason` now says
+which. That six-run case is pinned as a test.
+
+**And then the fixture turned out to be wrong too, in the same direction.** After adding the
+guards, two shape tests failed. The cause was not the guards: my synthetic ladder applied a
+flat 15% flip probability at *every* height, which caps success at 0.85, so P = 0.9 is
+unreachable and the true crossing is far below the lowest rung. Real terrain noise concentrates
+near the cutoff. The fixture now samples from a known logistic, which is both realistic and
+better: the fit has an **analytic** answer to recover, so `test_it_recovers_a_known_crossing`
+is a check against a number the fit did not produce.
+
+`metrics/aggregate.py` is CVaR at 25% (invariant 7), and `Direction` is a **required** argument.
+The worst quartile of a maximised metric is the lowest and of a minimised one the highest; a
+default would make the wrong answer the easy one to write, and the wrong answer is a plausible
+number in the right units that ranks designs backwards. The boundary sample carries fractional
+weight so a design that lost a seed to a diverged run stays comparable with one that did not.
+
+### S1, and the lateral twin of an old bug
+
+`sim/s1_step.py`: ten rungs × eight terrain seeds, constant-throttle controller, one row per
+rung. **A terrain seed is a terrain, not a coin flip per run** — the same seed gives the same
+friction and approach angle at every rung, so the ladder makes one world progressively harder.
+Re-sampling per rung would make eight seeds eighty conditions and the curve would measure the
+sampler as much as the wheel.
+
+Each rung gets its own scenario name (`S1_step/h=0.050`). Without that, eighty runs at eight
+seeds collide into eight `run_id`s and the determinism gate reads them as one evaluation
+repeated ten times with ten different answers — a self-inflicted gate failure.
+
+The rover gained an approach angle for this, and **the quaternion was the easy half**. At 15°
+a 6.9 m run drifts 1.8 m off centre, and the step's y half-width was fixed at 1.5 m — so the
+robot would have climbed the step and then driven off the *side* of it. That is precisely the
+step-shorter-than-the-run bug of the day before, in the axis nobody was looking at. The step is
+now sized from `reach·sin(yaw)` and there is a test.
+
+### The result
+
+Full ladder, R 85 mm rigid wheels, 80 runs in **23 s**:
+
+```
+   20 mm  8/8      80 mm  3/8       140 mm  0/8
+   40 mm  7/8     100 mm  1/8       160 mm  0/8
+   60 mm  6/8     120 mm  0/8       180-200 0/8
+```
+
+**44.7 ± 9.1 mm at P = 90%**, usable. A clean sigmoid with no artificial noise — the grading
+comes from friction 0.30–1.00 and ±15° of approach, which is what `08-metrics.md` asks S1 to
+randomise over. Note it is *not* the `run_rover.py --sweep` answer of 100 mm at R 85: that
+sweep runs at μ = 1.0 square-on, and this is the robust number.
+
+**The gate, run for real:** `--repeat 2 --gate` gives 160 rows, **80 repeated `run_id`s, zero
+disagreements**, in 47 s. Honest limitation — this is one machine, one process. `11-phases.md`
+asks for *two machines, two days apart*, and that is untested. What exists is the mechanism and
+a demonstration that the pipeline is deterministic under repetition here.
+
+**Gates.** Unit suite 704/704 (46 new), ruff at the standing 71.
+
+---
+
+## 2026-08-10 — The step-climb metric on the rover cannot rank wheels, and flat ground can
+
+**Hypothesis, stated first.** Lowering `PARAM_BOUNDS["n_spokes"]` from 6 to 3 lets a
+deliberately bad wheel into the search, and a deliberately bad wheel should lose somewhere
+measurable. Which metric it loses on was the open question.
+
+### It does not lose on step climb, and neither does a rigid cylinder
+
+`run_rover.py --sweep`, R 60 mm, taper 0.6, bandless, `--law claw`:
+
+```
+   3 claws       60 mm  [######......] 10-120 mm  (1.00 R)   held out RMS  0.02%
+   6 claws       60 mm  [######......] 10-120 mm  (1.00 R)   held out RMS  0.03%
+  12 claws       60 mm  [######......] 10-120 mm  (1.00 R)   held out RMS 20.17%
+  rigid cylinder 60 mm  [######......] 10-120 mm  (1.00 R)
+```
+
+**Four different wheels, one answer.** This is not a null result about wheel design; it is the
+rover's step-climb metric saturating, and it is the same effect as #30's 3x — three driven
+wheels push while one climbs and a rigid chassis levers the front axle up, so the wheel is a
+small term. A 10 mm bucket cannot see what is left.
+
+(The RMS column is a free consistency check on #29 rather than the point: at 3 claws second
+engagement is `R(1 − cos 120°)` = 90 mm, far outside the 12 mm sweep, so the whole wheel is one
+claw throughout and the held-out validation is near-exact. At 12 claws it is 8.04 mm and the
+sweep crosses it. Exactly what #29's story predicts, from a direction #29 did not look.)
+
+### Flat ground separates them 4.5x
+
+`RoverSpec.step_height_m = 0` is now a **scenario**, not a degenerate step: no box is emitted
+at all, and the run measures objective 3 from `08-metrics.md`, RMS vertical chassis
+acceleration. A bandless wheel runs on discrete tips, so it is a polygon and the axle rises and
+falls once per tip — the cost compliance is supposed to buy back.
+
+Same designs, 6 s at full throttle, R 60 mm:
+
+| wheel | harshness | polygon drop | loaded ripple | axle work | mean speed |
+|---|---|---|---|---|---|
+| 3 claws | **22.64** m/s² | 30.0 mm | 29.08 mm | 46.1 J | 0.81 m/s |
+| 6 claws | **10.31** m/s² | 8.0 mm | 7.38 mm | 41.7 J | 0.71 m/s |
+| 12 claws | **5.00** m/s² | 2.0 mm | 1.50 mm | 12.0 J | 0.83 m/s |
+| rigid cylinder | **0.00** m/s² | — | — | 3.9 J | 0.84 m/s |
+
+Cost of transport separates them as well, and harder: the 3-claw wheel spends **12x** the axle
+work of the cylinder to cover the same ground at the same speed.
+
+**Three numbers from three places, on purpose.** The harshness is MuJoCo's `qacc` on the
+chassis free joint. The polygon drop is closed-form trigonometry on the tip count, with no FEA
+and no dynamics in it. The loaded ripple is the ring solving `F(δ, ψ) = 24.5 N` per phase, with
+a law but still no dynamics. The standing rule is that a model needs at least one check against
+a number it did not produce; these are two, and they track.
+
+They also say something the harshness number alone does not. At 12 claws compliance cuts the
+ripple **25%** below the rigid polygon; at 3 claws it cuts it **3%**. A wheel only rides
+smoother than its own polygon if it deflects by something comparable to the drop, and at 24.5 N
+per wheel this design deflects about 1 mm against a 30 mm drop. The bad wheel is not bad
+because it is stiff — it is bad because three tips is a triangle.
+
+### Two things that had to be right for the measurement to mean anything
+
+**The acceleration is read from the solver, not differenced.** `qacc` on the free joint's z
+DOF. At a 5e-4 s timestep, second-differencing the height history multiplies contact noise by
+4e6 and measures the integrator. The check that it is the right quantity is that a robot
+standing on the floor reads ~0 rather than −g: the contact force balances gravity and an
+accelerometer bolted to the chassis would agree. Pinned as a test.
+
+**The launch transient is excluded.** The largest vertical acceleration in the whole run is the
+squat as the robot leaves rest at stall torque, which is a fact about the motor. Harshness is
+quoted over the second half of the driving phase only; including the transient would rank
+drivetrains.
+
+And one thing that had to be a scenario rather than a number: **flat ground emits no step
+geom**. A zero-height box is a MuJoCo compile error and an epsilon-height box is a lip the
+robot bumps over — contributing exactly the acceleration being measured, from the scenario
+instead of from the wheel. `climbed` is also forced False there, because both halves of the
+climb test pass on flat ground the moment the robot has driven a metre.
+
+### Negative result: the few-clawed numbers are extrapolated, and cannot be un-extrapolated
+
+A 3-tip R 60 wheel has a 30 mm polygon drop. The FEA sweep behind its segment law runs to
+`--delta-max`, 12 mm by default, and `TabulatedLaw` extrapolates on its last slope without
+complaint — the project's characteristic failure, a plausible number outside the range that
+produced it. The run now prints `EXTRAPOLATED` with the ratio.
+
+Widening the sweep **12 → 18 mm** moved the 3-claw answer 24.65 → 22.64 m/s², about 8%, so the
+ranking survives the correction. **35 mm cannot be measured at all**: CalculiX stops at t=0.590
+after 10 cutbacks, which is itself a statement about a claw pressed half its own radius rather
+than a solver setting to tune. So the 3-claw harshness is quotable as a bucket and its sign is
+safe; its second digit is not.
+
+### What this metric does not do
+
+It has **no counter-pressure of its own**. Harshness alone ranks 36 claws above 12 above 3,
+monotonically and forever, and the rigid comparator — a smooth cylinder — wins outright at
+0.00. The floor is there to prove the metric is not measuring the solver, not to propose a
+wheel. The pressure back the other way is in the other three objectives, which is exactly the
+argument in ADR-0006 for never scalarising them.
+
+Also open: this is one speed on one surface. `08-metrics.md` asks S7 for a washboard swept over
+amplitude and wavelength, where a compliant wheel should beat a rigid one rather than merely
+lose by less — nothing here demonstrates that, because a smooth cylinder on a smooth plane is
+unbeatable. Filed as #33.
+
+**Gates.** Unit suite 778/778 (6 new in `test_rover.py`), ruff at the standing 71.
+Also fixed in passing: `ring.polygon_drop_m`'s docstring claimed the rigid drop was an upper
+bound on the compliant ripple. `WheelParams.polygon_drop_mm` says the opposite and cites a
+measurement — 4x this value on an R 85 mm, 8-claw, 3.7 N/mm design. Two docstrings for the same
+formula disagreeing is the same failure one level up again; the measured one is right.
+
+---
+
+## 2026-08-10 — A figure per geometry parameter, and what it turned up about the bounds
+
+`scripts/plot_geometry.py` draws every wheel geometry parameter across its own range, one
+figure each, with each design's **screening verdict** printed under it. Twelve figures, a few
+seconds, numpy only — the panels come from the same `spoke_outline` the solid is extruded
+from, so this runs on a machine with no CAD kernel and no solver.
+
+The point was documentation. `PARAM_BOUNDS` and `check_design` describe the search space in
+numbers, and a number does not say what a 0.25 taper looks like or where a design stops being
+printable. It turned out to be a test.
+
+### What it found
+
+**`rim_thickness_mm` and `spoke_thickness_mm` are both searched from 1.2 mm, and TPU cannot
+print below 1.6.** `PlatformLimits.min_wall_thickness_tpu_mm` is 1.6; 1.2 is the *rigid*
+minimum wall. Measured at R 60, both fields set together:
+
+```
+   1.2 mm   spoke_min_wall INFEASIBLE, rim_min_wall INFEASIBLE
+   1.5 mm   spoke_min_wall INFEASIBLE, rim_min_wall INFEASIBLE
+   2.0 mm   clean
+```
+
+**And then reading `params.py` changed what this is.** The spoke's bound is *deliberate* and
+says so in place: it sits below the wall "so that `spoke_min_wall` stays a live check rather
+than being made unreachable by the range". That is a real argument — a constraint no sample can
+violate has stopped testing anything — traded against evaluations spent on rejections. So the
+figure found a documented trade, not a bug, and the first draft of this entry called it a bug
+because the figure was read before the source.
+
+What survives is narrower and still worth an item: **`rim_thickness_mm` carries no such note**.
+Same numbers, no stated reason. Filed as **#34**, whose work is to decide and record which it
+is rather than to move a number.
+
+Two other red bounds in the same figures are *not* the same finding and are recorded as such:
+`n_spokes` 24 and 36 hit `interspoke_gap`, and `tread_depth_mm` 4 exceeds a 3 mm band. Those
+depend on radius, thickness and band — a scalar bound cannot know them. The wall one depends
+on nothing.
+
+### Two views, because one of them is a projection
+
+`draw_wheel_profile` is new: the axial section, r against z. It exists because `width_mm` is
+the direction the mid-plane view projects away and `tread_depth_mm` cuts grooves whose axis is
+that direction, so **sweeping either against the mid-plane section alone gives a row of
+identical pictures** — which reads as "this parameter does nothing". That is this project's
+recurring failure in a figure instead of a value, and the two sweeps that need it now say
+`AXIAL section` on their own caption.
+
+**And writing it reproduced the failure it was written to prevent, twice, both caught by
+tests.**
+
+- The first version drew tread grooves only on a banded wheel. `_cut_tread` is gated on
+  `tread_depth_mm` alone, so a **bandless** design with tread has grooves the drawing did not.
+- Fixing that by splitting the block at `rim_inner_radius_mm` was worse: bandless, inner and
+  outer radius are equal, so the land rectangles had zero height and the groove-floor
+  rectangle had *positive* area below the surface. **Tread added material.** Area went 1440 →
+  1474 mm² as the depth rose. The drawing disagreed with the solid in the direction that looks
+  fine.
+
+Now one polygon walks the grooved surface from hub to tread, and the test asserts area *falls*
+with depth. It also asserts `TREAD_GROOVES` equals the count read back out of
+`compliant_spoke.py` by regex — a mirrored constant that cannot be imported (that module needs
+OCCT) is a constant that drifts.
+
+### Also corrected
+
+The figures are gitignored. They regenerate in seconds from the centreline layer, and a
+committed set is a set that quietly disagrees with the bounds it claims to draw.
+
+`tests/test_cli_help.py`'s script loader did not register the module in `sys.modules` before
+executing it, so a script containing a `@dataclass(slots=True)` failed with
+`AttributeError: 'NoneType' object has no attribute '__dict__'` — a message about nothing.
+
+**Gates.** Unit suite 783/783 (5 new), ruff at the standing 71.
+
+---
+
+## 2026-08-11 — `T7L`: an L-shaped claw, and the ROM refusing to pretend it can model one
+
+A new topology on request: a claw whose tip turns through a right angle so it lies along the
+running surface. `WheelParams.tip_hook_mm` — a radial **leg**, a filleted **bend**, a
+tangential **foot**. Zero is the default and reproduces the plain `T7` claw byte for byte, so
+no `design_hash` on record moves.
+
+### What it is for, as a closed form
+
+A radial claw touches at a point, so a bandless wheel is a polygon and its axle drops
+`R(1 − cos π/n)` once per tip — the ride harshness measured yesterday. A foot spreads contact
+over `β = |tip_hook_mm|/R`, so the axle only falls across the gap between feet:
+
+```
+   R 60 mm, twelve claws, taper 0.6
+
+   foot   0 mm    polygon drop  2.04 mm      contact patch   3.6 mm (the tip)
+          6 mm                  1.34 mm
+         12 mm                  0.78 mm                     12.0 mm (the foot)
+         20 mm                  0.27 mm
+         30 mm                  0.00 mm   <- feet meet: interspoke_gap and hook_reach
+                                             both reject it, at a pitch arc of 31.4 mm
+```
+
+### Two pieces of geometry that are load-bearing rather than cosmetic
+
+**The bend radius.** An outline is the centreline offset by half the local thickness, and
+offsetting a *corner* of centreline radius `ρ` gives an inside face of radius `ρ − h`: at
+`ρ = h` it collapses to a point and below it the polygon turns **inside out**. OCCT may refuse
+such a face — or accept it into a solid with a reversed patch whose volume is still plausible,
+which is this project's standing failure. So `hook_bend_radius_mm = 0.75 t_tip` against a
+half-thickness of `0.5 t_tip`, a 1.5x margin, capped at half the foot so a short hook does not
+become all fillet. `verify_cad.py` §11 checks the outline for self-intersection with its own
+O(n²) segment test, **independently of the kernel**, because a check that asks OCCT whether
+OCCT was happy is not a check.
+
+**The foot is built in polar, not in the spoke's local Cartesian frame.** A foot at constant
+local `u` is a *chord*, and a 20 mm chord of a 60 mm circle stands **3.2 mm** proud of it — so
+the foot would pierce the running surface, `_clip_to_radius` would eat it from outside, and on
+a tapered tip the outline would then cross itself. The foot follows the circle because the
+ground does. Its centreline sits half a tip thickness inside `outer_radius_mm` so the
+*material* lands on the surface: measured reach 59.97957 mm against R 60.
+
+### The mirror test was wrong, at 2.3e-5
+
+`verify_cad.py` §11 asserted that flipping `tip_hook_mm` leaves the volume unchanged. It failed
+at a relative 2.25e-5 — and the geometry was right. With a **bowed** leg, `(+bow, +foot)` and
+`(+bow, −foot)` are a C and an S: two genuinely different claws. The true mirror flips the
+curvature too, and then the volumes agree to **9.9e-16**. On a straight leg, flipping the foot
+alone agrees to 7.1e-16.
+
+Both directions are now pinned, and the second is the one worth having: flipping only the foot
+must **not** come out equal, or a hook that silently ignored its sign would pass. A 2e-5
+discrepancy is exactly the size that gets waved through as tolerance when it is really a wrong
+test.
+
+### The contact-patch line, corrected for the third time
+
+The `no_shear_band` warning quotes how wide the ground contact is. It read `spoke_thickness_mm`
+until claws tapered, whereupon it overstated the patch by `1/taper`; it was moved to
+`tip_thickness_mm`, which is right until a *foot* appears — an L claw touches over its whole
+foot, 12.0 mm against the 3.6 mm the tip reports, a factor of 3.3 while looking entirely
+reasonable. It is now `WheelParams.contact_patch_mm`, so there is no fourth time.
+
+### What arrived for free, and what did not
+
+Everything downstream reads `spoke_outline`, so the CAD solid, the mid-plane figure and the
+**2-D FEA tier** all took the new topology without a line of change. A 12 mm foot on the R 60
+twelve-claw design: 6952 elements, 90 increments, 10 cutbacks, 158 s, sweep completed, buckling
+limit point at **30.9 N** — below the 61.2 N the constraint asks for, so this particular design
+is not a good one, which is a result rather than a problem.
+
+**Noted, one design each, not a finding:** at the same settings the *plain* claw **diverges**
+where the L claw completes. If it holds up, a spread contact is easier on the contact solver as
+well as on the ride.
+
+**The ring ROM does not take it, and now says so.** Every segment element here — radial slide
+and root hinge alike — carries contact at a **point** on the segment's own radius. A foot beds
+along an arc and the load travels down it as the wheel rolls. A ring fitted to a `T7L` design
+would run, produce a curve, and describe a plain radial claw of the same length: not a crash, a
+plausible number about a different wheel. `build_ring` refuses it by name, before any solver
+time, and names #35. This is **#31 arriving by design rather than by accident**, which makes
+#31 harder to defer: for `T7` the flank contact is an error above second-claw engagement, for
+`T7L` it is the first-order behaviour at any load.
+
+**Gates.** `verify_cad.py` **60/60** (12 new checks, section 11). Unit suite **797/797**
+(14 new), ruff at the standing 71.

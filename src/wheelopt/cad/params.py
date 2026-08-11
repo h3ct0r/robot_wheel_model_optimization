@@ -86,6 +86,28 @@ class WheelParams:
     #: :attr:`tip_thickness_mm`. A 7 mm spoke at 0.15 taper has a 1.05 mm tip, which is
     #: unprintable while ``spoke_thickness_mm`` still looks comfortable.
     claw_taper_ratio: float = 1.0
+    #: Arc length of a tangential **foot** at the claw tip, millimetres, measured along the
+    #: running surface. Zero — the default — is the plain radial claw and changes nothing.
+    #: Non-zero turns the claw into a literal **L**: a radial leg, a filleted right-angle
+    #: bend, and a foot lying along the circle at ``outer_radius_mm``. Family ``T7L``.
+    #:
+    #: **Signed, like** :attr:`spoke_curvature_1_per_mm`. Positive puts the foot in the
+    #: +tangential direction, negative in −tangential, and the two are genuinely different
+    #: wheels once the thing is driven: a foot that trails the leg is dragged onto the ground
+    #: and folds *closed* under drive torque, one that leads it is levered *open*. Nothing in
+    #: this project measures that difference yet, which is why both signs are expressible and
+    #: neither is the default.
+    #:
+    #: **What it is for.** A radial claw touches the ground at a point, so a bandless wheel is
+    #: a polygon and its axle drops ``R(1 − cos π/n)`` per pitch — the harshness measured on
+    #: 2026-08-10. A foot spreads that contact over an arc, so the drop is taken over the
+    #: *gap between feet* instead: see :attr:`polygon_drop_mm`, which reads this field.
+    #:
+    #: **Requires a bandless design.** With a shear band the tip is buried in it and there is
+    #: nowhere for a foot to go; ``constraints.check_design`` rejects the combination rather
+    #: than ignoring the field, which would be the silent-default failure this project keeps
+    #: finding.
+    tip_hook_mm: float = 0.0
     spoke_profile: SpokeProfile = SpokeProfile.CURVED
     #: Rotational phase of the spoke pattern, degrees; spoke 0 sits at this angle from +x.
     #: Irrelevant with a shear band — the running surface is a cylinder whatever the spokes
@@ -175,6 +197,61 @@ class WheelParams:
         return self.claw_taper_ratio < 1.0 and not self.has_shear_band
 
     @property
+    def is_l_claw(self) -> bool:
+        """Whether this claw has a tangential foot at its tip — family ``T7L``.
+
+        Bandless is part of the definition, not a separate check: a foot on a spoke buried in
+        a shear band is not an L claw, it is an unbuildable shape, and
+        ``constraints.check_design`` says so.
+        """
+        return self.tip_hook_mm != 0.0 and not self.has_shear_band
+
+    @property
+    def hook_bend_radius_mm(self) -> float:
+        """Centreline radius of the right-angle bend between leg and foot, millimetres.
+
+        **Not cosmetic, and not free to choose.** The outline is the centreline offset by half
+        the local thickness, and offsetting a corner of centreline radius ``ρ`` by ``h`` makes
+        the inside face a circle of radius ``ρ − h``: at ``ρ = h`` it degenerates to a point
+        and below it the polygon **turns inside out**. A self-intersecting outline is not a
+        drawing artefact — it is a face OCCT will refuse or, worse, fuse into a solid with a
+        reversed patch. So the bend is ``0.75 t_tip`` against a half-thickness of ``0.5 t_tip``,
+        a 1.5x margin, and is capped at half the foot so a short hook stays a hook rather than
+        becoming all fillet.
+        """
+        return min(0.75 * self.tip_thickness_mm, 0.5 * abs(self.tip_hook_mm))
+
+    @property
+    def contact_patch_mm(self) -> float:
+        """Length of one tip's ground footprint, millimetres. Zero with a shear band.
+
+        **The third correction to the same line, so it lives here now rather than in a
+        message.** A uniform strut's footprint is its thickness; the check quoted
+        :attr:`spoke_thickness_mm` and was right until a taper appeared, whereupon it
+        overstated the patch by ``1/taper``. It was moved to :attr:`tip_thickness_mm`, which is
+        right until a *foot* appears — an L claw lies on the ground along its whole foot and
+        touches over ``|tip_hook_mm|``, which on the R 60 twelve-claw design is 12 mm against
+        the 3.6 mm the tip would report. Reading the wrong one understates the patch by 3.3x
+        and does so while looking entirely reasonable.
+        """
+        if self.has_shear_band:
+            return 0.0
+        return abs(self.tip_hook_mm) if self.is_l_claw else self.tip_thickness_mm
+
+    @property
+    def contact_arc_rad(self) -> float:
+        """Angular span of one claw's running surface, radians. Zero without a foot.
+
+        ``|tip_hook_mm| / outer_radius_mm`` — the foot's arc, and deliberately **not** the
+        bend's, which also comes within a hair of the running surface near its tangent point.
+        Understating the contact arc understates the benefit of a foot, which is the safe
+        direction for a quantity used to argue that this topology is worth having.
+        """
+        if not self.is_l_claw or self.outer_radius_mm <= 0.0:
+            return 0.0
+        return abs(self.tip_hook_mm) / self.outer_radius_mm
+
+    @property
     def rim_inner_radius_mm(self) -> float:
         """Inner radius of the shear band, where the spokes attach.
 
@@ -211,8 +288,18 @@ class WheelParams:
         8-claw, 3.7 N/mm design. The honest number needs the fitted law:
         :func:`wheelopt.rom.ring.ride_height_ripple_m`. This one is here because it costs
         nothing, needs no FEA, and is the right thing for a millisecond pre-filter to report.
+
+        **An L claw's foot changes the formula, and that is the whole point of the foot.** A
+        radial claw touches at one point, so the free half-pitch is ``π/n``. A foot spreads the
+        contact over :attr:`contact_arc_rad`, so the axle only falls over what is left between
+        two feet: ``R(1 − cos(π/n − β/2))``. At ``β ≥ 2π/n`` the feet meet and the running
+        surface is continuous — the drop is exactly zero, and the wheel has become a very
+        strangely constructed solid tyre.
         """
-        return self.outer_radius_mm * (1.0 - math.cos(math.pi / self.n_spokes))
+        half_gap = math.pi / self.n_spokes - 0.5 * self.contact_arc_rad
+        if half_gap <= 0.0:
+            return 0.0
+        return self.outer_radius_mm * (1.0 - math.cos(half_gap))
 
     @property
     def spoke_sagitta_mm(self) -> float:
@@ -307,16 +394,27 @@ PARAM_BOUNDS: dict[str, tuple[float, float]] = {
     "outer_radius_mm": (60.0, 100.0),
     "width_mm": (30.0, 70.0),
     "rim_thickness_mm": (1.2, 8.0),
-    # Unchanged by TODO #19, deliberately, and the reason is worth recording because the
-    # item expected to *widen* it: a `T7` claw wheel wants **more** claws than a banded one,
-    # not fewer. Measured 2026-08-09 — a passive claw wheel unloads a claw completely once
-    # per pitch below about 12 tips, whatever the claw's stiffness, so 6 is already generous
-    # for that family and 4 (the PaTS-Wheel letter's row) is only reachable because those
-    # claws are gear-driven rather than passive springs. Six stays because it is right for
-    # the **banded** `T3` comparator, which has a running surface between its spokes; the
-    # claw-specific limit is a WARNING from `constraints.claw_ride_harshness`, which fires
-    # only when there is no band.
-    "n_spokes": (6, 36),
+    # Lowered 6 -> 3 on 2026-08-10 to admit **deliberately bad** baselines: a design that a
+    # good one has to beat is worth more than a bound that only admits plausible wheels, and
+    # a 3-spoke wheel is genuinely awful — its axle drops `R(1 - cos 60 deg)` = half a radius
+    # between tips, 30 mm on a 60 mm wheel.
+    #
+    # This does **not** reverse TODO #19, which asked whether claws want *fewer* tips and
+    # measured that they want more: a passive claw wheel unloads a claw completely once per
+    # pitch below about 12 tips, whatever the claw's stiffness, and 4 (the PaTS-Wheel letter's
+    # row) is only reachable because those claws are gear-driven rather than passive springs.
+    # That finding stands and is still reported, as the WARNING
+    # `constraints.claw_ride_harshness` raises whenever there is no band. What changed is only
+    # that the *search space* no longer refuses to express a bad wheel.
+    #
+    # **Three, not one, and the floor is the model rather than taste.** Below three the
+    # formulas stop meaning anything instead of merely reporting badly: `polygon_drop_m` at
+    # n=1 is `R(1 - cos 180 deg)` = 2R, an axle dropping twice the wheel radius, and
+    # `second_contact_delta_m` at n=1 is `R(1 - cos 360 deg)` = **0**, which reads as "a second
+    # claw engages immediately" on a wheel that has no second claw. `RingSpec` refuses fewer
+    # than three segments for the same reason, and `check_design` calls one or two spokes
+    # DEGENERATE — geometry that cannot be built rather than a design that scores poorly.
+    "n_spokes": (3, 36),
     # The lower bound sits *below* the minimum printable TPU wall (1.6 mm) on purpose, so
     # that `spoke_min_wall` stays a live check rather than being made unreachable by the
     # range. The upper bound is set by buckling at 24.5 N — see WheelParams.
@@ -329,4 +427,15 @@ PARAM_BOUNDS: dict[str, tuple[float, float]] = {
     # a hinge, which is a different model, not a thinner one.
     "claw_taper_ratio": (0.25, 1.0),
     "tread_depth_mm": (0.0, 4.0),
+    # Symmetric like the curvature, and for the same reason: the sign is a design choice
+    # (a trailing foot folds closed under drive torque, a leading one is levered open), not
+    # a magnitude with a direction bolted on. Zero is *inside* this range and means no foot,
+    # unlike `rim_thickness_mm` whose zero is a topology switch outside its range — here the
+    # plain radial claw is the continuous limit of a shortening foot, not a different animal.
+    #
+    # The magnitude bound is loose on purpose. What actually limits a foot is the arc to the
+    # next claw, which is `2 pi R / n` and runs from 31 mm (R 60, twelve claws) to 209 mm
+    # (R 100, three) — no scalar can express that, so `hook_reach` and `interspoke_gap` do it
+    # exactly and this only keeps the search inside printable, meshable sizes.
+    "tip_hook_mm": (-40.0, 40.0),
 }

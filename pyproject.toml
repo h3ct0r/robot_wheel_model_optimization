@@ -47,6 +47,14 @@ sim = [
 viz = [
   "matplotlib>=3.8",
 ]
+# The experiment store (`wheelopt.store`). Optional because a worker only has to *produce*
+# rows; collecting and querying them is the campaign driver's job, and a screening-only
+# machine should not need an analytics stack. pyarrow writes the Parquet, duckdb reads it —
+# separate imports, so a writer-only install could carry pyarrow alone.
+store = [
+  "duckdb>=1.0",
+  "pyarrow>=15",
+]
 dev = [
   "ruff",
   "pytest",

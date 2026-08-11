@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import tempfile
 import unittest
+from dataclasses import replace
 from pathlib import Path
 
 import numpy as np
@@ -213,6 +214,131 @@ class TestSectionDrawing(unittest.TestCase):
         self.assertLessEqual(lo, -PARAMS.outer_radius_mm)
         self.assertGreaterEqual(hi, PARAMS.outer_radius_mm)
         plt.close(fig)
+
+
+@needs_mpl
+class TestProfileDrawing(unittest.TestCase):
+    """The axial section. It exists because two parameters are invisible in the other view."""
+
+    def axes(self):
+        import matplotlib
+
+        matplotlib.use("Agg")
+        import matplotlib.pyplot as plt
+
+        return plt, *plt.subplots()
+
+    @staticmethod
+    def corners(patch) -> np.ndarray:
+        """Data-space vertices of any patch — the drawing mixes Rectangle and Polygon, and
+        `get_x`/`get_width` exist only on the first."""
+        return patch.get_path().transformed(patch.get_patch_transform()).vertices
+
+    def extent(self, ax) -> tuple[float, float]:
+        """Widest and tallest patch extent actually drawn, mm."""
+        points = np.vstack([self.corners(p) for p in ax.patches])
+        low, high = points.min(axis=0), points.max(axis=0)
+        return float(high[0] - low[0]), float(high[1] - low[1])
+
+    def area(self, ax) -> float:
+        """Total drawn area by the shoelace formula, mm². Works on either patch type, and on
+        a grooved outline, which is one polygon rather than a stack of boxes."""
+        total = 0.0
+        for patch in ax.patches:
+            x, y = self.corners(patch).T
+            total += 0.5 * abs(float(np.dot(x, np.roll(y, -1)) - np.dot(y, np.roll(x, -1))))
+        return total
+
+    def test_width_changes_the_drawing_and_the_mid_plane_view_does_not(self):
+        """The whole reason this function exists. If a width sweep were drawn with
+        `draw_wheel_section` every panel would be identical, which reads as "this parameter
+        does nothing" — the project's recurring failure, in a figure instead of a value."""
+        from wheelopt.viz import draw_wheel_profile, draw_wheel_section
+
+        narrow = replace(PARAMS, width_mm=20.0)
+        wide = replace(PARAMS, width_mm=60.0)
+
+        plt, fig, ax = self.axes()
+        draw_wheel_profile(ax, narrow, annotate=False)
+        thin_w, thin_h = self.extent(ax)
+        plt.close(fig)
+
+        plt, fig, ax = self.axes()
+        draw_wheel_profile(ax, wide, annotate=False)
+        wide_w, wide_h = self.extent(ax)
+        plt.close(fig)
+
+        self.assertAlmostEqual(wide_w / thin_w, 3.0, places=6)
+        self.assertAlmostEqual(wide_h, thin_h, places=9, msg="radius must not move")
+
+        # ...and the mid-plane view is genuinely blind to it, which is the premise.
+        spans = []
+        for params in (narrow, wide):
+            plt, fig, ax = self.axes()
+            draw_wheel_section(ax, params, annotate=False)
+            spans.append(ax.get_xlim())
+            plt.close(fig)
+        self.assertEqual(spans[0], spans[1])
+
+    def test_the_tread_grooves_are_the_ones_the_solid_actually_gets(self):
+        """`TREAD_GROOVES` mirrors a count inside `compliant_spoke._cut_tread`, which needs
+        OCCT and so cannot be imported here. A mirrored constant drifts; this reads the number
+        back out of the source rather than trusting the copy."""
+        import re
+
+        from wheelopt.viz import TREAD_GROOVES
+
+        source = (Path(__file__).resolve().parents[1]
+                  / "src" / "wheelopt" / "cad" / "compliant_spoke.py").read_text()
+        found = re.search(r"n_grooves\s*=\s*(\d+)", source)
+        self.assertIsNotNone(found, "the groove count moved; update TREAD_GROOVES")
+        self.assertEqual(int(found.group(1)), TREAD_GROOVES)
+
+    def test_a_deeper_groove_removes_material_rather_than_adding_a_shape(self):
+        """A groove is a cut. The drawn area must fall as the depth rises — the opposite
+        would be a picture of a tread that stands proud of the tyre."""
+        from wheelopt.viz import draw_wheel_profile
+
+        areas = []
+        for depth in (0.0, 1.0, 3.0):
+            plt, fig, ax = self.axes()
+            draw_wheel_profile(ax, replace(PARAMS, tread_depth_mm=depth), annotate=False)
+            areas.append(self.area(ax))
+            plt.close(fig)
+        self.assertGreater(areas[0], areas[1])
+        self.assertGreater(areas[1], areas[2])
+
+    def test_a_bandless_wheel_still_gets_its_tread_cut(self):
+        """Caught by this test, and it was wrong in the first version. `_cut_tread` is gated on
+        `tread_depth_mm` alone, not on the band, so a bandless design with tread has grooves —
+        and the drawing did not. A picture missing a feature the part has is the same failure
+        as a value that is quietly zero."""
+        from wheelopt.viz import draw_wheel_profile
+
+        areas = []
+        for depth in (0.0, 2.0):
+            plt, fig, ax = self.axes()
+            draw_wheel_profile(ax, replace(PARAMS, rim_thickness_mm=0.0,
+                                           tread_depth_mm=depth), annotate=False)
+            areas.append(self.area(ax))
+            plt.close(fig)
+        self.assertGreater(areas[0], areas[1])
+
+    def test_the_running_surface_is_marked_where_there_is_no_material_on_it(self):
+        """Bandless, the block ends at the tips and the ground plane is a dashed line, exactly
+        as the mid-plane view draws a dashed circle. Banded, the material reaches the surface
+        and no such line is drawn."""
+        from wheelopt.viz import draw_wheel_profile
+
+        dashed = []
+        for rim in (0.0, 3.0):
+            plt, fig, ax = self.axes()
+            draw_wheel_profile(ax, replace(PARAMS, rim_thickness_mm=rim), annotate=False)
+            at_surface = [line for line in ax.lines
+                          if abs(abs(line.get_ydata()[0]) - PARAMS.outer_radius_mm) < 1e-9]
+            dashed.append(len(at_surface))
+            plt.close(fig)
+        self.assertEqual(dashed, [2, 0], "one line per side, bandless only")
 
 
 if __name__ == "__main__":

@@ -36,9 +36,9 @@ from wheelopt.cad.cli import (
     material_from_args,
     params_from_args,
 )
-from wheelopt.fea.loadcase import LoadCase, LoadCaseKind, MeshSpec, SolverSpec
-from wheelopt.rom.fit import fit_spring_law, fit_tabulated_law
-from wheelopt.rom.ring import ring_for_design, second_contact_delta_m, solve_equilibrium
+from wheelopt.fea.loadcase import LoadCase
+from wheelopt.rom.build import build_ring, measure_tangential_law
+from wheelopt.rom.ring import second_contact_delta_m, solve_equilibrium
 from wheelopt.sim.step_climb import judge_signatures, loaded_radius_table
 
 TINY = {"radius": 60.0, "width": 30.0, "spokes": 6, "thickness": 5.0,
@@ -50,10 +50,19 @@ def build_parser() -> argparse.ArgumentParser:
     add_geometry_args(p)
     add_material_args(p)
     p.add_argument("--tiny", action="store_true", help="the debug design, matching run_rom")
-    p.add_argument("--segments", type=int, default=24)
-    p.add_argument("--delta-max", type=float, default=0.006)
-    p.add_argument("--n-points", type=int, default=6)
-    p.add_argument("--plane-strain", action="store_true")
+    p.add_argument("--segments", type=int, default=24,
+                   help="ring resolution. Ignored by --law claw, where the segments are "
+                        "the claws and the count is --spokes")
+    p.add_argument("--delta-max", type=float, default=0.006, metavar="METRES",
+                   help="how deep the FEA presses the wheel, METRES (not mm, unlike every "
+                        "geometry flag)")
+    p.add_argument("--n-points", type=int, default=6,
+                   help="samples per branch of the FEA load sweep. Too few cannot resolve "
+                        "a curve that peaks early -- 3 intervals on a claw give 10.4% RMS "
+                        "where 4 give 1.7%")
+    p.add_argument("--plane-strain", action="store_true",
+                   help="use the 2-D screening FEA tier -- seconds instead of hours. The "
+                        "3-D tier is the reference and cannot see lateral spoke buckling")
     p.add_argument("--law", choices=("cubic", "table", "claw"), default="cubic",
                    help="where the segment law comes from. 'cubic' and 'table' both "
                         "deconvolve the whole-wheel plate curve into segment laws; 'claw' "
@@ -85,76 +94,28 @@ def build_parser() -> argparse.ArgumentParser:
                         "default in metres is one claw length on exactly one design")
     p.add_argument("--sweep", action="store_true",
                    help="also find the tallest step each wheel clears (slow: ~10 runs each)")
-    p.add_argument("--cache", type=Path, default=REPO_ROOT / "data" / "cache" / "fea")
-    p.add_argument("--threads", type=int, default=4)
+    p.add_argument("--cache", type=Path, default=REPO_ROOT / "data" / "cache" / "fea",
+                   help="content-addressed FEA cache. A hit is seconds, a miss is minutes")
+    p.add_argument("--threads", type=int, default=4,
+                   help="CalculiX threads. Changes how long the answer takes, not what it "
+                        "is, so it is excluded from the cache key")
     return p
-
-
-def _plate_curve(args, params, material, *, claw_sector: bool):
-    """One RADIAL_FLAT sweep. Returns (delta, force) or (None, message)."""
-    # One contact penalty for both tiers since #12 (2026-08-09): the plane-strain tier used
-    # to need a hand-softened factor of 5 where the 3-D tier ran at the default 20, and 5 is
-    # now the default because it costs 0.7-0.8% of the answer on the 3-D tier and buys the
-    # conditioning outright. Only the mesh differs.
-    mesh = (MeshSpec(dimension=2, size_spoke_m=0.0025, size_rim_m=0.003, size_hub_m=0.002,
-                     claw_sector=claw_sector)
-            if args.plane_strain or claw_sector
-            else MeshSpec(size_spoke_m=0.008, size_rim_m=0.010, size_hub_m=0.010))
-
-    from wheelopt.fea.runner import run_load_case
-
-    case = LoadCase(kind=LoadCaseKind.RADIAL_FLAT, delta_max_m=args.delta_max,
-                    n_points_per_branch=args.n_points)
-    result = run_load_case(params, material, case, mesh_spec=mesh,
-                           solver=SolverSpec(n_threads=args.threads),
-                           cache_root=args.cache)
-    if not result.ok:
-        return None, f"{result.status.value}: {result.message}"
-    loading = result.curve.loading
-    return (result.curve.delta_m[loading], result.curve.force_n[loading]), None
 
 
 def _fit_the_ring(args):
     """FEA -> ring. Returns (spec, fit) or (None, message).
 
-    Two routes, and `--law claw` is the one with no fit in it. The fitters deconvolve the
-    whole-wheel curve, where every δ mixes several segment compressions; the claw route
-    measures one claw on the same plate and uses that curve as the segment law, which for a
-    bandless wheel is the definition of a segment rather than an approximation to one. The
-    whole-wheel curve is still run, but it becomes a **held-out** check instead of training
-    data — see `wheelopt.rom.fit.validate_ring`.
+    The chain itself lives in `wheelopt.rom.build` so that this script and `run_rover.py`
+    cannot drift into building different rings from the same flags — the same argument that
+    put the geometry flags in `cad/cli.py` and the digest in `hashing.py`.
     """
-    params = params_from_args(args)
-    material = material_from_args(args)
-    # Refused before either sweep runs, not after the first one: a banded design would
-    # otherwise pay for a whole-wheel solve and then be told the flag was never applicable.
-    if args.law == "claw" and params.has_shear_band:
-        return None, ("--law claw needs a bandless design: with a band the claws share load "
-                      f"through it and one claw's curve is not a segment law. "
-                      f"rim_thickness_mm is {params.rim_thickness_mm:g}")
-
-    curve, message = _plate_curve(args, params, material, claw_sector=False)
-    if curve is None:
-        return None, message
-    delta, force = curve
-
-    if args.law != "claw":
-        spec = ring_for_design(params, material, n_segments=args.segments)
-        fit = (fit_spring_law(spec, delta, force) if args.law == "cubic"
-               else fit_tabulated_law(spec, delta, force))
-        return (spec, fit), None
-
-    claw, message = _plate_curve(args, params, material, claw_sector=True)
-    if claw is None:
-        return None, f"claw sector: {message}"
-    from wheelopt.rom.fit import ring_from_claw_curve, validate_ring
-
-    try:
-        spec, law = ring_from_claw_curve(params, *claw)
-        fit = validate_ring(spec, law, delta, force)
-    except Exception as exc:  # noqa: BLE001 - a bad curve is a result, not a crash
-        return None, f"{type(exc).__name__}: {exc}"
-    return (spec, fit), None
+    built = build_ring(
+        params_from_args(args), material_from_args(args),
+        law=args.law, n_segments=args.segments, plane_strain=args.plane_strain,
+        delta_max_m=args.delta_max, n_points=args.n_points,
+        cache_root=args.cache, n_threads=args.threads,
+    )
+    return ((built.spec, built.fit), None) if built.ok else (None, built.message)
 
 
 
@@ -165,55 +126,12 @@ def _tangential_max_m(args, spec) -> float:
 
 
 def _measure_tangential_law(args, spec):
-    """The claw's own tangential curve, as a law for ``args.tangential``.
-
-    Measured rather than chosen (invariant 2), and **tabulated rather than a stiffness**: the
-    claw stiffens 3.6x in secant and 13x in tangent between 4 mm and one claw length, because
-    it rotates toward the load and starts carrying it axially instead of in bending. A single
-    ``k_t`` is only the first 10 mm of that curve, and drive torque takes it far past there.
-
-    One sweep, two readings. As a *slide* law it is force against tip travel, straight off the
-    solver; as a *hinge* law it is moment against root rotation, the same points in different
-    coordinates. Returns ``(law, kinematics, message)`` where ``kinematics`` is the measured
-    versus predicted inward tip travel -- the check from outside the ROM that says whether the
-    hinge idealisation describes this claw at all, and ``None`` if the solver did not report
-    the free axis.
-    """
-    from wheelopt.fea.runner import run_load_case
-    from wheelopt.rom.fit import (
-        hinge_kinematics_check,
-        hinge_law_from_tip_curve,
-        law_from_claw_curve,
+    """The claw's own tangential curve, as a law for ``args.tangential``. See `rom.build`."""
+    return measure_tangential_law(
+        params_from_args(args), material_from_args(args), spec,
+        element=args.tangential, sweep_max_m=_tangential_max_m(args, spec),
+        cache_root=args.cache, n_threads=args.threads,
     )
-
-    params = params_from_args(args)
-    material = material_from_args(args)
-    mesh = MeshSpec(dimension=2, size_spoke_m=0.0025, size_rim_m=0.003, size_hub_m=0.002,
-                    claw_sector=True)
-    case = LoadCase(kind=LoadCaseKind.TIP_TANGENTIAL, delta_max_m=_tangential_max_m(args, spec),
-                    n_points_per_branch=10, friction_mu=0.0)
-    result = run_load_case(params, material, case, mesh_spec=mesh,
-                           solver=SolverSpec(n_threads=args.threads),
-                           cache_root=args.cache)
-    if not result.ok:
-        return None, None, f"{result.status.value}: {result.message}"
-    load = result.curve.loading
-    delta, force = result.curve.delta_m[load], result.curve.force_n[load]
-    try:
-        if args.tangential == "hinge":
-            law = hinge_law_from_tip_curve(delta, force, spec.claw_length_m)
-        else:
-            law = law_from_claw_curve(delta, force)
-    except Exception as exc:  # noqa: BLE001 - a bad curve is a result, not a crash
-        return None, None, f"{type(exc).__name__}: {exc}"
-
-    kinematics = None
-    if result.curve.cross_delta_m is not None:
-        keep = delta > 0.0
-        kinematics = hinge_kinematics_check(
-            delta[keep], result.curve.cross_delta_m[load][keep], spec.claw_length_m
-        )
-    return law, kinematics, ""
 
 
 def main(argv: list[str] | None = None) -> int:

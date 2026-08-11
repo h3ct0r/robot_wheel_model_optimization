@@ -23,16 +23,14 @@ wrong for contact stiffness and the increment controls.
 
 from __future__ import annotations
 
-import hashlib
-import json
-from dataclasses import asdict, is_dataclass
-from enum import Enum
 from pathlib import Path
 from typing import Any
 
 from ..cad.export import PIPELINE_VERSION as CAD_PIPELINE_VERSION
 from ..cad.materials import MaterialSpec
 from ..cad.params import WheelParams
+from ..hashing import content_digest
+from ..hashing import plain as _plain
 from . import FEA_PIPELINE_VERSION
 from .hyperelastic import HyperelasticModel
 from .loadcase import LoadCase, MeshSpec, SolverSpec
@@ -44,22 +42,6 @@ __all__ = ["fea_cache_key", "cache_dir_for", "SOLVER_UNKNOWN", "SOLVER_TIMING_ON
 #: meaningful on a machine that cannot solve anything. Results computed under this identity
 #: are never *stored*; see :mod:`wheelopt.fea.runner`.
 SOLVER_UNKNOWN = "solver-unknown"
-
-
-def _plain(value: Any) -> Any:
-    """Reduce a value to something ``json.dumps`` will order deterministically."""
-    if isinstance(value, Enum):
-        return value.value
-    if is_dataclass(value) and not isinstance(value, type):
-        return {k: _plain(v) for k, v in sorted(asdict(value).items())}
-    if isinstance(value, dict):
-        return {str(k): _plain(v) for k, v in sorted(value.items())}
-    if isinstance(value, (list, tuple)):
-        return [_plain(v) for v in value]
-    if isinstance(value, float):
-        # Normalise -0.0 to 0.0 so an innocuous sign difference cannot split the cache.
-        return value + 0.0
-    return value
 
 
 #: ``SolverSpec`` fields that genuinely only change how long the answer takes. Everything
@@ -113,8 +95,7 @@ def fea_cache_key(
         "solver": solver_identity,
         "solver_settings": _solver_physics(solver),
     }
-    blob = json.dumps(payload, sort_keys=True, separators=(",", ":"))
-    return hashlib.sha256(blob.encode()).hexdigest()[:16]
+    return content_digest(payload)
 
 
 def cache_dir_for(cache_root: Path, key: str) -> Path:

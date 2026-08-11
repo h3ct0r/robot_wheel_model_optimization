@@ -110,8 +110,8 @@ operating_point:
   payload_range: [0.0, 3.0]         # kg, additional payload
 
 manufacturing:
-  printer: ender-3-class            # 0.4 mm nozzle, direct-drive conversion
-  bed_size: [0.220, 0.220, 0.250]   # m. Now also PlatformLimits.bed_size_mm.
+  printer: bambulab-x1c            # 0.4 mm nozzle, direct-drive conversion
+  bed_size: [0.250, 0.225, 0.250]   # m. Now also PlatformLimits.bed_size_mm.
   nozzle_diameter: 0.0004           # m
   extruder: direct-drive            # TPU requires direct-drive
   max_print_time_hours: 24          # a 200 mm TPU wheel is an overnight print

@@ -82,6 +82,12 @@ and re-run the comparison at matched mass, radius and rotational inertia, as the
 rig already does. Expect it to be slow: four rings is 4x the segment bodies and joints on a
 timestep already tightened by the explicit-integration bound.
 
+**And the metric it was going to be measured with does not discriminate.** 2026-08-10: on
+`--sweep`, a 3-claw wheel, a 6-claw, a 12-claw and a plain rigid cylinder **all clear exactly
+1.00 R** at R 60 mm. Four different wheels, one answer, in 10 mm buckets. So #30 needs a
+metric before it needs a law — the flat-ground harshness of #33 does separate the same four
+designs 4.5x, and cost of transport separates them 12x.
+
 **Blocked on #31** for a law valid over what a rover does to a wheel — #29 closed by giving
 the claw ring an exact law below second-claw engagement and showing that the element, not the
 law, is what fails above it. Also blocked on the three gaps the rover's module docstring names,
@@ -141,6 +147,106 @@ date. Three things came out of it:
   spread from the segment law alone.
 
 What is left is not a fitting problem and has its own number: **#31**.
+
+### #33 — Ride harshness is measured on flat ground only, where a rigid wheel cannot lose
+
+Opened 2026-08-10 by wiring up objective 3. See the log entry of that date for the numbers.
+
+`run_rover.py --obstacle-height 0` now measures RMS vertical chassis acceleration, and it
+**does** rank wheels where step climb on the rover does not: 22.64 / 10.31 / 5.00 m/s² for 3 /
+6 / 12 claws, against a single saturated 1.00 R for all of them plus the rigid cylinder on the
+climb sweep. Two independent analytic companions — the closed-form polygon drop and the ring's
+loaded ripple — track it.
+
+**What is missing is the scenario where compliance wins rather than loses by less.** On a
+smooth plane a smooth rigid cylinder reads 0.00 m/s² and cannot be beaten; every compliant
+wheel is scored on how close it gets back to a wheel nobody can print. `08-metrics.md` asks S7
+for a **washboard** — sinusoidal ripple swept over amplitude and wavelength — which is where
+the sign is supposed to reverse, and nothing here demonstrates that it does.
+
+**Work.** Add the S7 terrain to `sim/rover.py` (a strip of boxes, or a heightfield), sweep
+amplitude and wavelength, and check whether a compliant wheel beats the rigid comparator at
+any point in that space. If it does not, that is a result about the ROM's damping — every
+cost-of-transport and harshness number is a statement about `TPU_LOSS_FACTOR = 0.15`, a
+literature midpoint on a 0.05–0.30 span with no DMA behind it.
+
+**Also open, smaller.** The metric is quoted at one speed, and harshness scales with speed;
+`tip_frequency_hz` is reported alongside it so the two are not confused, but nothing sweeps
+speed yet. And a wheel with few claws needs its segment law measured over its own polygon
+drop — 30 mm for 3 tips at R 60 — which the FEA currently **cannot** reach: it diverges at 10
+cutbacks by 20 mm. The `EXTRAPOLATED` warning is honest about it; widening 12 → 18 mm moved the
+answer 8%, so the ranking is safe and the second digit is not.
+
+### #35 — The L claw exists in CAD and cannot be simulated
+
+Opened 2026-08-11 with the `T7L` topology itself. See `04-design-space.md` §`T7L`.
+
+`tip_hook_mm` puts a tangential foot on the claw tip. The geometry is built, screened, drawn
+and meshed — `verify_cad.py` is 60/60 with a new section 11, and the 2-D FEA tier solves a
+12 mm foot on the R 60 twelve-claw design end to end. **What cannot be done with it is the
+thing the wheel is for.**
+
+The ring ROM loads each segment at a point along its own radius, through either a radial slide
+or a root hinge. A foot's whole purpose is that it does *not* do that: it beds along an arc, and
+the load moves along the foot as the wheel rolls. So `run_step.py --law claw` and
+`run_rover.py --compliant` will build a ring for a `T7L` design and that ring will describe a
+radial claw of the same length — silently, because nothing in the pipeline knows the difference.
+
+This is **#31 arriving by design rather than by accident**, and it makes #31 harder to defer:
+for `T7` the flank contact was an error above second-claw engagement, and for `T7L` it is the
+first-order behaviour at any load.
+
+**The refusal has landed.** `rom.build.build_ring` turns an L claw away by name, before any
+solver time, and names this item in the message; `run_step.py --law claw` and `run_rover.py
+--compliant` therefore stop rather than produce a number about a different wheel. Three tests
+pin it, including that a footless design is still turned away for its *band* and not for a foot
+it does not have.
+
+**What is left is the element, and it is a decision before it is code.** Extend the segment so
+a claw can carry a distributed contact — a capsule whose *side* is the collision surface is the
+cheap version, and the rover already draws segments as capsules — or keep the refusal and treat
+`T7L` as a CAD/FEA-only family. Measure before choosing.
+
+Two smaller things travel with it, both easy to miss:
+
+- **Nothing measures the sign.** A trailing foot folds closed under drive torque and a leading
+  one is levered open; the field is signed, both are buildable, and no experiment separates them.
+- **An early FEA observation, not yet a result.** At R 60, twelve claws, taper 0.6, plane
+  strain: the 12 mm foot completes its sweep (90 increments, buckling limit point at 30.9 N)
+  while the *plain* claw at the same settings **diverges**. One design each, so it is a note
+  rather than a finding — but if it holds, a spread contact is easier on the contact solver as
+  well as on the ride, and that would be worth knowing before choosing the element above.
+
+### #34 — `rim_thickness_mm`'s lower bound is below the TPU wall, and unlike the spoke's, nothing says why
+
+Opened 2026-08-10 by `scripts/plot_geometry.py`, which draws each parameter across its own
+range and puts the screening verdict under every panel. Two ranges come out red at their
+searched lower bound. **One of the two is deliberate and documented; the other is not, and
+that asymmetry is the item.**
+
+`PARAM_BOUNDS["rim_thickness_mm"]` and `PARAM_BOUNDS["spoke_thickness_mm"]` are both
+**(1.2, 8.0)** while `PlatformLimits.min_wall_thickness_tpu_mm` is **1.6** — 1.2 being the
+*rigid* wall. Measured at R 60 with both fields set together: 1.2 and 1.5 each return two
+`INFEASIBLE` violations, 2.0 is clean.
+
+For the spoke this is on purpose. `params.py` says so in place: the bound sits below the wall
+"so that `spoke_min_wall` stays a live check rather than being made unreachable by the range".
+That is a real argument — a constraint no sample can violate is a constraint that has stopped
+testing anything — and it is a trade against wasted evaluations, not an oversight.
+
+`rim_thickness_mm` carries no such note. It may be the same reasoning applied twice, or it may
+be the spoke's bound copied. **The work is to decide and write it down**, not to move a number:
+either record the same rationale for the rim, or raise the rim's floor to the wall. If the
+rationale is the right one it should also be stated once, in `04-design-space.md`, rather than
+in a comment on one of the two fields.
+
+**Worth measuring either way:** what fraction of a real search's samples land in the
+unreachable band, which is the cost the rationale is being traded against. Nothing is searching
+yet, so nobody has paid it.
+
+The same figures show two bounds infeasible at the *top* — `n_spokes` 24 and 36 hit
+`interspoke_gap`, `tread_depth_mm` 4 exceeds a 3 mm band. Those are honestly design-dependent:
+they follow from radius, thickness and band, and a scalar bound cannot know them.
 
 ### #28 — The slenderness threshold of 40 is far too permissive for a claw
 
@@ -209,9 +315,14 @@ place.
 - **Skid steer scrubs, and that is not validated.** Four non-steered wheels cannot turn without
   sliding sideways, and lateral scrub of a segmented capsule ring has never been compared
   against anything. Only straight-line driving is supplied.
-- **Phase 0 is not finished.** DuckDB store, Hydra wiring, CoACD→MJCF, scenario S1, CI on
-  three designs under five minutes, and the determinism gate are all untouched — the ROM
-  feasibility spike consumed the attention. `docs/plan/11-phases.md`.
+- **Phase 0 is part done, as of 2026-08-10.** Landed: the store (`wheelopt.store`, append-only
+  Parquet + DuckDB), the metrics layer (`metrics.aggregate` CVaR-25%, `metrics.threshold` the
+  logistic P=0.9 height), and **scenario S1 end to end** (`sim.s1_step`, `scripts/run_s1.py`) —
+  80 runs in 23 s giving 44.7 ± 9.1 mm on rigid R 85 wheels. The determinism gate runs and
+  passes **on one machine**: 80 repeated `run_id`s, zero disagreements.
+  Still open: `T0` in the CAD layer, CoACD→MJCF, Hydra wiring, CI on three designs under five
+  minutes, and the gate's actual claim — *two machines, two days apart*, which nothing has
+  tested. `docs/plan/11-phases.md`.
 
 ---
 

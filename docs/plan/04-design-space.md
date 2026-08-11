@@ -11,6 +11,7 @@
 | **`T4`** | **Monolithic TPU** | **TPU throughout** | Stiffness tuned by infill density/pattern and wall count |
 | **`T5`** | **Compliant spoke + lugs** | **TPU** | Conformity plus positive engagement — likely the actual winner for obstacles |
 | **`T7`** | **Compliant claw (linear)** | **TPU throughout** | Tapered free-tip fingers from the hub, no band. `T3b` with a taper. **The direction from 2026-08-08** |
+| **`T7L`** | **Compliant claw (L)** | **TPU throughout** | `T7` with a tangential **foot** at the tip: a radial leg, a filleted right angle, and a pad lying along the running surface. `tip_hook_mm != 0`. Added 2026-08-11 |
 | `T8` | Linkage claw | TPU + pins | Claws driven by a motion-reversing linkage. PaTS-Wheel's own category. Later |
 | `T9` | Pivot claw | TPU + pins | Claws hinged at the hub rim. The commonest passive prior art. Later |
 | `T6` | Soft tread on rigid hub | PLA hub + TPU tyre | Cheap-to-model comparator; localised deformation only. **Fallback family if the ROM gate fails** |
@@ -56,12 +57,78 @@ the root and is knowingly wrong for a taper** — it understates slenderness and
 accepting a claw that buckles. Picking the right effective section for a tapered cantilever is
 buckling physics, not a pre-filter tweak; it is flagged in the code and left to FEA.
 
-### Known gap: `n_spokes` bottoms out at 6
+### `T7L` — the L claw: a foot on the tip
 
-The Linear Claw figure has four. `PARAM_BOUNDS["n_spokes"] = (6, 36)` rejects it, and that
-bound was set for a *banded* wheel where many thin spokes are cheap. Fewer, longer, thicker
-claws are the whole point of the family. The bound needs re-deriving from the claw load case
-before `T7` is searched, not widened by fiat.
+Added 2026-08-11. `tip_hook_mm` bends the last part of the claw through a right angle so it
+lies along the running surface: a radial **leg**, a filleted **bend**, and a tangential
+**foot**. Zero — the default — is `T7` unchanged, and a zero-length foot is the continuous
+limit of a shortening one, so this is a parameter rather than a topology switch (unlike
+`rim_thickness_mm`, whose zero really is one).
+
+| Parameter | Range | Notes |
+|---|---|---|
+| `tip_hook_mm` | −40 to +40 | Arc length of the foot along the running surface. **Signed**: which way the foot points. 0 is the plain radial claw |
+
+**What it is for.** A radial claw touches at a point, so a bandless wheel is a polygon and its
+axle drops `R(1 − cos π/n)` once per tip — measured as ride harshness on 2026-08-10, where a
+3-claw wheel reads 22.6 m/s² RMS against a 12-claw wheel's 5.0. A foot spreads the contact over
+an arc `β = |tip_hook_mm| / R`, so the axle only falls across what is left between two feet and
+the closed form becomes `R(1 − cos(π/n − β/2))`. On R 60 with twelve claws a 12 mm foot takes
+the drop from **2.04 mm to 0.78 mm**, and `WheelParams.polygon_drop_mm` reads the field.
+
+**Signed, and the sign is a real design variable.** A foot that trails the leg is dragged onto
+the ground and folds closed under drive torque; one that leads it is levered open. Nothing in
+this project measures that difference yet, which is why both are expressible and neither is a
+default. Note that the mirror image of a claw flips **both** the foot and the curvature — the
+CAD battery pins this, because flipping the foot alone on a bowed leg gives a C against an S
+and the two differ in volume by 2.3e-5, which is exactly the size that gets waved through as
+tolerance.
+
+**The bend radius is load-bearing, not cosmetic.** The outline is the centreline offset by half
+the local thickness, and offsetting a corner of centreline radius `ρ` makes the inside face a
+circle of radius `ρ − h`: at `ρ = h` it collapses to a point and below it the polygon turns
+inside out. OCCT may refuse such a face — or accept it into a solid with a reversed patch whose
+volume is still plausible, which is the failure mode this project keeps finding. So
+`hook_bend_radius_mm` is `0.75 t_tip` against a half-thickness of `0.5 t_tip`, and
+`verify_cad.py` §11 checks the outline for self-intersection **independently of the kernel**.
+
+**The foot follows the circle, not a chord.** Built in polar rather than in the spoke's local
+Cartesian frame: a 20 mm straight foot on a 60 mm wheel stands 3.2 mm proud of the running
+surface, so it would pierce it and the outline clip would then eat it from outside until, on a
+tapered tip, the outline crossed itself.
+
+**What is done and what is not.** CAD, screening, the mid-plane figure and the 2-D FEA tier all
+handle it — everything reads `spoke_outline`, so it arrived downstream for free, and a 12 mm
+foot on the R 60 twelve-claw design meshes and solves. **The ring ROM does not.** Its segments
+carry load at a point along their own radius, which is precisely what a foot is not; this is
+`TODO.md` #31 — the flank-contact gap — arriving by design rather than by accident, and #35
+tracks what it means for `T7L`.
+
+### `n_spokes` bottoms out at 3, and the interesting limit is not the bound
+
+**Closed twice, in opposite directions, and both are worth keeping straight.**
+
+The original gap read: the Linear Claw figure has four spokes and the bound of 6 rejected it,
+so the bound needed re-deriving from the claw load case. **`TODO.md` #19 did that measurement
+and the answer was the other way round** — a *passive* claw wheel wants **more** tips, not
+fewer. Below about twelve it unloads a claw completely once per pitch, whatever the claw's
+stiffness, and the letter's four-claw row is only reachable because those claws are gear-driven
+rather than passive springs. So the bound was left alone and the claw-specific limit became a
+warning, `constraints.claw_ride_harshness`, which fires only when there is no band.
+
+It was lowered to **3** on 2026-08-10 for a different reason: to let the search space express a
+**deliberately bad** wheel. A design that a good one has to beat is worth more than a bound
+that admits only plausible wheels, and at three tips the axle drops `R(1 − cos 60°)` — half a
+radius, 30 mm on a 60 mm wheel — which is a genuinely terrible baseline rather than a
+marginally worse one. Nothing about #19's finding changed; it is still reported, loudly.
+
+**Three is the floor because below it the model stops meaning anything**, which is a different
+kind of limit from a search bound and is enforced in a different place. `polygon_drop_m` at
+one spoke is `R(1 − cos 180°)` = 2R, an axle dropping twice the wheel radius;
+`second_contact_delta_m` is `R(1 − cos 360°)` = **0**, which reads as "a second claw engages
+immediately" on a wheel that has no second claw. `RingSpec` therefore refuses fewer than three
+segments outright, and `check_design` calls one or two spokes `DEGENERATE` — geometry that
+cannot be built, not a design that scores badly.
 
 ## Shared geometric parameters
 

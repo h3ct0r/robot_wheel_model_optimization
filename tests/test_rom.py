@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import unittest
 from dataclasses import replace
+from pathlib import Path
 from types import MappingProxyType
 
 import numpy as np
@@ -2035,6 +2036,49 @@ class TestRideHarshness(unittest.TestCase):
         spec = RingSpec(radius_m=self.RADIUS, n_segments=12, root_radius_m=0.020)
         with self.assertRaises(ValueError):
             ride_height_ripple_m(spec, self.law(13.5), 0.0)
+
+
+class TestRingRefusesWhatItCannotRepresent(unittest.TestCase):
+    """`rom.build.build_ring` must say no before it spends a solver on an answer that would
+    be about a different wheel. Pure: the refusals happen ahead of any FEA."""
+
+    CLAW = WheelParams(outer_radius_mm=60.0, width_mm=45.0, rim_thickness_mm=0.0,
+                       n_spokes=12, spoke_thickness_mm=6.0, claw_taper_ratio=0.6,
+                       spoke_phase_deg=-90.0)
+
+    def build(self, params):
+        from wheelopt.rom.build import build_ring
+
+        return build_ring(params, MaterialSpec(name="TPU_95A", infill_density=0.4),
+                          law="claw", cache_root=Path("/nonexistent-cache"))
+
+    def test_an_l_claw_is_refused_rather_than_fitted(self):
+        """TODO #35. Every segment element here — radial slide and root hinge alike — carries
+        contact at a point on the segment's own radius. An L claw's foot beds along an arc, so
+        a ring built from one would run, produce a curve, and describe a plain radial claw of
+        the same length: a plausible number about a different wheel, which is the failure this
+        repo keeps finding."""
+        out = self.build(replace(self.CLAW, tip_hook_mm=12.0))
+        self.assertFalse(out.ok)
+        self.assertIn("tip_hook_mm", out.message)
+        self.assertIn("#35", out.message)
+
+    def test_the_refusal_costs_no_solver_time(self):
+        """It must fire before the FEA, or a refused design still burns minutes. The cache
+        root does not exist, so anything that reached the solver would fail differently."""
+        out = self.build(replace(self.CLAW, tip_hook_mm=-8.0))
+        self.assertFalse(out.ok)
+        self.assertEqual(out.solver_seconds, 0.0)
+
+    def test_a_footless_design_falls_through_to_the_other_guard(self):
+        """The guard keys on the foot, not on being a claw: `tip_hook_mm = 0` is the T7 design
+        every existing result was taken on and must pass through untouched. Shown against the
+        *band* guard, which is the other refusal that fires before any FEA — a footless banded
+        design has to be turned away for its band and not for a foot it does not have."""
+        out = self.build(replace(self.CLAW, rim_thickness_mm=3.0, tip_hook_mm=0.0))
+        self.assertFalse(out.ok)
+        self.assertIn("bandless", out.message)
+        self.assertNotIn("tip_hook_mm", out.message)
 
 
 if __name__ == "__main__":  # pragma: no cover

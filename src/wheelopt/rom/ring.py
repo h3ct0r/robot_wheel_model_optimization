@@ -917,8 +917,13 @@ def polygon_drop_m(radius_m: float, n_segments: int) -> float:
     factor of two inside a cosine. This one is about where the axle sits as the wheel turns;
     that one is about how many claws share a static load.
 
-    The rigid limit, and therefore an upper bound on the ripple a compliant wheel of the same
-    tip count shows: see :func:`ride_height_ripple_m` for what the compliance does to it.
+    The rigid limit — and **not** a bound on the compliant wheel's ripple, in either
+    direction. A stiff claw rides smoother than this because it deflects into the gap; a very
+    soft one rides *rougher*, because at deflections of a fifth of the radius the phase
+    changes how many claws carry the load and that swamps the geometry — measured at 4x this
+    value on an R 85 mm, 8-claw, 3.7 N/mm design. Use :func:`ride_height_ripple_m` for the
+    honest number; this one costs nothing and needs no law, which is why the millisecond
+    pre-filter in ``cad/constraints.py`` reports it.
     """
     if radius_m <= 0.0 or n_segments < 3:
         raise ValueError("need a positive radius and at least three tips")

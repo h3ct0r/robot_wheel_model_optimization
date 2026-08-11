@@ -12,6 +12,7 @@ against the actual solid.
 
 from __future__ import annotations
 
+import math
 from dataclasses import dataclass
 from enum import Enum
 
@@ -62,9 +63,15 @@ class PlatformLimits:
     #: Half of an 8 mm D-shaft. Four 24.5 N wheels with climbing torque need more than the
     #: 6 mm shaft a 4 kg robot would use.
     shaft_radius_mm: float = 4.0
-    #: Ender-3 class, matching `manufacturing.bed_size` in configs/robot.yaml. These two
-    #: used to disagree; the YAML is the one that describes the actual printer.
-    bed_size_mm: tuple[float, float, float] = (220.0, 220.0, 250.0)
+    #: Bambu Lab X1C, matching `manufacturing.bed_size` in configs/robot.yaml. These two
+    #: used to disagree; the YAML is the one that describes the actual printer, and
+    #: `tests/test_platform.py` fails the moment they drift again — which is how the move
+    #: from the 220x220 Ender-3 to this was caught.
+    #:
+    #: The binding number is the **smallest** dimension, 225 mm, because a wheel's bounding
+    #: box is 2R x 2R x width and it has to fit however it is oriented. So this caps the
+    #: radius at 112.5 mm, just above the 105 mm wheel well that binds first anyway.
+    bed_size_mm: tuple[float, float, float] = (250.0, 225.0, 250.0)
     #: Nozzle traversal clearance between adjacent spokes.
     min_interspoke_gap_mm: float = 2.0
     min_wall_thickness_tpu_mm: float = 1.6
@@ -269,6 +276,61 @@ def check_design(
                 )
             )
 
+    # --- the L claw's foot (family T7L) ------------------------------------------------
+    if params.tip_hook_mm != 0.0 and params.has_shear_band:
+        # Rejected rather than ignored. Silently dropping a field the caller set is this
+        # project's recurring failure — a value that does nothing and reads as though it did.
+        v.append(
+            _violation(
+                "hook_needs_bandless",
+                Severity.INFEASIBLE,
+                params.rim_thickness_mm,
+                0.0,
+                f"a {params.tip_hook_mm:+.1f} mm tip foot needs the tip to be free, and this "
+                f"design buries it in a {params.rim_thickness_mm:.1f} mm shear band. Set "
+                "--rim-thickness 0 for the bandless claw topology, or drop the foot",
+                lower_bound=False,
+            )
+        )
+    elif params.is_l_claw:
+        # The foot must reach the ground without reaching the *next* claw. `interspoke_gap`
+        # above measures the true clearance and is the binding check; this one exists because
+        # its message is about a nozzle, and a foot long enough to lap its neighbour is a
+        # different mistake that deserves to be named as one.
+        span = params.contact_arc_rad + math.asin(
+            min(params.hook_bend_radius_mm
+                / max(params.outer_radius_mm - params.hook_bend_radius_mm, 1e-9), 1.0)
+        )
+        if span >= params.spoke_pitch_angle_rad:
+            v.append(
+                _violation(
+                    "hook_reach",
+                    Severity.INFEASIBLE,
+                    math.degrees(span),
+                    math.degrees(params.spoke_pitch_angle_rad),
+                    f"the foot spans {math.degrees(span):.0f} deg of a "
+                    f"{math.degrees(params.spoke_pitch_angle_rad):.0f} deg pitch, so it laps "
+                    f"the next claw. Shorten it below "
+                    f"{params.spoke_pitch_angle_rad * params.outer_radius_mm:.0f} mm or use "
+                    "fewer claws",
+                    lower_bound=False,
+                )
+            )
+        if abs(params.tip_hook_mm) < params.tip_thickness_mm:
+            v.append(
+                _violation(
+                    "hook_too_short",
+                    Severity.WARNING,
+                    abs(params.tip_hook_mm),
+                    params.tip_thickness_mm,
+                    f"a {abs(params.tip_hook_mm):.1f} mm foot on a "
+                    f"{params.tip_thickness_mm:.1f} mm tip is a rounded corner rather than an "
+                    "L: the bend radius is capped at half the foot, so most of what was asked "
+                    "for is fillet. polygon_drop_mm still credits it for the arc",
+                    lower_bound=True,
+                )
+            )
+
     # Written as two branches rather than one comparison because with no shear band the
     # single comparison reads 0 >= 0 and rejects an untreaded design for cutting through a
     # band it does not have.
@@ -346,12 +408,13 @@ def check_design(
                 0.0,
                 0.0,
                 0.0,
-                # The patch is as wide as the material that touches the ground, which is the
-                # TIP. Quoting the root here was right only while every spoke was a uniform
-                # strut, and would have overstated the patch by 1/taper the moment a claw
-                # appeared -- 8.0 mm instead of 2.8 mm at taper 0.35.
-                f"no shear band: the {params.n_spokes} spoke tips are the running surface, "
-                f"so contact is discrete over {params.tip_thickness_mm:.1f} mm patches and "
+                # The patch is as wide as the material that touches the ground, and what that
+                # is has now changed twice: the root, then the tip once claws tapered, then
+                # the foot once claws became L-shaped. `contact_patch_mm` owns the question so
+                # there is no fourth time.
+                f"no shear band: the {params.n_spokes} spoke "
+                f"{'feet' if params.is_l_claw else 'tips'} are the running surface, so "
+                f"contact is discrete over {params.contact_patch_mm:.1f} mm patches and "
                 "depends on spoke_phase_deg; the ring ROM has no shear-band stiffness to fit",
             )
         )

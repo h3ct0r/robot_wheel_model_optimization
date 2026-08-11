@@ -35,6 +35,7 @@ Full setup, and why the first line is needed, is in [Environment](#environment) 
 | Path | Contents |
 |---|---|
 | [`docs/OVERVIEW.md`](docs/OVERVIEW.md) | **Start here** — plain-language summary and glossary |
+| [`docs/run_rover.md`](docs/run_rover.md) | Every `run_rover.py` flag, with figures — the whole robot at an obstacle |
 | [`CLAUDE.md`](CLAUDE.md) | Working context — current phase, invariants, conventions |
 | [`docs/plan/`](docs/plan/00-index.md) | The project plan, split into loadable sections |
 | [`docs/decisions/`](docs/decisions/README.md) | Architecture decision records |
@@ -140,6 +141,10 @@ untrustworthy carry a caution banner. Read the banner before quoting the number.
 ### Individual stages
 
 ```bash
+# What every geometry parameter does, one figure per parameter, with the screening
+# verdict under each design. Seconds, and needs no CAD kernel.
+python scripts/plot_geometry.py --contact-sheet
+
 # Screen a design without building geometry. Milliseconds, no OCCT.
 python scripts/gen_wheel.py --screen-only --spokes 14 --thickness 6.0
 
@@ -159,9 +164,17 @@ python scripts/run_rom.py --tiny --mujoco
 # Drive the fitted ring at a step beside a rigid wheel; judge the five signatures.
 python scripts/run_step.py --tiny --sweep
 
+# The whole robot — chassis, four driven wheels — at an obstacle, filmed.
+python scripts/run_rover.py --obstacle-height 80 --radius 85 --render
+
 # Render the step climb: GIF plus a compliant-vs-rigid contact sheet.
 python scripts/render_step.py --tiny
 ```
+
+`run_rover.py` has the largest flag surface of any entry point here — the obstacle, the
+platform, a whole wheel design, the FEA behind it, and the render. Every flag is documented
+with figures in **[`docs/run_rover.md`](docs/run_rover.md)**, including which flags are
+silently unused in the default rigid-cylinder mode.
 
 ### Verification batteries
 

@@ -89,7 +89,11 @@ class TestSpecMatchesCodeDefaults(unittest.TestCase):
         limits = SPEC.platform_limits()
         self.assertAlmostEqual(limits.wheel_well_radius_mm, 105.0)
         self.assertAlmostEqual(limits.shaft_radius_mm, 4.0)
-        self.assertEqual(limits.bed_size_mm, (220.0, 220.0, 250.0))
+        # Bambu Lab X1C. Stated in millimetres here on purpose: the YAML carries metres, so
+        # this is the check that the conversion happened at all rather than a value being
+        # copied across units. The printer changed from a 220x220 Ender-3 on 2026-08-10 and
+        # this assertion is what noticed the code default had not followed.
+        self.assertEqual(limits.bed_size_mm, (250.0, 225.0, 250.0))
 
     def test_search_bounds_agree(self):
         for field, bounds in SPEC.param_bounds().items():
