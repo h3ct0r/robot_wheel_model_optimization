@@ -53,6 +53,8 @@ __all__ = [
     "RunRecord",
     "RunStatus",
     "StoreError",
+    "compare_manifests",
+    "manifest_from_records",
     "pipeline_versions",
 ]
 
@@ -357,6 +359,69 @@ class ExperimentStore:
             "SELECT run_id, count(*) AS n FROM runs WHERE status = 'ok' "
             "GROUP BY run_id HAVING count(*) > 1 ORDER BY n DESC, run_id"
         )
+
+
+def manifest_from_records(records: Iterable[RunRecord]) -> dict[str, Any]:
+    """``run_id -> metrics`` for a batch of runs, as one JSON-serialisable dict.
+
+    The cross-machine half of the Phase 0 determinism gate (`11-phases.md`: *identical θ →
+    identical score on two machines, two days apart*). The store's own gate proves one
+    machine agrees with itself; a manifest is that claim made portable — machine A commits
+    what it measured, machine B re-runs the same ladder and compares. Pure records-in,
+    dict-out, so the comparing side needs neither DuckDB nor pyarrow.
+
+    Metrics only, not diagnostics: diagnostics carry wall-times and iteration counts, which
+    are honest machine-to-machine differences and not what the gate is about. Failed runs are
+    included with their status — a run that diverges on one machine and succeeds on the other
+    is the loudest possible disagreement, and dropping failures would hide exactly that.
+
+    Floats survive the JSON round trip bit-for-bit: ``json`` serialises them with ``repr``,
+    which is exact for float64, so equality below is equality of the numbers and not of a
+    formatting.
+    """
+    rows: dict[str, Any] = {}
+    versions: dict[str, str] = {}
+    for record in records:
+        rows[record.run_id] = {
+            "status": record.status.value,
+            "metrics": dict(sorted(record.metrics.items())),
+        }
+        versions.update(record.versions)
+    return {"schema": STORE_SCHEMA_VERSION, "versions": versions, "rows": rows}
+
+
+def compare_manifests(reference: Mapping[str, Any],
+                      candidate: Mapping[str, Any]) -> list[str]:
+    """Every way ``candidate`` disagrees with ``reference``, as human-readable lines.
+
+    Empty means the gate passed. Ordered so the most structural problem is named first: a
+    version skew explains every numeric difference after it, so reporting the numbers first
+    would send someone debugging arithmetic that was never run on the same code.
+    """
+    problems: list[str] = []
+    for key, ref in sorted(reference.get("versions", {}).items()):
+        got = candidate.get("versions", {}).get(key)
+        if got != ref:
+            problems.append(f"version skew: {key} is {got!r} against the reference {ref!r}")
+    ref_rows = reference.get("rows", {})
+    cand_rows = candidate.get("rows", {})
+    for run_id in sorted(set(ref_rows) - set(cand_rows)):
+        problems.append(f"missing run: {run_id} was never evaluated")
+    for run_id in sorted(set(cand_rows) - set(ref_rows)):
+        problems.append(f"extra run: {run_id} is not in the reference — the inputs differ, "
+                        "so this is two different experiments, not one repeated")
+    for run_id in sorted(set(ref_rows) & set(cand_rows)):
+        ref_row, cand_row = ref_rows[run_id], cand_rows[run_id]
+        if ref_row["status"] != cand_row["status"]:
+            problems.append(f"{run_id}: status {cand_row['status']!r} against "
+                            f"{ref_row['status']!r}")
+            continue
+        for name in sorted(set(ref_row["metrics"]) | set(cand_row["metrics"])):
+            a = ref_row["metrics"].get(name)
+            b = cand_row["metrics"].get(name)
+            if a != b:
+                problems.append(f"{run_id}: {name} = {b!r} against {a!r}")
+    return problems
 
 
 def _arrow():

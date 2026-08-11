@@ -24,7 +24,7 @@ from ..cad.materials import MaterialSpec
 from ..cad.params import WheelParams
 from ..fea.loadcase import LoadCase, LoadCaseKind, MeshSpec, SolverSpec
 from .fit import RingFit, ring_from_claw_curve, validate_ring
-from .ring import RadialLaw, RingSpec, ring_for_design
+from .ring import RadialLaw, RingSpec, ring_for_design, second_contact_delta_m
 
 __all__ = ["BuiltRing", "LawKind", "build_ring", "measure_tangential_law"]
 
@@ -55,6 +55,37 @@ class BuiltRing:
     @property
     def ok(self) -> bool:
         return self.spec is not None and self.fit is not None
+
+    @property
+    def validity_delta_m(self) -> float:
+        """Indentation beyond which this ring is **not validated**, metres.
+
+        Second-claw engagement (:func:`~wheelopt.rom.ring.second_contact_delta_m`). Below it a
+        bandless claw ring reproduces the FEA to 0.036% — the whole wheel *is* one claw, so
+        there is nothing to get wrong. Above it the two available elements straddle the FEA
+        from opposite sides, +74.7% with a radial slide and −45.6% with a root hinge, and no
+        choice of law repairs that because it is the element (``TODO.md`` #31).
+
+        Exposed as a number rather than left in a docstring so that callers can say how much
+        of a run was outside it. A limit nobody checks is a limit nobody keeps.
+        """
+        if self.spec is None or self.spec.is_coupled:
+            return float("inf")   # a banded ring is a different model with a different gap
+        return second_contact_delta_m(self.spec)
+
+    def validity_note(self, peak_delta_m: float | None = None) -> str:
+        """One line about where this ring is trustworthy, and whether a run left that range."""
+        limit = self.validity_delta_m
+        if not np.isfinite(limit):
+            return ""
+        line = f"valid to delta {limit * 1e3:.2f} mm (second-claw engagement)"
+        if peak_delta_m is None:
+            return line
+        if peak_delta_m <= limit:
+            return f"{line}; this run peaked at {peak_delta_m * 1e3:.2f} mm — inside it"
+        return (f"{line}; this run peaked at {peak_delta_m * 1e3:.2f} mm, "
+                f"{peak_delta_m / limit:.1f}x BEYOND it — the elements straddle the FEA by "
+                "+75%/-46% there (TODO #31)")
 
     @property
     def law(self) -> RadialLaw | None:

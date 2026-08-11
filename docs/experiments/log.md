@@ -3398,3 +3398,234 @@ time, and names #35. This is **#31 arriving by design rather than by accident**,
 
 **Gates.** `verify_cad.py` **60/60** (12 new checks, section 11). Unit suite **797/797**
 (14 new), ruff at the standing 71.
+
+---
+
+## 2026-08-11 — #31: the onset has a closed form, and it is not what was wrong
+
+`TODO.md` #31 opened with a discrepancy and no explanation: the FEA engages its second claw at
+**7.20 mm** where the ring's geometry says **8.04 mm**, and above that point the two available
+elements straddle the FEA from opposite sides, **+62.7%** (radial slide) and **−49.5%** (root
+hinge) at δ = 9.6 mm on the R 60 mm, twelve-claw, taper 0.6 design. The item's instruction to
+itself was *measure before choosing*. This is that measurement.
+
+### The onset: a tip is a corner
+
+A claw has thickness. Its deepest material is not the tip *centre* on the segment's own axis
+but the tip **corner**, half a thickness off it, whose downward extent is
+
+```
+   d(θ) = R cos θ + h sin|θ|          h = half the tip thickness
+```
+
+so a claw away from the contact point touches `h sin|θ|` of indentation **early**. On this
+design, `h = 1.8 mm` and `θ = 30°`:
+
+```
+   tip centre   R cos 30                 = 51.962 mm  ->  engages at 8.038 mm
+   tip CORNER   R cos 30 + h sin 30      = 52.862 mm  ->  engages at 7.138 mm
+   FEA                                                     7.200 mm
+```
+
+**7.138 against 7.200** — one FEA sample apart, on an effect of 0.84 mm. A check against a
+number this model did not produce, which is what the watch list asks of any model change.
+`RingSpec.tip_half_thickness_m` puts it in both solvers (`rom-0.7.0`); zero reproduces the
+point-tipped ring exactly, so only bandless specs built through `ring_for_design` /
+`ring_from_claw_curve` move.
+
+For the hinge the corner enters **twice** — the contact condition becomes
+`L − u = (c − h sin ψ)/cos ψ`, and the lever of a vertical force about the root becomes
+`(L − u) sin ψ − h cos ψ`, both from the same virtual work as the `h = 0` derivation with the
+contact point moved onto the corner that actually touches. The bracket's upper end,
+`arccos(c/L)` at `h = 0`, becomes `atan2(h, L) + arccos(c/√(L²+h²))`.
+
+### And it does not fix the straddle. That is the result.
+
+```
+   delta mm    FEA N    slide  before -> after     hinge  before -> after
+     7.20      36.64          -18.7%    -8.4%          -18.7%   -18.2%
+     8.40      52.61           -1.9%   +87.7%          -42.4%   -37.2%
+     9.60      64.90          +62.7%   +74.7%          -49.5%   -45.6%
+    10.80      74.98          +45.8%   +37.1%          -53.7%   -50.6%
+    12.00      87.06          +16.2%   +13.7%          -58.4%   -55.8%
+```
+
+The hinge improves uniformly, by 3–5 pp, and is still about half the truth. The slide gets
+**worse** — and that is the informative half: its −1.9% at 8.40 mm was a too-late onset partly
+cancelling a too-stiff element, so the old agreement was luck and removing the first error
+exposed the second. **Contact onset was never the cause.** The cause is *bedding*: a claw lies
+down along its flank, loaded in bending over a patch that travels down it as the wheel rolls,
+and no correction to a point-contact element reaches that.
+
+### A second source of truth, found by the correction failing to do anything
+
+The first version of this change moved the hinge's numbers and left the radial model's
+**byte-identical**. `solve_equilibrium` carried its own copy of the interference expression
+rather than calling `penetrations`, so only one of the two learned about the corner. A formula
+in two places is a formula that will disagree with itself, and this one did, silently, across a
+change that moved engagement by 0.9 mm. Both now go through `_interference`, and a test asserts
+they agree.
+
+### The bound, measured rather than asserted
+
+`BuiltRing.validity_delta_m` is second-claw engagement, and `RoverResult.multi_contact_fraction`
+is the share of a run in which some wheel had more than one claw carrying. Measured on the
+R 60 twelve-claw design:
+
+```
+   flat ground     >1 claw sharing   9% of the driving phase   peak compression   4.11 mm
+   40 mm step      >1 claw sharing   8%                        peak compression  21.98 mm
+```
+
+Two different failures, reported separately: sharing is about the **element** (+75%/−46% past
+one claw), compression is about the **law** (measured to 12 mm, so the step run extrapolates
+1.8x). A flat run is inside both. A step run is comfortably inside the first and well outside
+the second, which is the opposite of what the item's title would suggest.
+
+**The first version of that fraction read 70% and was wrong.** The threshold was an absolute
+1 µm of compression, which counts a claw still ringing down after it has left the ground. The
+static ring says this wheel carries on one claw at every phase but the half-pitch crossing —
+checked directly, 1 claw at 0 to 0.4 of a pitch and 2 at 0.5 — so a flat run cannot be 70%. The
+criterion is now a **share** of the deepest claw on the same wheel (10%), which is scale-free
+and reads 9%. Caught by comparing the sim against the static ring; it would have been quoted as
+a headline otherwise.
+
+**Gates.** Unit suite 809/809 (12 new), ruff at the standing 71. `rom-0.7.0`.
+
+---
+
+## 2026-08-11 — S7: on a washboard the sign reverses, and it is not close
+
+`TODO.md` #33 said the harshness objective had no scenario where compliance could *win* — flat
+ground scores every compliant wheel against a smooth rigid cylinder's unbeatable 0.00 m/s².
+S7's washboard now exists: `RoverSpec.washboard_amplitude_m` / `washboard_wavelength_m`,
+`run_rover.py --washboard --wavelength`.
+
+**Hypothesis, stated first:** on a corrugation a rigid wheel must follow the ground and a
+compliant one need not, so the compliant wheel should read lower — the reverse of every
+harshness comparison so far.
+
+### Result: 4.8-6.9x, everywhere in the sweep
+
+10 mm peak-to-trough, R 60 mm, matched mass, full throttle:
+
+```
+   wavelength      60 mm    100 mm    200 mm    400 mm
+   rigid           40.56     43.31     36.48     33.83   m/s2 RMS vertical
+   12-claw          6.43      6.27      6.20      7.10
+   ratio            6.3x      6.9x      5.9x      4.8x
+```
+
+Three things make it a result rather than a number. The compliant wheel is **not slower** —
+0.67–0.86 m/s against the rigid 0.61–0.78 — so it is not smooth by being slow, which is the
+first thing `mean_speed_m_s` exists to rule out. The metric still **ranks within the family**:
+the 3-claw wheel reads 10.04 against the 12-claw's 6.27, so bad compliance loses to good
+compliance on the same terrain. And the rigid wheel's own flat-to-washboard jump (0.00 → 43)
+shows the terrain is doing the forcing, not the solver.
+
+**The #31 machinery earned its keep on day one.** The compliant runs carry 20–53% of the
+driving phase with two claws sharing — the element-unvalidated regime — and at 60 mm wavelength
+the peak compression grazes 12.57 mm against a law measured to 12. Both are printed on the
+run's own output. So: **the sign is the result; the second digit is not.** The 6.9x could be
+4x or 10x when #31's element lands; it is very unlikely to be 1x, because the element errors
+straddle zero from both sides while the margin is a factor of several.
+
+### Construction notes, both of which are scenario-integrity guards
+
+**Boxes, not a heightfield.** An `hfield` wants its elevation data patched in *after*
+compilation through `model.hfield_data`, and `build_rover_mjcf`'s contract is that the string
+is the model. Eight boxes per wavelength puts the stair-step sampling error at 3.8% of the
+half-amplitude. Sub-half-millimetre slivers are skipped — they flicker in the contact solver.
+
+**The strip enters at a trough.** Starting at a crest puts a full-amplitude face at the entry,
+and the transient of hitting it would be charged to the corrugation — the scenario contributing
+the acceleration the wheel is being scored on, which is the same failure the flat-ground
+scenario guards against with its no-epsilon-step rule. A step and a washboard together are
+refused outright: S1 is the step and S7 is the corrugation, and nothing defines the mixture.
+
+Still open under #33: the amplitude x wavelength sweep proper (this is one amplitude), and
+terrain seeds over it for the CVaR aggregation.
+
+**Gates.** Unit suite 816/816 (7 new), ruff at the standing 71.
+
+---
+
+## 2026-08-11 — Phase 0 closes, and three small items with it: the gate goes cross-machine, #34, #28, #32
+
+Four pieces in one sitting, each small, none glamorous. Recorded together because they share a
+date and a theme: every one is a check being made real rather than asserted.
+
+### CI exists, and the cross-machine determinism gate is now a live experiment
+
+`.github/workflows/ci.yml`, two jobs. `tests` is the ordinary signal: unit suite plus ruff on
+every push, no CAD/FEA kernels — the suite is designed to skip those layers, and keeping conda
+out is what keeps the workflow under the plan's five-minute budget. `determinism-gate` is the
+Phase 0 gate's real claim being tested at last: **identical θ → identical score on two
+machines**. `run_s1.py --manifest-out` wrote three designs' S1 ladders (R 60/85/100, 3 rungs ×
+4 seeds, rigid) to JSON manifests on this macOS arm64 machine, committed under
+`tests/fixtures/ci/`; the runner (Linux x86-64) re-runs the same ladders with `--manifest` and
+compares **bit for bit** (`store.manifest_from_records` / `compare_manifests`; floats survive
+JSON exactly, since `json` writes float64 with `repr`). If that job fails while `tests`
+passes, it is not a broken build — it is the gate *finding something*, namely cross-platform
+floating point moving a trajectory, and it goes in this log. The workflow itself is untested
+until pushed; the manifest check passes locally against its own references and fails against a
+perturbed ladder.
+
+**The gate caught a real bug on its first day.** A ladder run at `--duration 5` produced the
+**same run_ids** as the 6-second reference with different metrics inside — because
+`S1Config.rung_name` carried only the height, so duration, throttle and the friction range
+were all outside the key. Invariant 5, violated quietly since S1 was built, and it read as
+non-determinism when it was actually two experiments sharing a name. The rung name now
+carries a digest of everything that shapes the run, with two exclusions named per the
+invariant's own rule (`n_seeds`, `heights_m` — a row's own seed and height identify it; the
+population does not change what it measured). The default design label also gains the width it
+was silently omitting. A gate run is now judged by the gate, not by the threshold fit — a
+3-rung CI ladder honestly cannot locate P=0.9, and failing the job for that would make the
+gate unrunnable at exactly the size CI affords.
+
+**Phase 0's three unbuilt bullets are recorded as #36, not built**: `T0` in CAD (no printer
+run needs it before Phase 4, and it does not fit `WheelParams`), CoACD→MJCF (no mesh needs
+decomposing until a `T1`/`T2` exists), Hydra (eleven argparse CLIs work; the optimiser's sweep
+configs are what Hydra is actually for). Each has a named trigger.
+
+### #34 closed: both thickness floors are deliberate, stated once, with the cost measured
+
+The spoke bound's rationale — the range must express a design `spoke_min_wall` rejects, or the
+check can never fire — applies verbatim to the rim, and is now stated once in
+`04-design-space.md` §Manufacturing with both `PARAM_BOUNDS` comments pointing at it. The
+cost being traded: 0.4/6.8 ≈ **5.9% of a uniform sweep per field**, rejected in milliseconds
+by screening. The trigger for revisiting is an optimiser measurably concentrating near the
+wall; the remedy then is a material-dependent bound, never a silent raise of the floor.
+
+### #28 closed: the stick branch has a limit point, and slenderness cannot see it
+
+The frictional deep sweep the item asked for, run at last: claw sector, μ = 0.6, 12 mm, tapers
+1.0/0.6/0.4 on the R 60 twelve-claw design.
+
+```
+   taper   slenderness   stick limit point       vs 61.2 N (2.5x nominal)
+   1.0        6.3          105.4 N at 3.8 mm       passes
+   0.6        7.2           39.4 N at 2.2 mm       FAILS
+   0.4        7.8           22.7 N at 1.5 mm       FAILS, barely 1x nominal
+```
+
+A **4.6x collapse** in buckling load across which the slenderness proxy creeps 6.3 → 7.8. No
+threshold on an axis that flat can rank the family, so the answer to "is 40 too permissive"
+is that **the number is not the problem — the axis is**. The check that does the job is
+`fea_buckling`, which measures each design's own limit point and fails all three tapered
+claws where the warning stays silent (it fired unprompted on the T7L run yesterday). The
+warning is kept for the corner it was written for — a 1.6 mm strut on R 100 reads 48 — and
+its comment now carries this measurement. Deeper than ~12 mm the tapered claws diverge at
+15–17 mm after 8–10 cutbacks, consistent with snap-back, which CalculiX has no arc-length
+solver to traverse: that is the boundary of what this rig can measure, recorded as such.
+
+### #32 advanced: the cross-validation chooser exists, opt-in, default untouched
+
+`fit.n_intervals_by_cv`: leave-one-out over the interior points (endpoints anchor the origin
+and the span — a fit must not be scored on its own extrapolation), ties to the coarser table
+within 5%. On a curve generated from a known 4-interval law it recovers **4** where the length
+rule picks 3 — the exact miss that opened #32. The item stays deferred for the same reason it
+was: switching the *default* re-fits every banded result on record, and that re-run has not
+been done. The tool now exists for the day it is.
+
+**Gates.** Unit suite 824/824 (15 new), ruff at the standing 71.

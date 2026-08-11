@@ -97,6 +97,36 @@ and the single-wheel rig never did.
 
 ### #31 — A claw at ±2π/n meets the plate on its flank, and the ring has no such contact
 
+**Partly closed 2026-08-11, and the "measure before choosing" instruction has been carried
+out.** See the log entry of that date. What changed:
+
+- **The onset now has a closed form and it is right.** A claw's deepest material is its tip
+  *corner*, half a thickness off its own axis, so its reach is `R cos θ + h sin|θ|`.
+  `RingSpec.tip_half_thickness_m` (`rom-0.7.0`) puts that in both solvers. It predicts
+  second-claw engagement at **7.14 mm** where the point tip said 8.04 and the FEA measures
+  **7.20** — one sample. The 0.84 mm discrepancy this item opened with is explained.
+- **It does not fix the straddle, and that is the finding.** Above engagement the error goes
+  from +62.7% / −49.5% (slide / hinge) to **+74.7% / −45.6%**. The hinge gains 4 pp; the slide
+  gets *worse*, because a too-late onset had been partly cancelling a too-stiff element. So
+  contact onset was never the cause. **The cause is bedding** — a claw lying down along its
+  flank, loaded in bending over a patch that travels — and no correction to a point-contact
+  element reaches it.
+- **The bound is now measured rather than asserted.** `BuiltRing.validity_delta_m` and
+  `RoverResult.multi_contact_fraction` say where a ring is trustworthy and how much of a run
+  left that range. Measured: a flat rover run at nominal load is on one claw for **91%** of
+  the driving phase, so the ROM covers it; a 40 mm step run compresses one segment to
+  **21.98 mm** against a law measured to 12, which is the *other* failure and is reported
+  separately.
+
+**What is left is one decision, and it is now well posed.** Either build a segment that can
+carry a distributed flank contact — a beam-on-foundation per claw, or a collision surface with
+length — or accept the single-claw regime as the ROM's envelope and screen designs on where
+their duty cycle sits inside it. The second is what the code does today, honestly and with
+numbers. The first is the only way to a trustworthy `T7L` (#35) or a trustworthy step-climb
+comparison on the rover (#30).
+
+Original statement follows.
+
 Opened 2026-08-10 by #29, which set out to fix a fit and found that the fit was never the
 problem. The log entry of that date carries both tables.
 
@@ -149,6 +179,19 @@ date. Three things came out of it:
 What is left is not a fitting problem and has its own number: **#31**.
 
 ### #33 — Ride harshness is measured on flat ground only, where a rigid wheel cannot lose
+
+**Closed in substance 2026-08-11; what remains is a sweep, not a build.** See the log entry.
+`RoverSpec.washboard_amplitude_m` / `washboard_wavelength_m` and `run_rover.py --washboard
+--wavelength` add S7's corrugation — a strip of boxes sampling the sinusoid, entered at a
+trough so the doorstep is a ramp and the transient belongs to the terrain, not its edge.
+**The sign reverses, and it is not close**: at 10 mm peak-to-trough the compliant twelve-claw
+wheel beats the rigid cylinder **4.8–6.9x** at every wavelength from 60 to 400 mm, at equal or
+higher speed, and the metric orders rigid > 3-claw > 12-claw the right way round. The caveat
+travels with it: 20–53% of those runs have two claws sharing (the #31 element gap), so the
+**sign** is the result and the second digit is not. Still open here: the amplitude x wavelength
+*sweep* S7 specifies (this measured one amplitude), and terrain seeds over it.
+
+Original statement follows.
 
 Opened 2026-08-10 by wiring up objective 3. See the log entry of that date for the numbers.
 
@@ -219,6 +262,16 @@ Two smaller things travel with it, both easy to miss:
 
 ### #34 — `rim_thickness_mm`'s lower bound is below the TPU wall, and unlike the spoke's, nothing says why
 
+**Closed 2026-08-11: same rationale as the spoke, now stated for both, once, with the cost
+measured.** The range must be able to express a design `rim_min_wall` rejects, or the check
+can never fire — a constraint no sample can violate is indistinguishable from one that was
+deleted. Cost: ≈5.9% of a uniform sweep per field, rejected in milliseconds by screening.
+Shared statement in `04-design-space.md` §Manufacturing; both `PARAM_BOUNDS` comments point
+at it. The trigger for revisiting is a real optimiser measurably concentrating near the wall,
+and the remedy then is a material-dependent bound, not a raised floor.
+
+Original statement follows.
+
 Opened 2026-08-10 by `scripts/plot_geometry.py`, which draws each parameter across its own
 range and puts the screening verdict under every panel. Two ranges come out red at their
 searched lower bound. **One of the two is deliberate and documented; the other is not, and
@@ -250,6 +303,23 @@ they follow from radius, thickness and band, and a scalar bound cannot know them
 
 ### #28 — The slenderness threshold of 40 is far too permissive for a claw
 
+**Closed 2026-08-11: the threshold cannot be fixed, because the axis is flat where the
+answer moves.** The frictional deep sweep this item asked for was run — claw sector, μ = 0.6,
+12 mm, tapers 1.0 / 0.6 / 0.4 on the R 60 twelve-claw design — and **the stick branch has a
+limit point**: 105.4 / 39.4 / 22.7 N at 2–4 mm of deflection. A 4.6× collapse in buckling
+load, across which the slenderness proxy creeps **6.3 → 7.2 → 7.8**. No threshold on an axis
+that flat ranks that family; tuning the 40 down to catch claws would be calibrating a constant
+on three points of one family. The check that *does* catch them is `fea_buckling`, which
+measures each design's own limit point against 2.5× nominal — it fails all three tapered claws
+where the warning stays silent, and it already fired unprompted on the `T7L` run of the same
+day. The warning is kept for the corner it was written for (a 1.6 mm strut on R 100 reads 48,
+where geometry alone predicts a poor ROM fit) and its comment now states its blindness with
+the measurement. Deeper than 12 mm the tapered claws diverge (~15–17 mm, 8–10 cutbacks) —
+consistent with snap-back, which CalculiX has no arc-length solver to traverse; recorded as
+the boundary of what this rig can measure.
+
+Original statement follows.
+
 Opened 2026-08-09 by #21, which fixed the *proxy* and left the *threshold*.
 
 `constraints.py` warns above `slenderness > 40`. On the frictionless claw-sector plate sweep
@@ -269,6 +339,32 @@ Until then the proxy is right and the threshold is decoration.
 
 Real, understood, and not on the critical path.
 
+### #36 — Phase 0's three unbuilt bullets: `T0` in CAD, CoACD→MJCF, Hydra
+
+Recorded 2026-08-11, when the rest of Phase 0 closed (CI and the cross-machine gate — see the
+log entry of that date). These three are the checklist items deliberately **not** built, each
+because it currently has no consumer, and building for no consumer is how a wrong interface
+gets frozen:
+
+- **`T0` rigid cylinder in the CAD layer.** The *simulated* rigid baseline exists and is what
+  every comparison uses — an analytic cylinder with matched mass, radius and inertia. The CAD
+  `T0` is for printing a hardware baseline, which is Phase 4, and it does not fit
+  `WheelParams` (spokes are mandatory there), so it is a new topology switch with its own
+  screening — real surface area to add for a part nobody prints yet.
+- **`STL → CoACD hulls → MJCF`** (ADR-0007). Needed the day a rigid *shaped* wheel — `T1`
+  grousered, `T2` lobed — must collide in MuJoCo. Today rigid wheels are cylinders and
+  compliant ones are capsule rings; there is no mesh that needs decomposing. The ADR stands;
+  the wiring waits for the first `T1`.
+- **Hydra.** `configs/robot.yaml` is read by a tested loader and every CLI is argparse; the
+  conventions section still names Hydra as the intended config system. Wiring it now churns
+  eleven entry points for no behavioural change. The honest trigger is the optimiser (#9 in
+  the plan), whose sweep configs are what Hydra is actually for.
+
+What did close: CI runs the unit suite and lint on every push, and the **cross-machine
+determinism gate is now a live experiment** — three designs' S1 ladders, run on Linux x86-64
+against manifests committed from this macOS arm64 machine, bit-for-bit. `run_s1.py
+--manifest-out/--manifest`, `store.manifest_from_records`/`compare_manifests`.
+
 ### #32 — `fit_tabulated_law`'s default interval count is a rule of thumb, and it is too coarse
 
 Opened 2026-08-10 by #29, which found it while looking for something else.
@@ -287,6 +383,15 @@ it at all (#29), which is why this is not urgent.
 **Candidates.** Choose the count by cross-validation on the curve rather than from its length;
 or keep the rule and raise the floor; or expose it and make every caller state one. The
 `smoothing` penalty already there is the reason a finer table is not automatically worse.
+
+**2026-08-11: the first candidate is built, opt-in, and the default is untouched.**
+`fit.n_intervals_by_cv` picks the resolution by leave-one-out prediction — the number that
+turns back up where fit error keeps falling — and on a curve generated from a known 4-interval
+law it recovers **4** where the length rule picks 3; ties go to the coarser table, endpoints
+are never dropped (the fit does not claim its own extrapolation), and a caller passes the
+result explicitly as `n_intervals=`. What keeps this item open is unchanged: *switching the
+default* to it means re-fitting every banded result on record, and that re-run has not been
+done. The tool now exists for the day it is.
 
 ---
 

@@ -117,10 +117,34 @@ class RingSpec:
     #: it rather than silently hinging at the wheel's centre — a claw pivoting about the axle
     #: sweeps its tip along a circle of radius ``R`` and can therefore never indent at all.
     root_radius_m: float = 0.0
+    #: Half the claw's **tip** thickness, metres. Zero — the default — is the point-tipped
+    #: segment every result before ``rom-0.7.0`` was taken with, and reproduces it exactly.
+    #:
+    #: Why a ring needs to know a thickness at all. A segment reaches the plate with its tip
+    #: *corner*, not its tip centre: the corner sits half a thickness off the segment's axis,
+    #: so its downward extent is ``R cos θ + h sin θ`` rather than ``R cos θ`` and a claw off
+    #: to the side touches **earlier** than the axis says. On the R 60 mm, twelve-claw,
+    #: taper 0.6 design that is 0.90 mm early at ±30°, predicting engagement at **7.14 mm**
+    #: against a tip-centre 8.04 mm — and the FEA engages at **7.20 mm**, one sample away.
+    #: See ``docs/plan/TODO.md`` #31, which recorded the 0.84 mm discrepancy before it had a
+    #: formula.
+    #:
+    #: This is the *onset* of flank contact, exactly. It is **not** the whole of flank
+    #: contact: a real claw goes on to bed along its side as it folds, and the patch travels
+    #: down the flank. What this field buys is the geometry of first touch and the moment arm
+    #: that goes with it, both closed-form.
+    tip_half_thickness_m: float = 0.0
 
     def __post_init__(self) -> None:
         if self.radius_m <= 0:
             raise ValueError("radius_m must be positive")
+        if self.tip_half_thickness_m < 0.0:
+            raise ValueError("tip_half_thickness_m must be non-negative")
+        if self.tip_half_thickness_m >= self.radius_m:
+            raise ValueError(
+                f"tip_half_thickness_m {self.tip_half_thickness_m} is not smaller than the "
+                f"wheel radius {self.radius_m}; that is not a claw"
+            )
         if self.n_segments < 3:
             raise ValueError("a ring needs at least three segments")
         if min(self.band_bending_n_per_m, self.band_hoop_n_per_m) < 0:
@@ -489,13 +513,44 @@ def penetrations(spec: RingSpec, delta_m: float,
     an explicit gate: the exact expression divides by ``cos θ``, so at 105° it returns a
     cheerful 268 mm of "penetration" — the distance to the plate's *extension* behind the
     hub. The small-angle form went negative there and was clipped away by accident.
+
+    **The tip is a corner, not a point** (``rom-0.7.0``, ``TODO.md`` #31). With
+    ``spec.tip_half_thickness_m = h`` the segment's deepest material is the tip corner, half a
+    thickness off its own axis, whose downward extent is ``(R - u) cos θ + h sin|θ|``. Setting
+    *that* on the plate gives
+
+        u = R - (R - δ - h sin|θ|) / cos θ
+
+    so a segment away from the contact point engages ``h sin|θ|`` of indentation earlier —
+    0.90 mm at ±30° on a 3.6 mm tip, which is the whole of the 0.84 mm early engagement #31
+    measured against the FEA. At ``h = 0`` this is the previous expression exactly.
     """
-    theta = segment_angles(spec)
+    gap, _ = _interference(spec, delta_m, phase_rad)
+    return np.where(np.isfinite(gap) & (gap > 0.0), gap, 0.0)
+
+
+def _interference(spec: RingSpec, delta_m: float,
+                  phase_rad: float = 0.0) -> tuple[np.ndarray, np.ndarray]:
+    """``(gap, reachable)`` — the geometry behind both :func:`penetrations` and the solver.
+
+    Factored out because it was written twice. :func:`solve_equilibrium` carried its own copy
+    of the same expression, and the copy did not learn about the tip corner when
+    :func:`penetrations` did: the radial model's answer came back **byte-identical** across a
+    change that moved second-claw engagement by 0.9 mm, while the hinge model's moved. A
+    formula in two places is a formula that will disagree with itself, and this one did.
+
+    ``gap`` is signed and is ``-inf`` where a segment faces away from the plate; callers clip
+    or not according to what they need. ``penetrations`` wants compressions, the active-set
+    solver wants a constraint that may be violated.
+    """
+    theta = segment_angles(spec, phase_rad)
     cos_theta = np.cos(theta)
-    facing = cos_theta > 0.0
-    u = np.zeros_like(cos_theta)
-    u[facing] = spec.radius_m - (spec.radius_m - delta_m) / cos_theta[facing]
-    return np.where(u > 0.0, u, 0.0)
+    reachable = cos_theta > 0.0
+    corner = spec.tip_half_thickness_m * np.abs(np.sin(theta))
+    gap = np.full(spec.n_segments, -np.inf, dtype=np.float64)
+    gap[reachable] = spec.radius_m - (
+        spec.radius_m - delta_m - corner[reachable]) / cos_theta[reachable]
+    return gap, reachable
 
 
 def bending_coupling_n_per_m(
@@ -617,9 +672,13 @@ def ring_for_design(
     # built from a design always knows where its segments are attached and only a hand-built
     # RingSpec can be missing it.
     root_radius_m = params.hub_radius_mm * 1e-3
+    # Half the tip thickness, so the ring knows a segment touches on its corner rather than
+    # on its axis (`RingSpec.tip_half_thickness_m`, TODO #31). Bandless only: with a band the
+    # running surface is the band's own cylinder and the tips never touch anything.
     if params.rim_thickness_mm <= 0.0:
         return RingSpec(radius_m=radius_m, n_segments=n_segments,
-                        root_radius_m=root_radius_m)
+                        root_radius_m=root_radius_m,
+                        tip_half_thickness_m=0.5 * params.tip_thickness_mm * 1e-3)
 
     band = for_material(material, feature_thickness_mm=params.rim_thickness_mm)
     geometry = {
@@ -803,11 +862,7 @@ def solve_equilibrium(
     bandless quantity — the band operator is a circulant on a fixed segment grid — and
     :func:`ring_force_n` refuses it on a coupled spec for that reason.
     """
-    theta = segment_angles(spec, phase_rad)
-    cos_theta = np.cos(theta)
-    reachable = cos_theta > 0.0
-    gap = np.full(spec.n_segments, -np.inf, dtype=np.float64)
-    gap[reachable] = spec.radius_m - (spec.radius_m - delta_m) / cos_theta[reachable]
+    gap, reachable = _interference(spec, delta_m, phase_rad)
 
     if not spec.is_coupled:
         # Uncoupled: the constraint is active exactly where geometry says it is, every free
@@ -940,11 +995,16 @@ def second_contact_delta_m(spec: RingSpec) -> float:
     claws engage at ±2π/n, they meet the plate off their own radius, and the ROM's agreement
     with the FEA collapses in a way no choice of law repairs.
 
-    So this is the validity boundary of a claw ring on a plate, not a detail of it — and it is
-    an **upper bound** on where the real wheel departs. This is the threshold for *rigid tips
-    on the undeformed circle*; the FEA wheel engages one 1.2 mm sample earlier, at 7.2 mm,
-    where the ring is still on one claw and is already 18.7% soft. A claw at ±2π/n meets a
-    flat plate on its flank rather than its tip, so contact starts before the tip arrives.
+    So this is the validity boundary of a claw ring on a plate, not a detail of it. **It now
+    reads the tip's half-thickness** (``rom-0.7.0``): the deepest material of a claw at ``±2π/n``
+    is its tip *corner*, half a thickness off the axis, so the threshold is
+
+        δ  such that  R cos(2π/n) + h sin(2π/n) = R - δ
+
+    On the R 60 mm, twelve-claw, taper 0.6 design that is **7.14 mm** against the point-tip
+    8.04 mm, and the FEA engages at **7.20 mm** — one sample away, where the point-tip form was
+    0.84 mm late and the ring read 18.7% soft at exactly that sample. With
+    ``tip_half_thickness_m = 0`` the point-tip form returns, unchanged.
 
     A separate quantity from :func:`polygon_drop_m`, which is ``R(1−cos π/n)`` — the axle's
     ride-height ripple over *half* a pitch. The two differ only by a factor of two inside a
@@ -953,7 +1013,9 @@ def second_contact_delta_m(spec: RingSpec) -> float:
     """
     if spec.n_segments < 3:
         raise ValueError("a ring needs at least three segments")
-    return float(spec.radius_m * (1.0 - np.cos(2.0 * np.pi / spec.n_segments)))
+    theta = 2.0 * np.pi / spec.n_segments
+    reach = spec.radius_m * np.cos(theta) + spec.tip_half_thickness_m * abs(np.sin(theta))
+    return float(max(spec.radius_m - reach, 0.0))
 
 
 def ride_height_ripple_m(
@@ -1389,6 +1451,7 @@ def solve_equilibrium_hinge(
     theta = segment_angles(spec)
     n = spec.n_segments
     length, root = spec.claw_length_m, spec.root_radius_m
+    half_t = spec.tip_half_thickness_m
     hub = spec.radius_m - delta_m
 
     compression = np.zeros(n, dtype=np.float64)
@@ -1404,20 +1467,30 @@ def solve_equilibrium_hinge(
         # tip — the downward extent is R_root cos θ + (L - u) cos ψ and ψ only grows — so a
         # claw that misses the plate unrotated misses it however it moves. Excluded outright,
         # as in the other two models.
-        if cos_theta <= 0.0 or hub >= spec.radius_m * cos_theta:
+        if cos_theta <= 0.0 or hub >= (spec.radius_m * cos_theta
+                                       + half_t * np.sin(abs_theta)):
             continue
 
         c = hub - root * cos_theta
 
         def residual(psi: float, c: float = c, abs_theta: float = abs_theta) -> float:
-            cos_psi = np.cos(psi)
-            u = length - c / cos_psi
+            cos_psi, sin_psi = np.cos(psi), np.sin(psi)
+            arm = (c - half_t * sin_psi) / cos_psi          # the claw's remaining length
+            u = length - arm
             radial = float(radial_law.force_n(u)) if u > 0.0 else 0.0
+            # Lever of a *vertical* force about the root, to the tip CORNER. The corner sits
+            # `h` off the axis, so its horizontal offset from the root is `arm sin ψ - h cos ψ`
+            # rather than `arm sin ψ`. Same virtual work as the h = 0 derivation above, with
+            # the contact point moved onto the corner that actually touches.
             return (float(hinge_law.force_n(psi - abs_theta))
-                    - radial * c * np.sin(psi) / (cos_psi * cos_psi))
+                    - radial * (arm * sin_psi - half_t * cos_psi) / cos_psi)
 
         lo = abs_theta
-        hi = float(np.arccos(min(max(c / length, -1.0), 1.0)))
+        # u = 0 — the claw at full length — is now `L cos ψ + h sin ψ = c`, whose solution is
+        # the phase-shifted arccos below. At h = 0 it collapses to arccos(c/L), as it must.
+        reach = float(np.hypot(length, half_t))
+        hi = float(np.arctan2(half_t, length)
+                   + np.arccos(min(max(c / reach, -1.0), 1.0)))
         if residual(lo) >= 0.0 or hi <= lo:
             # θ = 0, where the vertical force is along the claw and there is nothing to rotate
             # about. Not a fallback: it is the exact answer, and the branch exists because
@@ -1433,7 +1506,7 @@ def solve_equilibrium_hinge(
             psi = 0.5 * (lo + hi)
 
         cos_psi = np.cos(psi)
-        u = length - c / cos_psi
+        u = length - (c - half_t * np.sin(psi)) / cos_psi
         compression[i] = u
         rotation[i] = sign * (psi - abs_theta)
         contact[i] = float(radial_law.force_n(u)) / cos_psi if u > 0.0 else 0.0

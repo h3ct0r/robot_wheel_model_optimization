@@ -77,8 +77,30 @@ class S1Config:
             raise ValueError(f"friction_range must be positive and ordered; got {(low, high)}")
 
     def rung_name(self, height_m: float) -> str:
-        """Scenario name for one rung. Unique per height, so `run_id` is too."""
-        return f"{S1_NAME}/h={height_m:.3f}"
+        """Scenario name for one rung: the height, plus a digest of everything else that
+        shapes the run.
+
+        The digest is invariant 5 arriving here the hard way. The first version was the
+        height alone, and the cross-machine gate caught it on its first day: a ladder run at
+        ``--duration 5`` produced the **same run_ids** as the 6-second reference with
+        different metrics in them — which reads as non-determinism and is actually two
+        different experiments sharing one name. Anything that changes the numbers is in the
+        key, by default.
+
+        Two named exclusions, per the invariant's own rule that exclusions are justified one
+        at a time: ``n_seeds``, because a row already carries its own seed and the population
+        size does not change what seed 3 measured; and ``heights_m`` as a tuple, because the
+        rung's own height is in the name and the rest of the ladder does not touch this run.
+        """
+        from ..hashing import content_digest
+
+        digest = content_digest({
+            "duration_s": self.duration_s,
+            "throttle": self.throttle,
+            "friction_range": list(self.friction_range),
+            "approach_deg": self.approach_deg,
+        })[:8]
+        return f"{S1_NAME}/h={height_m:.3f}@{digest}"
 
 
 def terrain_for_seed(seed: int, config: S1Config) -> tuple[float, float]:

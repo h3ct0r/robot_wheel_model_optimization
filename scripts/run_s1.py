@@ -73,6 +73,14 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--store", type=Path, default=REPO_ROOT / "data" / "experiments",
                    help="experiment store root; every rung of every seed becomes a row")
     p.add_argument("--no-store", action="store_true", help="run without writing any rows")
+    p.add_argument("--manifest-out", type=Path, default=None, metavar="JSON",
+                   help="write run_id -> metrics for this ladder to a JSON file. The "
+                        "cross-machine half of the determinism gate: commit the file, and a "
+                        "second machine runs the same ladder with --manifest against it")
+    p.add_argument("--manifest", type=Path, default=None, metavar="JSON",
+                   help="compare this ladder against a reference manifest written elsewhere "
+                        "with --manifest-out. Exit 1 on any disagreement — a metric, a "
+                        "status, a missing run or a version skew")
     return p
 
 
@@ -91,7 +99,10 @@ def main(argv: list[str] | None = None) -> int:
     )
     wheel = {"wheel_radius_m": args.radius * 1e-3, "wheel_width_m": args.width * 1e-3,
              "wheel_mass_kg": args.wheel_mass * 1e-3}
-    design_hash = args.design_hash or f"rigid-R{args.radius:.0f}-m{args.wheel_mass:.0f}"
+    # Width included since 2026-08-11: it changes the wheel's transverse inertia and so the
+    # numbers, and a label that omits it lets two different wheels share every run_id.
+    design_hash = (args.design_hash
+                   or f"rigid-R{args.radius:.0f}-w{args.width:.0f}-m{args.wheel_mass:.0f}")
 
     if args.gate and args.repeat < 2:
         print("--gate needs --repeat 2 or more: an empty disagreement list proves nothing "
@@ -153,6 +164,40 @@ def main(argv: list[str] | None = None) -> int:
                 print(f"    {run_id}  {variants} distinct results over {rows} rows")
             return 1
         print("  PASS — every repeated evaluation returned identical metrics.")
+
+    if args.manifest_out is not None or args.manifest is not None:
+        import json
+
+        from wheelopt.store import compare_manifests, manifest_from_records
+
+        manifest = manifest_from_records(outcome.records)
+        if args.manifest_out is not None:
+            args.manifest_out.parent.mkdir(parents=True, exist_ok=True)
+            args.manifest_out.write_text(json.dumps(manifest, indent=1, sort_keys=True))
+            print(f"\nmanifest: {len(manifest['rows'])} run(s) -> {args.manifest_out}")
+        if args.manifest is not None:
+            reference = json.loads(args.manifest.read_text())
+            problems = compare_manifests(reference, manifest)
+            print(f"\ncross-machine gate against {args.manifest.name}: "
+                  f"{len(manifest['rows'])} run(s) compared")
+            if problems:
+                print(f"  FAIL — {len(problems)} disagreement(s):")
+                for line in problems[:20]:
+                    print(f"    {line}")
+                if len(problems) > 20:
+                    print(f"    ... and {len(problems) - 20} more")
+                return 1
+            print("  PASS — bit-identical with the reference, on this machine.")
+
+    # A gate run is judged by the gate. The threshold fit on a deliberately small CI ladder
+    # is honestly unusable — 3 rungs cannot locate P=0.9 — and failing the job for that would
+    # make the determinism gate unrunnable at exactly the size a CI budget allows. Reaching
+    # this line means every requested gate passed; a plain run keeps the fit as its verdict.
+    if args.gate or args.manifest is not None:
+        if not outcome.ok:
+            print(f"  (fit not usable on this ladder — {outcome.fit.reason or 'small ladder'}"
+                  " — which is not what a gate run is judged by)")
+        return 0
 
     return 0 if outcome.ok else 1
 

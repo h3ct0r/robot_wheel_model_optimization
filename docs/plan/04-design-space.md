@@ -256,6 +256,22 @@ last now **load-dependent**, since the wheel squashes.
   would have rejected every design that survives 24.5 N
 - Requires direct-drive extruder — a fixed capability, not a variable
 
+**Why two searched thickness ranges start below the TPU wall** (#34, decided 2026-08-11).
+`spoke_thickness_mm` and `rim_thickness_mm` are both searched from **1.2 mm**, and TPU cannot
+print below **1.6** — so on every TPU design the bottom of each range is infeasible by
+construction. That is deliberate, and the same decision for both fields: the range must be
+able to *express* a design the wall check rejects, or `spoke_min_wall` / `rim_min_wall` can
+never fire and have stopped testing anything. A constraint that no sample can violate is
+indistinguishable from a constraint that was deleted, and this project's watch list is a
+catalogue of checks that kept passing after they stopped checking.
+
+The cost being traded: samples spent on rejections. Uniformly over each (1.2, 8.0) range the
+unreachable band is 0.4/6.8 ≈ **5.9% per field**, and screening rejects those in milliseconds
+(invariant 3) rather than in FEA time. If a future optimiser's proposal distribution turns out
+to concentrate near the wall and pay materially more than that, the remedy is a
+material-dependent bound — more correct and more machinery — not a silent raise of the floor,
+which would quietly retire both checks.
+
 ### Actuation
 Peak torque ≤ 0.7 · stall; achievable top speed accounting for *loaded* rolling radius, which
 is smaller than `R` for a compliant wheel and load-dependent. A real effect on gearing and a

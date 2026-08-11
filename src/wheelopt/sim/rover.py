@@ -86,6 +86,17 @@ __all__ = [
 SEGMENT_CONTYPE = 2
 GROUND_CONAFFINITY = 3
 
+#: A segment counts as *sharing* the load when it is compressed at least this fraction of the
+#: deepest segment on its own wheel. Used only by ``RoverResult.multi_contact_fraction``.
+#:
+#: A share rather than an absolute depth, because the quantity is "how many claws carry this
+#: wheel" and that is scale-free — the same wheel under a step and on the flat should be judged
+#: the same way. It also avoids the failure that produced the first version of this number: at
+#: an absolute 1 um a claw still ringing down after leaving the ground counts as in contact,
+#: which read 70% of a flat run against a static ring that is on one claw for all but the
+#: half-pitch crossing.
+MULTI_CONTACT_SHARE = 0.10
+
 #: Rotation taking the CAD wheel frame to the MuJoCo wheel frame, radians about x.
 #:
 #: Measured rather than reasoned (the sign is a coin flip and both look plausible on a
@@ -169,6 +180,19 @@ class RoverSpec:
     #: Where the step's face sits, metres. Far enough ahead that the robot is rolling
     #: steadily and has settled onto its wheels before it arrives.
     step_x_m: float = 0.80
+    #: Scenario **S7**: peak-to-trough height of a sinusoidal corrugation on the ground,
+    #: metres. Zero is smooth ground and emits no terrain at all.
+    #:
+    #: This exists because flat ground cannot show what compliance is *for*. A smooth rigid
+    #: cylinder on a smooth plane reads 0.00 m/s² of chassis acceleration and cannot be beaten,
+    #: so every compliant wheel is scored on how close it gets back to a wheel nobody can
+    #: print (`TODO.md` #33). On a corrugation a rigid wheel must follow the ground and a
+    #: compliant one need not, which is where the sign is supposed to reverse.
+    washboard_amplitude_m: float = 0.0
+    #: Wavelength of that corrugation, metres. The other half of S7's sweep: harshness is a
+    #: resonance question, so amplitude alone says nothing — what matters is the wavelength
+    #: against the wheel's own diameter and the tip-passing pitch.
+    washboard_wavelength_m: float = 0.10
     #: Ground friction. 1.0 is TPU on concrete — generous, deliberately: a climb that fails
     #: on traction says nothing about the wheel.
     friction: float = 1.0
@@ -210,6 +234,18 @@ class RoverSpec:
                 "robot is given no torque until it has settled, so a shorter run measures a "
                 "stationary robot and every metric below is a metric of nothing"
             )
+        if self.washboard_amplitude_m < 0.0:
+            raise ValueError("washboard_amplitude_m must be non-negative")
+        if self.washboard_amplitude_m > 0.0:
+            if self.washboard_wavelength_m <= 0.0:
+                raise ValueError("a washboard needs a positive wavelength")
+            if self.step_height_m > 0.0:
+                raise ValueError(
+                    "a step and a washboard together is a scenario nothing defines: S1 is "
+                    "the step and S7 is the corrugation, and a harshness number taken while "
+                    "climbing would be about the step (see the flat-ground note on "
+                    "harshness_rms_m_s2). Run them separately"
+                )
 
     def motor_torque_n_m(self, platform: PlatformSpec, axle_rate_rad_s: float) -> float:
         """The platform's own linear torque-speed curve, clipped to forward drive.
@@ -262,8 +298,70 @@ class RoverResult:
     #: Tip-passing frequency implied by that speed, Hz, or 0 for a wheel with no tip count.
     #: ``n_segments * v / (2πR)``. The forcing frequency behind the harshness number.
     tip_frequency_hz: float = 0.0
+    #: Fraction of the driving phase in which **some wheel had more than one segment
+    #: compressed**, 0 to 1. Zero for rigid wheels, which have no segments.
+    #:
+    #: This is the ROM's validity envelope, measured instead of assumed (``TODO.md`` #31).
+    #: A bandless claw ring reproduces the FEA to 0.036% while one claw carries the load;
+    #: past second-claw engagement the radial slide reads **+74.7%** and the root hinge
+    #: **−45.6%** against the same FEA, and no choice of spring law repairs that. So a
+    #: compliant run's number is worth what this fraction says it is worth, and quoting one
+    #: without it is quoting a model outside the range anybody checked.
+    multi_contact_fraction: float = 0.0
+    #: Deepest compression any single segment reached, metres. The other half of the same
+    #: question: how far past its measured range the segment law was asked to extrapolate.
+    peak_compression_m: float = 0.0
     #: (time, x, z, pitch, roll, vertical acceleration) per step.
     history: np.ndarray = field(default_factory=lambda: np.empty((0, 6)))
+
+
+#: Boxes per washboard wavelength. Eight puts the sampling error at
+#: ``A/2 · (1 − cos(π/8))`` ≈ 3.8% of the half-amplitude — under half a millimetre on the
+#: tallest corrugation in S7's sweep — while keeping the geom count in the hundreds.
+WASHBOARD_BOXES_PER_WAVE = 8
+
+
+def _washboard_geoms(scenario: RoverSpec, reach_m: float, half_width_m: float) -> list[str]:
+    """S7's corrugation as a strip of boxes whose tops sample the sinusoid.
+
+    Boxes rather than a heightfield, deliberately. An ``hfield`` asset wants its elevation
+    data supplied *after* compilation through ``model.hfield_data``, and this module's whole
+    contract is that the returned XML string **is** the model — a model that is wrong until a
+    second call patches it is exactly the split-brain the string exists to prevent. Boxes are
+    self-contained, and at eight per wavelength the top-face stair-step is 3.8% of the
+    half-amplitude, far below the tread features a real washboard road carries.
+
+    The first trough sits at ``step_x_m`` and the strip runs to the robot's reach plus a
+    body length, for the same reason the step does: terrain that runs out mid-run turns the
+    end of the world into the tallest obstacle in the scenario. Starting at a trough rather
+    than a crest means the leading face of the first box is at floor level — the entry to the
+    washboard is a ramp of boxes, not a step edge, so the transient belongs to the
+    corrugation rather than to its own doorstep.
+    """
+    amplitude = scenario.washboard_amplitude_m
+    if amplitude <= 0.0:
+        return []
+    wavelength = scenario.washboard_wavelength_m
+    dx = wavelength / WASHBOARD_BOXES_PER_WAVE
+    start = scenario.step_x_m
+    length = reach_m + 0.4  # past anything the robot can touch
+    n_boxes = int(np.ceil(length / dx))
+    geoms = []
+    for i in range(n_boxes):
+        centre_x = start + (i + 0.5) * dx
+        # Height of the sinusoid at the box centre, trough at the strip's start. The box top
+        # is that height; its bottom is sunk into the floor so there is no underside edge.
+        top = 0.5 * amplitude * (1.0 - np.cos(2.0 * np.pi * (centre_x - start) / wavelength))
+        if top < 5.0e-4:
+            continue  # a sub-half-millimetre sliver flickers in the contact solver
+        half_h = 0.5 * (top + 0.01)   # sunk 10 mm below grade
+        geoms.append(
+            f'    <geom name="wash{i}" type="box" pos="{centre_x:.9f} 0 '
+            f'{top - half_h:.9f}" size="{0.5 * dx:.9f} {half_width_m:.9f} '
+            f'{half_h:.9f}" contype="1" conaffinity="{GROUND_CONAFFINITY}" '
+            'material="stepmat"/>'
+        )
+    return geoms
 
 
 def build_rover_mjcf(
@@ -399,6 +497,7 @@ def build_rover_mjcf(
              f'{step_half_width:.9f} {scenario.step_height_m / 2:.9f}" contype="1" '
              f'conaffinity="{GROUND_CONAFFINITY}" material="stepmat"/>'),
         ]),
+        *_washboard_geoms(scenario, reach, step_half_width),
         # Yaw about z, MuJoCo's w-x-y-z order. The step's face stays normal to world x, so
         # the angle is entirely in the robot's heading and "past the face" stays an x test.
         (f'    <body name="chassis" pos="0 0 {start_z:.9f}" '
@@ -601,6 +700,14 @@ def observe_rover(
     history = np.zeros((n_steps, 6), dtype=np.float64)
     energy = 0.0
     hit_step = False
+    # The ROM's validity envelope, counted rather than assumed (TODO #31). A segment only
+    # compresses when the ground pushes it, so "compressed" is "in contact" — and more than
+    # one per wheel is exactly the second-claw engagement past which the elements straddle
+    # the FEA. Counted per wheel, because four wheels sharing one count would call a rover
+    # with one claw down on each of four wheels a four-claw contact.
+    multi_contact_steps = 0
+    peak_compression = 0.0
+    per_wheel = (len(mounts), spec.n_segments) if segmented else (0, 0)
 
     try:
         for k in range(n_steps):
@@ -635,6 +742,22 @@ def observe_rover(
             history[k] = (data.time, float(data.xpos[chassis, 0]),
                           float(data.xpos[chassis, 2]), pitch, roll,
                           float(data.qacc[root_z_dof]))
+            if segmented and k >= settle_steps:
+                # `qpos` is signed and a compressed segment sits at negative coordinate, the
+                # same convention `qfrc_applied` is written with above.
+                squash = -data.qpos[segment_qpos].reshape(per_wheel)
+                deepest = squash.max(axis=1, keepdims=True)
+                peak_compression = max(peak_compression, float(deepest.max()))
+                # **Sharing, not touching.** A claw that has just left the ground is still
+                # ringing down through a few microns of compression, so an absolute threshold
+                # counts it as in contact: at 1 um this read 70% of a flat run, against a
+                # static ring that carries on one claw for all but the half-pitch crossing.
+                # That is the project's standing failure — a plausible number measuring the
+                # wrong thing — so the criterion is a share of the deepest claw on the same
+                # wheel, with a floor so an airborne wheel does not divide by its own noise.
+                loaded = (squash > MULTI_CONTACT_SHARE * deepest) & (deepest > 1.0e-4)
+                if int(np.max(np.count_nonzero(loaded, axis=1))) > 1:
+                    multi_contact_steps += 1
             if not hit_step:
                 for c in range(data.ncon):
                     pair = (data.contact[c].geom1, data.contact[c].geom2)
@@ -646,13 +769,18 @@ def observe_rover(
 
     if not np.all(np.isfinite(history)):
         return RoverResult(ok=False, message="the scenario diverged (non-finite state)")
+    driving_steps = max(n_steps - settle_steps, 1)
     return _summarise(platform, scenario, history, settle_steps, energy, hit_step,
                       n_tips=0 if spec is None else spec.n_segments,
-                      wheel_radius_m=wheel_radius_m)
+                      wheel_radius_m=wheel_radius_m,
+                      multi_contact_fraction=multi_contact_steps / driving_steps,
+                      peak_compression_m=peak_compression)
 
 
 def _summarise(platform, scenario, history, settle_steps, energy_j, hit_step, *,
-               n_tips: int = 0, wheel_radius_m: float = 0.0) -> RoverResult:
+               n_tips: int = 0, wheel_radius_m: float = 0.0,
+               multi_contact_fraction: float = 0.0,
+               peak_compression_m: float = 0.0) -> RoverResult:
     """Turn the history into the handful of numbers worth quoting."""
     x, z = history[:, 1], history[:, 2]
     driving = slice(settle_steps, None)
@@ -698,6 +826,8 @@ def _summarise(platform, scenario, history, settle_steps, energy_j, hit_step, *,
         harshness_rms_m_s2=harshness,
         mean_speed_m_s=speed,
         tip_frequency_hz=float(tip_hz),
+        multi_contact_fraction=float(multi_contact_fraction),
+        peak_compression_m=float(peak_compression_m),
         history=history,
     )
 

@@ -1,0 +1,56 @@
+# CI: the unit suite, and the Phase 0 determinism gate run on a genuinely different machine.
+#
+# Two jobs on purpose. `tests` is the ordinary red/green signal. `determinism-gate` is an
+# EXPERIMENT — `docs/plan/11-phases.md` asks for "identical θ → identical score on two
+# machines", and this runner (Linux x86-64) against the reference manifests (macOS arm64,
+# committed under tests/fixtures/ci/) is exactly that claim being tested. If it fails while
+# `tests` passes, that is not a broken build: it is the gate's finding — cross-platform
+# floating point moved a trajectory — and it goes in the experiment log, not in a hotfix.
+#
+# What deliberately does NOT run here: CalculiX, gmsh, OCCT. The FEA and CAD batteries need
+# real kernels and a conda environment; the unit suite is designed to skip those layers
+# cleanly, and the S1 gate needs only MuJoCo, which ships manylinux wheels. Keeping the
+# heavy toolchain out is what keeps the whole workflow under the 5-minute budget the plan
+# sets for it.
+
+name: ci
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  tests:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+      - name: Install (numpy layers + sim + store, no CAD/FEA kernels)
+        run: pip install -e '.[sim,store,dev]'
+      - name: Unit suite
+        run: python -m unittest discover -s tests -t .
+      - name: Lint
+        run: ruff check .
+
+  determinism-gate:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+      - name: Install
+        run: pip install -e '.[sim,store]'
+      - name: "Cross-machine gate: 3 designs against the committed manifests"
+        run: |
+          for r in 60 85 100; do
+            python scripts/run_s1.py --radius "$r" --heights 40:120:40 --seeds 4 \
+              --no-store --manifest "tests/fixtures/ci/s1_R${r}.json"
+          done

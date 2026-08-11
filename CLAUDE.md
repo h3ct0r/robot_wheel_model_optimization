@@ -20,7 +20,10 @@ Full statement and sub-questions: `docs/plan/02-research-questions.md`
 
 ## Current state
 
-- **Phase:** 0 — Foundations (see `docs/plan/11-phases.md`)
+- **Phase:** 0 — Foundations, **closed 2026-08-11** except the three recorded deferrals in
+  `TODO.md` #36; the cross-machine gate runs in CI and its first real verdict arrives with
+  the first push. Phase 1 (FEA/ROM pipeline) is substantially built ahead of schedule; its
+  gate — ROM vs Chrono on 10 designs — is untouched.
 - **Active work:** ROM feasibility spike, `docs/plan/16-first-week.md`.
   Steps 2 (CAD generator) and 3 (CalculiX radial compression) are **done and verified** —
   `scripts/verify_cad.py` 48/48, `scripts/verify_fea.py --full` 30/30 against CalculiX 2.23.
@@ -185,6 +188,55 @@ Full statement and sub-questions: `docs/plan/02-research-questions.md`
   strikes the riser, which is modelled because ground clearance is 70 mm and the body is a real
   contact geom. The platform loader now reads the seven vehicle fields that sat unread in the
   YAML, and `ring_bodies`/`coupling_tendons` take a `prefix` so four wheels can coexist.
+- **Phase 0 is closed, and the determinism gate is cross-machine now** (2026-08-11, `TODO.md`
+  #36 records the three bullets deliberately not built — `T0` CAD, CoACD, Hydra — each with a
+  named trigger). `.github/workflows/ci.yml`: unit suite + ruff, no kernels, and a
+  `determinism-gate` job that re-runs three designs' S1 ladders on Linux x86-64 against
+  manifests committed from this arm64 machine, **bit for bit** (`run_s1.py
+  --manifest-out/--manifest`, `store.compare_manifests`). If that job fails while tests pass,
+  it is the gate *finding something* — cross-platform FP moving a trajectory — not a broken
+  build. The gate caught a real bug on day one: `rung_name` carried only the height, so
+  `--duration 5` collided into the 6-second reference's run_ids with different numbers inside
+  — invariant 5 violated quietly since S1 was built. The rung name now digests everything
+  that shapes the run, with `n_seeds` and `heights_m` excluded by name. Also that day:
+  **#34** closed (both thickness floors deliberately below the TPU wall so the wall checks
+  stay falsifiable, ≈5.9%/field of a uniform sweep, stated once in `04-design-space.md`);
+  **#28** closed (stick branch limit point measured at μ=0.6: **105/39/23 N** at taper
+  1.0/0.6/0.4 — a 4.6× collapse while slenderness creeps 6.3→7.8, so the axis, not the 40, is
+  the problem; `fea_buckling` is the check that works, and beyond ~15 mm the sweep diverges —
+  snap-back, no Riks in CalculiX); **#32** advanced (`fit.n_intervals_by_cv`, opt-in
+  leave-one-out that recovers the known 4 where the length rule picks 3; the default is
+  untouched because switching it re-fits every banded result on record).
+- **S7: on a washboard the sign reverses, 4.8–6.9x** (2026-08-11, `TODO.md` #33 closed in
+  substance). `run_rover.py --washboard MM --wavelength MM` adds a sinusoidal corrugation — a
+  strip of boxes at 8/wavelength (an `hfield` needs post-compile data patching, and the MJCF
+  string *is* the model), entered at a **trough** so the doorstep is a ramp and the transient
+  belongs to the terrain. At 10 mm peak-to-trough the twelve-claw wheel beats the rigid
+  cylinder **6.4/6.3/5.9/4.8x at λ = 60/100/200/400 mm**, at equal-or-higher speed (not smooth
+  by being slow), and the 3-claw wheel reads 10.0 against 6.3 so the metric still ranks within
+  the family. **The sign is the result, the second digit is not**: 20–53% of those runs have
+  two claws sharing (#31's unvalidated regime) and the run prints exactly that. A step plus a
+  washboard is refused — S1 is the step, S7 the corrugation, nothing defines the mixture.
+  Still open under #33: the amplitude × wavelength sweep proper, and terrain seeds for CVaR.
+- **#31: a tip is a corner, the onset now has a closed form, and it was never the problem**
+  (2026-08-11, `rom-0.7.0`, `TODO.md` #31 partly closed). A claw's deepest material sits half a
+  tip thickness off its own axis, so its reach is `R cos θ + h sin|θ|` and a side claw engages
+  early. `RingSpec.tip_half_thickness_m` puts that in both solvers — contact condition *and*
+  the hinge's lever arm, `(L−u) sin ψ − h cos ψ` — and predicts second-claw engagement at
+  **7.14 mm** where the point tip said 8.04 and the **FEA measures 7.20**. Zero reproduces the
+  old ring exactly. **But the straddle barely moves**: +62.7%/−49.5% becomes **+74.7%/−45.6%**,
+  the hinge gaining 4 pp and the slide getting *worse* because a too-late onset had been
+  cancelling a too-stiff element. So the cause is **bedding** — a claw lying along its flank,
+  loaded in bending over a travelling patch — which no point-contact element reaches. Two
+  things found on the way: `solve_equilibrium` carried its **own copy** of the interference
+  formula, so the radial model came back byte-identical across a change that moved engagement
+  0.9 mm (now one `_interference`); and the first validity metric read **70%** of a flat run
+  because a 1 µm threshold counts a claw ringing down after it leaves the ground — it is a
+  *share* of the deepest claw now, and reads 9%. The bound is measured, not asserted:
+  `BuiltRing.validity_delta_m` and `RoverResult.multi_contact_fraction`, printed by
+  `run_rover.py`. Flat run: 9% sharing, 4.11 mm peak compression, inside both bounds. 40 mm
+  step: 8% sharing but **21.98 mm** against a law measured to 12 — the *law* is what fails
+  there, not the element.
 - **`T7L`, the L claw: a foot on the tip, built and screened and deliberately not simulated**
   (2026-08-11, `TODO.md` #35). `WheelParams.tip_hook_mm` bends the last stretch of a claw
   through a right angle so it lies along the running surface — radial leg, filleted bend,

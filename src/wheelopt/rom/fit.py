@@ -37,7 +37,7 @@ Always look at the tangents, not only at :attr:`RingFit.rms_error_fraction`.
 
 from __future__ import annotations
 
-from collections.abc import Callable
+from collections.abc import Callable, Sequence
 from dataclasses import dataclass, replace
 from typing import TYPE_CHECKING
 
@@ -66,6 +66,7 @@ __all__ = [
     "hinge_kinematics_check",
     "hinge_law_from_tip_curve",
     "law_from_claw_curve",
+    "n_intervals_by_cv",
     "nnls",
     "ring_from_claw_curve",
     "validate_ring",
@@ -390,6 +391,62 @@ def fit_spring_law(
     return _result(spec, law, d, f, iterations, converged)
 
 
+def n_intervals_by_cv(
+    spec: RingSpec,
+    delta_m: np.ndarray,
+    force_n: np.ndarray,
+    *,
+    candidates: Sequence[int] | None = None,
+    smoothing: float = 0.1,
+) -> int:
+    """Pick a table resolution by leave-one-out prediction, not by fit error.
+
+    The answer to ``TODO.md`` #32's first candidate, built **opt-in** so no historical fit
+    moves: :func:`fit_tabulated_law`'s default rule is untouched, and a caller that wants the
+    data to choose passes ``n_intervals=n_intervals_by_cv(...)`` explicitly.
+
+    Why not fit error: it falls monotonically with resolution while the law stops being
+    physical (the docstring below has the measured sequence — RMS 10.60% → 3.42% while the
+    tangent swings −52 to +63 N/mm). Held-out prediction is the number that turns back up
+    when the table starts fitting noise: each point is dropped in turn, the law is fitted to
+    the rest, and the dropped point is predicted. On the six-point claw curve where #32 was
+    opened this picks **4** — the resolution the default's ``min(8, len//2) = 3`` misses and
+    the one that passes the gate (1.71% against 10.42%).
+
+    The endpoints are never dropped. The table's knots span the data, so a law fitted without
+    the last point would *extrapolate* to predict it — scoring resolutions on behaviour the
+    fit never claims — and the first point anchors the origin the same way.
+
+    Ties go to the coarser table. Fewer parameters with the same held-out error is the same
+    law with less room to oscillate.
+    """
+    d, f = _clean(delta_m, force_n, 2, "cross-validation")
+    if candidates is None:
+        # Up to one interval per interior point: beyond that some interval contains no data
+        # and its slope is chosen by the smoothing penalty alone, which is not a fit.
+        candidates = range(1, max(2, len(d) - 1))
+    scores: list[tuple[float, int]] = []
+    for n in candidates:
+        errors = []
+        for drop in range(1, len(d) - 1):
+            keep = np.ones(len(d), dtype=bool)
+            keep[drop] = False
+            try:
+                fit = fit_tabulated_law(spec, d[keep], f[keep], n_intervals=n,
+                                        smoothing=smoothing)
+            except FitFailure:
+                break
+            predicted = float(ring_force_n(spec, fit.law, float(d[drop])))
+            errors.append((predicted - float(f[drop])) ** 2)
+        else:
+            scores.append((float(np.sqrt(np.mean(errors))) if errors else np.inf, n))
+    if not scores:
+        raise FitFailure("no candidate resolution produced a fit on every fold")
+    best_error = min(score for score, _ in scores)
+    # Coarsest within 5% of the best: past that, extra intervals are fitting the folds.
+    return min(n for score, n in scores if score <= 1.05 * best_error)
+
+
 def fit_tabulated_law(
     spec: RingSpec,
     delta_m: np.ndarray,
@@ -576,7 +633,8 @@ def ring_from_claw_curve(
             f"{params.rim_thickness_mm:g}"
         )
     spec = RingSpec(radius_m=params.outer_radius_mm * 1e-3, n_segments=params.n_spokes,
-                    root_radius_m=params.hub_radius_mm * 1e-3)
+                    root_radius_m=params.hub_radius_mm * 1e-3,
+                    tip_half_thickness_m=0.5 * params.tip_thickness_mm * 1e-3)
     return spec, law_from_claw_curve(delta_m, force_n)
 
 

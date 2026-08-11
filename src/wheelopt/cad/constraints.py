@@ -461,6 +461,17 @@ def check_design(
     # erred toward accepting a claw that buckles -- non-conservatively. The effective
     # thickness is the uniform spoke of equal tip compliance, derived in closed form on
     # `WheelParams`, and it is 13% below the root at taper 0.6 and 36% below at 0.25.
+    #
+    # **What this check can and cannot see** (2026-08-10 opened #28, 2026-08-11 closed it).
+    # It fires in the slender-strut corner it was written for -- a 1.6 mm spoke on an R 100
+    # banded wheel reads 48 -- and it is BLIND to the claw family, measured rather than
+    # argued: on the R 60, 12-claw design at mu = 0.6 the stick branch's limit point falls
+    # 105 -> 39 -> 23 N as the taper goes 1.0 -> 0.6 -> 0.4, a 4.6x collapse, while this
+    # proxy creeps 6.3 -> 7.2 -> 7.8. No threshold on an axis that flat can rank that
+    # family, so DO NOT tune this constant to catch claws; the check that catches them is
+    # `fea_buckling`, which measures each design's own limit point against 2.5x nominal and
+    # fails all three tapered claws above while this warning stays silent. This one is kept
+    # for the corner where geometry alone is enough to know the ROM fit will be poor.
     slenderness = params.spoke_span_mm / max(params.effective_thickness_mm, 1e-9)
     if slenderness > 40.0:
         v.append(

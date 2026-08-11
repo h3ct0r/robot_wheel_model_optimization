@@ -1,0 +1,119 @@
+{
+ "rows": {
+  "05fa534cf03ceb2d": {
+   "metrics": {
+    "climbed": 0.0,
+    "distance_m": 0.8010433245248693,
+    "energy_j": 66.15859581302128,
+    "final_clearance_m": -0.02000001511349224
+   },
+   "status": "ok"
+  },
+  "19dfbc25866868b7": {
+   "metrics": {
+    "climbed": 1.0,
+    "distance_m": 6.5222111597599355,
+    "energy_j": 32.8318171394981,
+    "final_clearance_m": 0.17000098531107513
+   },
+   "status": "ok"
+  },
+  "1dc3c2138010267e": {
+   "metrics": {
+    "climbed": 1.0,
+    "distance_m": 6.4564382120037225,
+    "energy_j": 33.648854576412084,
+    "final_clearance_m": 0.17000089164524212
+   },
+   "status": "ok"
+  },
+  "47d2bbc1f959e2bb": {
+   "metrics": {
+    "climbed": 0.0,
+    "distance_m": 0.8081069186556219,
+    "energy_j": 80.100253154916,
+    "final_clearance_m": -0.020000010326873555
+   },
+   "status": "ok"
+  },
+  "48f5a05f0abda24c": {
+   "metrics": {
+    "climbed": 1.0,
+    "distance_m": 6.634700903118734,
+    "energy_j": 29.349369183152742,
+    "final_clearance_m": 0.16999837626577344
+   },
+   "status": "ok"
+  },
+  "658d2abd8b55f24d": {
+   "metrics": {
+    "climbed": 0.0,
+    "distance_m": 0.5711443485926325,
+    "energy_j": 169.85818875995054,
+    "final_clearance_m": 0.05028092765054065
+   },
+   "status": "ok"
+  },
+  "65c462c9d0f906e2": {
+   "metrics": {
+    "climbed": 0.0,
+    "distance_m": 0.56998439605492,
+    "energy_j": 153.05177007231467,
+    "final_clearance_m": 0.05029474021424982
+   },
+   "status": "ok"
+  },
+  "758529a3880a3199": {
+   "metrics": {
+    "climbed": 0.0,
+    "distance_m": 0.5734214079787253,
+    "energy_j": 163.70171671070824,
+    "final_clearance_m": 0.09018701426499458
+   },
+   "status": "ok"
+  },
+  "7fc6f78c80740026": {
+   "metrics": {
+    "climbed": 1.0,
+    "distance_m": 5.686434169066227,
+    "energy_j": 57.28904165384357,
+    "final_clearance_m": 0.16999959381114865
+   },
+   "status": "ok"
+  },
+  "a766df7c9a3ffa92": {
+   "metrics": {
+    "climbed": 0.0,
+    "distance_m": 0.5720940476019473,
+    "energy_j": 147.4667282500071,
+    "final_clearance_m": 0.09029167846943485
+   },
+   "status": "ok"
+  },
+  "f1867ba6856a9b72": {
+   "metrics": {
+    "climbed": 1.0,
+    "distance_m": 6.460847282326707,
+    "energy_j": 34.369335786253316,
+    "final_clearance_m": 0.17000007522867122
+   },
+   "status": "ok"
+  },
+  "ff4b27663833f7f5": {
+   "metrics": {
+    "climbed": 1.0,
+    "distance_m": 5.7665448598833535,
+    "energy_j": 56.33218820027065,
+    "final_clearance_m": 0.16999944377650983
+   },
+   "status": "ok"
+  }
+ },
+ "schema": "store-0.1.0",
+ "versions": {
+  "cad": "cad-0.1.0",
+  "fea": "fea-0.1.0",
+  "rom": "rom-0.7.0",
+  "store": "store-0.1.0"
+ }
+}

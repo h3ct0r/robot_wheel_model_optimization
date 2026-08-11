@@ -51,6 +51,19 @@ See docs/plan/06-compliance-rom.md.
 #:   yields a **different law**, and on the R 60 mm claw the step climb moves from 60 mm to
 #:   30 mm because of it. That is exactly what invariant 5 exists for: which law a design gets
 #:   is part of the ROM, not an input to it.
-ROM_VERSION = "rom-0.6.0"
+#: - ``rom-0.7.0`` — a segment's tip is a **corner, not a point** (``TODO.md`` #31).
+#:   ``RingSpec.tip_half_thickness_m`` is new: the deepest material of a claw at angle θ sits
+#:   half a thickness off its own axis, so its downward extent is ``R cos θ + h sin|θ|`` and a
+#:   claw away from the contact point engages ``h sin|θ|`` of indentation **earlier**. On the
+#:   R 60 mm, twelve-claw, taper 0.6 design that predicts second-claw engagement at 7.14 mm
+#:   against the point-tip 8.04 mm, and the FEA measures 7.20 — a check against a number this
+#:   model did not produce. Zero reproduces the point-tip ring exactly, so only bandless specs
+#:   built through ``ring_for_design`` / ``ring_from_claw_curve`` move.
+#:   **What it does not fix is the reason it was written.** Above engagement the straddle
+#:   against the FEA goes from +62.7% / −49.5% (slide / hinge) to +74.7% / −45.6%: the hinge
+#:   improves 4 pp, and the slide gets *worse* because a too-late onset had been partly
+#:   cancelling a too-stiff element. Contact onset was never the cause; the cause is that a
+#:   claw beds along its flank and neither element can. See the 2026-08-11 log entry.
+ROM_VERSION = "rom-0.7.0"
 
 __all__ = ["ROM_VERSION"]

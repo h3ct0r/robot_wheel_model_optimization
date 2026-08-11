@@ -230,6 +230,8 @@ Two failure modes worth naming, because both read as innocuous:
 | `--duration` | `6.0` s | Also sizes the step box. |
 | `--friction` | `1.0` | TPU on concrete. Generous on purpose, so a failed climb is not merely a traction failure. |
 | `--approach` | `0.0`° | Heading yaw. Refused at ±90 and beyond. |
+| `--washboard` | `0.0` mm | S7: peak-to-trough height of a sinusoidal corrugation. Needs `--obstacle-height 0`; refused alongside a step. |
+| `--wavelength` | `100.0` mm | The corrugation's wavelength. Quote every S7 number with both. |
 | `--sweep` | off | Instead of one run, ladder 10 mm to 2.1 R in 10 mm buckets. |
 
 The drive is the platform's own linear torque–speed curve, clipped so a motor never brakes:
@@ -465,6 +467,33 @@ about 1 mm.
   three objectives — mass, obstacle capability, cost of transport — which is exactly why
   [ADR-0006](decisions/0006-multi-objective-not-scalarised.md) forbids scalarising them into
   one number.
+
+### The washboard (S7): where compliance wins outright
+
+On flat ground the rigid cylinder's 0.00 m/s² is unbeatable. `--washboard` adds a sinusoidal
+corrugation — a strip of boxes, entered at a trough so the doorstep is a ramp — and there the
+rigid wheel must follow the ground while a compliant one need not:
+
+```
+   10 mm peak-to-trough, R 60 mm, full throttle
+
+   wavelength      60 mm    100 mm    200 mm    400 mm
+   rigid           40.6      43.3      36.5      33.8   m/s² RMS
+   12-claw          6.4       6.3       6.2       7.1
+   ratio            6.3x      6.9x      5.9x      4.8x
+```
+
+The compliant wheel is also **not slower** (0.67–0.86 m/s against the rigid 0.61–0.78), so it
+is not smooth by being slow — and the 3-claw wheel reads 10.0 against the 12-claw's 6.3, so
+the metric still ranks within the compliant family. One caveat travels with the magnitudes:
+20–53% of those runs have two claws sharing load, where the ROM's element is unvalidated
+(TODO #31), and the run says so on its own output. The **sign** is the result.
+
+```bash
+python scripts/run_rover.py --obstacle-height 0 --washboard 10 --wavelength 100 \
+    --compliant --radius 60 --rim-thickness 0 --spokes 12 --thickness 6 \
+    --claw-taper 0.6 --spoke-phase -90 --plane-strain --law claw
+```
 
 ```bash
 # The harshness ladder: a deliberately bad wheel against a good one.

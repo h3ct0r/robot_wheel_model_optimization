@@ -573,5 +573,135 @@ class TestHarshness(unittest.TestCase):
                         "a robot at rest on the floor is not accelerating")
 
 
+@unittest.skipUnless(HAVE_MUJOCO, "MuJoCo not installed")
+class TestValidityEnvelope(unittest.TestCase):
+    """`multi_contact_fraction` — how much of a run left the range the ROM was checked over.
+
+    TODO #31. A bandless claw ring reproduces the FEA to 0.036% while one claw carries the
+    load, and the two available elements straddle it by +75%/-46% once two do. The point of
+    measuring it is that a compliant number is worth what this fraction says it is worth.
+    """
+
+    from wheelopt.rom.ring import RingSpec, SpringLaw
+
+    SPEC = RingSpec(radius_m=0.060, n_segments=12, root_radius_m=0.022,
+                    tip_half_thickness_m=0.0018)
+
+    @property
+    def SEGMENTED(self) -> dict:
+        return {"wheel_radius_m": 0.060, "wheel_width_m": 0.045, "wheel_mass_kg": 0.30,
+                "spec": self.SPEC, "law": self.SpringLaw(23000.0)}
+
+    def test_rigid_wheels_report_nothing_rather_than_zero_by_accident(self):
+        """A cylinder has no segments, so the fraction is not a small number — it is not a
+        number at all, and 0.0 has to mean 'no ring here' rather than 'a ring that stayed
+        inside its envelope'. Checked together with the peak compression, which would be the
+        giveaway if segments were being read from a rigid model."""
+        result = observe_rover(PLATFORM, RoverSpec(step_height_m=0.0, duration_s=3.0), **WHEEL)
+        self.assertTrue(result.ok, result.message)
+        self.assertEqual(result.multi_contact_fraction, 0.0)
+        self.assertEqual(result.peak_compression_m, 0.0)
+
+    def test_a_rolling_claw_wheel_is_on_one_claw_for_most_of_a_flat_run(self):
+        """The number this test exists for was **70%** in its first version, and that was an
+        artefact: an absolute 1 um threshold counts a claw still ringing down after it leaves
+        the ground. The static ring says a wheel at this load carries on one claw everywhere
+        but the half-pitch crossing, so a flat run must come out small. It reads 9%."""
+        result = observe_rover(PLATFORM, RoverSpec(step_height_m=0.0, duration_s=3.0),
+                               **self.SEGMENTED)
+        self.assertTrue(result.ok, result.message)
+        self.assertLess(result.multi_contact_fraction, 0.35)
+        self.assertGreater(result.peak_compression_m, 0.0, "the claws must actually compress")
+
+    def test_the_criterion_is_a_share_and_therefore_scale_free(self):
+        """Sharing is 'how many claws carry this wheel', which must not change meaning between
+        a light load and a heavy one. A step drives compressions several times deeper without
+        changing how many claws are down at a time."""
+        flat = observe_rover(PLATFORM, RoverSpec(step_height_m=0.0, duration_s=3.0),
+                             **self.SEGMENTED)
+        step = observe_rover(PLATFORM, RoverSpec(step_height_m=0.05, duration_s=3.0),
+                             **self.SEGMENTED)
+        self.assertTrue(flat.ok and step.ok)
+        self.assertGreater(step.peak_compression_m, 2.0 * flat.peak_compression_m)
+        self.assertLess(abs(step.multi_contact_fraction - flat.multi_contact_fraction), 0.35)
+
+    def test_the_fraction_is_a_fraction(self):
+        result = observe_rover(PLATFORM, RoverSpec(step_height_m=0.03, duration_s=3.0),
+                               **self.SEGMENTED)
+        self.assertTrue(result.ok, result.message)
+        self.assertGreaterEqual(result.multi_contact_fraction, 0.0)
+        self.assertLessEqual(result.multi_contact_fraction, 1.0)
+
+
+class TestWashboard(unittest.TestCase):
+    """S7's corrugation (`TODO.md` #33): the terrain where compliance can win."""
+
+    def test_smooth_ground_emits_no_washboard(self):
+        text = build_rover_mjcf(PLATFORM, RoverSpec(step_height_m=0.0), **WHEEL)
+        self.assertNotIn("wash", text)
+
+    def test_the_corrugation_is_a_strip_of_boxes_sampling_the_sinusoid(self):
+        spec = RoverSpec(step_height_m=0.0, washboard_amplitude_m=0.010,
+                         washboard_wavelength_m=0.100)
+        text = build_rover_mjcf(PLATFORM, spec, **WHEEL)
+        boxes = [x for x in text.splitlines() if 'name="wash' in x]
+        self.assertGreater(len(boxes), 100, "the strip must outrun the robot")
+        tops = []
+        for line in boxes:
+            z = float(line.split('pos="')[1].split('"')[0].split()[2])
+            half_h = float(line.split('size="')[1].split('"')[0].split()[2])
+            tops.append(z + half_h)
+        self.assertAlmostEqual(max(tops), 0.010, delta=0.0006,
+                               msg="the crests must reach the stated amplitude")
+        self.assertGreater(min(tops), 0.0, "every box must stand proud of the floor")
+
+    def test_the_entry_is_a_ramp_and_not_a_step_edge(self):
+        """The strip starts at a TROUGH. Starting at a crest puts a full-amplitude face at
+        the entry, and the transient of hitting it would be charged to the corrugation —
+        the scenario contributing the acceleration the wheel is being scored on, again."""
+        spec = RoverSpec(step_height_m=0.0, washboard_amplitude_m=0.012,
+                         washboard_wavelength_m=0.200)
+        text = build_rover_mjcf(PLATFORM, spec, **WHEEL)
+        first = next(x for x in text.splitlines() if 'name="wash' in x)
+        z = float(first.split('pos="')[1].split('"')[0].split()[2])
+        half_h = float(first.split('size="')[1].split('"')[0].split()[2])
+        # Half, not a whisker: at eight boxes per wave the first riser after the skipped
+        # sliver is ~0.3 A, and the failure this guards against — starting at a crest — would
+        # put the full A at the entry face.
+        self.assertLess(z + half_h, 0.5 * spec.washboard_amplitude_m)
+
+    def test_a_step_and_a_washboard_together_are_refused(self):
+        """S1 is the step and S7 is the corrugation; a harshness number taken while climbing
+        would be about the step. Nothing defines the combination, so nothing may run it."""
+        with self.assertRaises(ValueError):
+            RoverSpec(step_height_m=0.05, washboard_amplitude_m=0.010)
+
+    def test_nonsense_corrugations_are_refused_by_name(self):
+        with self.assertRaises(ValueError):
+            RoverSpec(washboard_amplitude_m=-0.001)
+        with self.assertRaises(ValueError):
+            RoverSpec(step_height_m=0.0, washboard_amplitude_m=0.01,
+                      washboard_wavelength_m=0.0)
+
+
+@unittest.skipUnless(HAVE_MUJOCO, "MuJoCo not installed")
+class TestWashboardDynamics(unittest.TestCase):
+    def test_a_rigid_wheel_reads_the_corrugation_it_could_not_read_on_the_flat(self):
+        """The reason S7 exists. On the flat a rigid cylinder is the unbeatable 0.00 m/s2;
+        on the washboard it must follow the ground, and the measured jump is 40x. Without
+        this, the harshness objective scores every compliant wheel against a wheel nobody
+        can print, on the one surface where that wheel cannot lose."""
+        flat = observe_rover(PLATFORM, RoverSpec(step_height_m=0.0, duration_s=3.0), **WHEEL)
+        rough = observe_rover(
+            PLATFORM,
+            RoverSpec(step_height_m=0.0, duration_s=3.0, washboard_amplitude_m=0.010,
+                      washboard_wavelength_m=0.100),
+            **WHEEL)
+        self.assertTrue(flat.ok and rough.ok, f"{flat.message} {rough.message}")
+        self.assertLess(flat.harshness_rms_m_s2, 0.1)
+        self.assertGreater(rough.harshness_rms_m_s2, 10.0 * max(flat.harshness_rms_m_s2, 0.5))
+        self.assertGreater(rough.mean_speed_m_s, 0.2, "it must still make progress")
+
+
 if __name__ == "__main__":  # pragma: no cover
     unittest.main()

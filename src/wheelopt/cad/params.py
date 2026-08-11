@@ -393,6 +393,11 @@ PARAM_BOUNDS: dict[str, tuple[float, float]] = {
     # 220 mm bed. The chassis would happily take more.
     "outer_radius_mm": (60.0, 100.0),
     "width_mm": (30.0, 70.0),
+    # Below the 1.6 mm TPU wall for the same reason `spoke_thickness_mm` is (see #34, decided
+    # 2026-08-11): the range must be able to express a design that `rim_min_wall` rejects, or
+    # the check can never fire and has stopped testing anything. The shared rationale and its
+    # measured cost — about 6% of a uniform sweep per field — live in `04-design-space.md`
+    # §Constraints, stated once for both fields.
     "rim_thickness_mm": (1.2, 8.0),
     # Lowered 6 -> 3 on 2026-08-10 to admit **deliberately bad** baselines: a design that a
     # good one has to beat is worth more than a bound that only admits plausible wheels, and
@@ -417,7 +422,9 @@ PARAM_BOUNDS: dict[str, tuple[float, float]] = {
     "n_spokes": (3, 36),
     # The lower bound sits *below* the minimum printable TPU wall (1.6 mm) on purpose, so
     # that `spoke_min_wall` stays a live check rather than being made unreachable by the
-    # range. The upper bound is set by buckling at 24.5 N — see WheelParams.
+    # range; `rim_thickness_mm` shares the rationale, and it is stated once with its measured
+    # cost in `04-design-space.md` §Constraints (#34). The upper bound is set by buckling at
+    # 24.5 N — see WheelParams.
     "spoke_thickness_mm": (1.2, 8.0),
     "spoke_curvature_1_per_mm": (-0.03, 0.03),
     # 1.0 is a uniform strut. The lower bound is not a printability limit — `spoke_min_wall`

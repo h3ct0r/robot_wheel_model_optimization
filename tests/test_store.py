@@ -21,6 +21,8 @@ from wheelopt.store import (
     RunRecord,
     RunStatus,
     StoreError,
+    compare_manifests,
+    manifest_from_records,
     pipeline_versions,
 )
 
@@ -235,6 +237,65 @@ class TestDeterminismGate(unittest.TestCase):
         ])
         self.assertEqual(self.store.disagreements(), [])
         self.assertEqual(len(self.store.records()), 2)
+
+
+class TestManifest(unittest.TestCase):
+    """The cross-machine half of the determinism gate: records -> JSON -> comparison."""
+
+    def rows(self, energy: float = 12.5) -> list[RunRecord]:
+        return [RunRecord(design_hash="d1", scenario="S1_step/h=0.040@abcd1234", seed=s,
+                          material_realisation=0,
+                          metrics={"climbed": 1.0, "energy_j": energy})
+                for s in (0, 1)]
+
+    def test_a_manifest_round_trips_floats_bit_for_bit(self):
+        """`json` writes float64 with repr, which is exact — so equality on the far side is
+        equality of numbers, not of formatting. The value is chosen to be awkward."""
+        import json
+
+        awkward = 0.1 + 0.2   # 0.30000000000000004
+        manifest = manifest_from_records(self.rows(energy=awkward))
+        back = json.loads(json.dumps(manifest))
+        self.assertEqual(compare_manifests(manifest, back), [])
+        run_id = next(iter(back["rows"]))
+        self.assertEqual(back["rows"][run_id]["metrics"]["energy_j"], awkward)
+
+    def test_identical_records_agree_and_a_changed_metric_is_named(self):
+        reference = manifest_from_records(self.rows())
+        self.assertEqual(compare_manifests(reference, manifest_from_records(self.rows())), [])
+        problems = compare_manifests(reference, manifest_from_records(self.rows(energy=13.0)))
+        self.assertTrue(problems)
+        self.assertTrue(all("energy_j" in line for line in problems), problems)
+
+    def test_a_version_skew_is_reported_first(self):
+        """A version skew explains every numeric difference after it; reporting the numbers
+        first sends someone debugging arithmetic that never ran on the same code."""
+        reference = manifest_from_records(self.rows())
+        candidate = manifest_from_records(self.rows(energy=99.0))
+        candidate = {**candidate, "versions": {**candidate["versions"], "rom": "rom-9.9.9"}}
+        problems = compare_manifests(reference, candidate)
+        self.assertIn("version skew", problems[0])
+
+    def test_missing_and_extra_runs_are_two_experiments_not_nondeterminism(self):
+        """What the gate caught on its first day: a ladder at a different duration produced
+        the same run_ids with different numbers, because duration was not in the key. With
+        the key fixed, a changed input reads as missing+extra runs — a different experiment —
+        which is the honest description."""
+        reference = manifest_from_records(self.rows())
+        other = [RunRecord(design_hash="d1", scenario="S1_step/h=0.040@ffff0000", seed=0,
+                           material_realisation=0, metrics={"climbed": 1.0})]
+        problems = compare_manifests(reference, manifest_from_records(other))
+        self.assertTrue(any("missing run" in x for x in problems))
+        self.assertTrue(any("extra run" in x for x in problems))
+
+    def test_a_run_that_fails_on_one_machine_only_is_the_loudest_disagreement(self):
+        reference = manifest_from_records(self.rows())
+        failed = [RunRecord(design_hash="d1", scenario="S1_step/h=0.040@abcd1234", seed=s,
+                            material_realisation=0, status=RunStatus.SIM_FAILED,
+                            message="diverged")
+                  for s in (0, 1)]
+        problems = compare_manifests(reference, manifest_from_records(failed))
+        self.assertTrue(any("status" in x for x in problems), problems)
 
 
 if __name__ == "__main__":  # pragma: no cover

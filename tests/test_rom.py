@@ -2081,5 +2081,152 @@ class TestRingRefusesWhatItCannotRepresent(unittest.TestCase):
         self.assertNotIn("tip_hook_mm", out.message)
 
 
+class TestTipCorner(unittest.TestCase):
+    """A segment touches the plate with its tip CORNER, half a thickness off its own axis.
+
+    `rom-0.7.0`, TODO #31. The whole content is that the corner's downward extent is
+    ``R cos θ + h sin|θ|`` rather than ``R cos θ``, so a claw away from the contact point
+    engages earlier.
+    """
+
+    R, N, HALF_T = 0.060, 12, 0.0018      # R 60 mm, twelve claws, 3.6 mm tip
+
+    def spec(self, half_t: float | None = None) -> RingSpec:
+        return RingSpec(radius_m=self.R, n_segments=self.N, root_radius_m=0.022,
+                        tip_half_thickness_m=self.HALF_T if half_t is None else half_t)
+
+    def test_zero_thickness_is_the_point_tipped_ring_exactly(self):
+        """Every result before this change was taken with a point tip, so the default has to
+        reproduce them bit for bit rather than nearly."""
+        point, corner = self.spec(0.0), self.spec()
+        bare = RingSpec(radius_m=self.R, n_segments=self.N, root_radius_m=0.022)
+        for delta in (0.001, 0.005, 0.010):
+            np.testing.assert_array_equal(penetrations(point, delta),
+                                          penetrations(bare, delta))
+        # ...and below engagement a *real* thickness changes nothing either, because the only
+        # claw touching is the one at theta = 0 and sin(0) is exactly zero. The correction is
+        # about claws off to the side; it cannot be mistaken for a stiffness knob.
+        for delta in (0.001, 0.005):
+            np.testing.assert_array_equal(penetrations(point, delta),
+                                          penetrations(corner, delta))
+        above = second_contact_delta_m(point) + 0.002
+        self.assertFalse(np.array_equal(penetrations(point, above),
+                                        penetrations(corner, above)),
+                         "past engagement the side claws must sit deeper")
+
+    def test_the_engagement_threshold_matches_the_closed_form(self):
+        """``R cos θ + h sin θ = R − δ`` at θ = 2π/n, solved for δ."""
+        theta = 2.0 * np.pi / self.N
+        expected = self.R - (self.R * np.cos(theta) + self.HALF_T * np.sin(theta))
+        self.assertAlmostEqual(second_contact_delta_m(self.spec()), expected, places=12)
+        self.assertAlmostEqual(expected * 1e3, 7.138, places=3)
+
+    def test_it_predicts_the_fea_onset_the_point_tip_missed(self):
+        """The check from outside the model. The FEA engages its second claw at 7.20 mm on
+        this design; the point tip says 8.04 and the corner says 7.14. One FEA sample."""
+        corner = second_contact_delta_m(self.spec()) * 1e3
+        point = second_contact_delta_m(self.spec(0.0)) * 1e3
+        self.assertLess(abs(corner - 7.20), 0.10)
+        self.assertGreater(abs(point - 7.20), 0.75)
+
+    def test_a_thicker_tip_engages_earlier_and_the_contact_point_never_moves(self):
+        """Monotone in the thickness, and exactly zero effect at θ = 0 — where sin θ is zero,
+        which is why the correction cannot be mistaken for a stiffness change."""
+        thresholds = [second_contact_delta_m(self.spec(h))
+                      for h in (0.0, 0.001, 0.002, 0.004)]
+        self.assertEqual(thresholds, sorted(thresholds, reverse=True))
+        for h in (0.0, 0.004):
+            self.assertAlmostEqual(penetrations(self.spec(h), 0.003)[0], 0.003, places=12)
+
+    def test_the_solver_and_penetrations_agree_because_they_share_the_geometry(self):
+        """They did not. `solve_equilibrium` carried its own copy of the interference
+        expression, so the radial model's force came back byte-identical across a change that
+        moved engagement by 0.9 mm while the hinge model's moved. One formula, one place."""
+        spec, law = self.spec(), SpringLaw(23000.0)
+        for delta in (0.002, 0.0071, 0.0075, 0.012):
+            with self.subTest(delta=delta):
+                np.testing.assert_allclose(solve_equilibrium(spec, law, delta).compression_m,
+                                           penetrations(spec, delta), atol=1e-15)
+
+    def test_the_hinge_reduces_to_the_point_tip_solver_at_zero_thickness(self):
+        """The corner enters the hinge in two places — the contact condition and the moment
+        arm — so a sign slip in either would show up here and nowhere else."""
+        law, hinge = SpringLaw(23000.0), SpringLaw(4.0)
+        point = RingSpec(radius_m=self.R, n_segments=self.N, root_radius_m=0.022)
+        for delta in (0.002, 0.008, 0.012):
+            with self.subTest(delta=delta):
+                a = solve_equilibrium_hinge(point, law, hinge, delta)
+                b = solve_equilibrium_hinge(self.spec(0.0), law, hinge, delta)
+                self.assertAlmostEqual(a.force_n, b.force_n, places=12)
+
+    def test_a_corner_makes_the_hinged_ring_engage_earlier_too(self):
+        """Same geometry, different solver: the hinge gate reads the corner as well, or the
+        two elements would disagree about when a claw is even touching."""
+        law, hinge = SpringLaw(23000.0), SpringLaw(4.0)
+        delta = 0.5 * (second_contact_delta_m(self.spec())
+                       + second_contact_delta_m(self.spec(0.0)))
+        corner = solve_equilibrium_hinge(self.spec(), law, hinge, delta)
+        point = solve_equilibrium_hinge(self.spec(0.0), law, hinge, delta)
+        self.assertGreater(int(corner.in_contact.sum()), int(point.in_contact.sum()))
+
+    def test_a_tip_thicker_than_the_wheel_is_refused(self):
+        with self.assertRaises(ValueError):
+            RingSpec(radius_m=0.060, n_segments=12, tip_half_thickness_m=0.060)
+        with self.assertRaises(ValueError):
+            RingSpec(radius_m=0.060, n_segments=12, tip_half_thickness_m=-0.001)
+
+
+class TestIntervalsByCv(unittest.TestCase):
+    """`n_intervals_by_cv` — the data choosing the table resolution (TODO #32, opt-in).
+
+    The claim under test: held-out prediction turns back up where fit error keeps falling,
+    so it can pick a resolution where fit error cannot. Uncoupled bandless spec throughout,
+    which is where #32's motivating failure lives.
+    """
+
+    SPEC = RingSpec(radius_m=0.060, n_segments=12, root_radius_m=0.022)
+
+    def curve(self, n_points: int = 9):
+        """A law that peaks early and softens — the shape 3 intervals cannot represent."""
+        law = TabulatedLaw(knots_m=uniform_knots(0.012, 4),
+                           slopes_n_per_m=np.array([9000.0, -2500.0, -500.0, 800.0]))
+        d = np.linspace(0.0012, 0.012, n_points)
+        return d, np.asarray(ring_force_n(self.SPEC, law, d), dtype=float)
+
+    def test_it_recovers_the_generating_resolution(self):
+        """The check against a number the chooser did not produce: the data came from a
+        4-interval law, so leave-one-out should land on 4 — not the 3 the length rule picks
+        at 6-9 points, and not the maximum it is allowed."""
+        from wheelopt.rom.fit import n_intervals_by_cv
+
+        d, f = self.curve()
+        self.assertEqual(n_intervals_by_cv(self.SPEC, d, f, smoothing=0.0), 4)
+
+    def test_ties_go_to_the_coarser_table(self):
+        """On data an m-interval law explains, every n >= m scores alike held-out; the
+        chooser must return the smallest, because equal error with fewer parameters is the
+        same law with less room to oscillate."""
+        from wheelopt.rom.fit import n_intervals_by_cv
+
+        law = SpringLaw(20000.0)   # linear: one interval suffices
+        d = np.linspace(0.001, 0.010, 8)
+        f = np.asarray(ring_force_n(self.SPEC, law, d), dtype=float)
+        self.assertEqual(n_intervals_by_cv(self.SPEC, d, f, smoothing=0.0), 1)
+
+    def test_the_default_rule_is_untouched(self):
+        """#32 is deferred precisely because moving the default moves every historical fit.
+        The chooser must be opt-in: same call as always, same resolution as always."""
+        d, f = self.curve(n_points=6)
+        fit = fit_tabulated_law(self.SPEC, d, f)
+        self.assertEqual(len(fit.law.slopes_n_per_m), 3,
+                         "min(8, 6//2) = 3, exactly as before")
+
+    def test_too_short_a_curve_is_refused_not_guessed(self):
+        from wheelopt.rom.fit import FitFailure, n_intervals_by_cv
+
+        with self.assertRaises(FitFailure):
+            n_intervals_by_cv(self.SPEC, np.array([0.001]), np.array([5.0]))
+
+
 if __name__ == "__main__":  # pragma: no cover
     unittest.main()

@@ -147,6 +147,14 @@ def build_parser() -> argparse.ArgumentParser:
                      help="yaw of the robot relative to the obstacle face, degrees. Rotates "
                           "the heading; it does not steer, so it stays clear of the "
                           "unvalidated skid-steer scrub. Refused at 90 or beyond")
+    run.add_argument("--washboard", type=float, default=0.0, metavar="MM",
+                     help="scenario S7: peak-to-trough height of a sinusoidal corrugation "
+                          "on the ground, mm. Needs --obstacle-height 0; this is where a "
+                          "compliant wheel is supposed to BEAT a rigid one on harshness "
+                          "rather than lose by less")
+    run.add_argument("--wavelength", type=float, default=100.0, metavar="MM",
+                     help="wavelength of that corrugation, mm. Harshness is a resonance "
+                          "question, so quote every S7 number with both of these")
     run.add_argument("--sweep", action="store_true",
                      help="instead of one run, sweep 10 mm to 2.1 R in 10 mm buckets and "
                           "report the tallest cleared plus the profile. Quote the answer as "
@@ -265,6 +273,7 @@ def _build_the_rings(args) -> str:
     of otherwise-total silence, and silence is indistinguishable from a hang.
     """
     args.ring = {}
+    args.validity_delta_m = float("inf")
     if not args.compliant:
         return ""
     params, material = params_from_args(args), material_from_args(args)
@@ -284,9 +293,13 @@ def _build_the_rings(args) -> str:
         return built.message
 
     args.ring = {"spec": built.spec, "law": built.fit.law}
+    args.validity_delta_m = built.validity_delta_m
     kind = "held out" if built.fit.iterations == 0 else "fitted"
     print(f"   ring: {built.spec.n_segments} segments/wheel, "
           f"R {built.spec.radius_m * 1e3:.0f} mm, [{kind}] {built.fit.summary()}")
+    note = built.validity_note()
+    if note:
+        print(f"   {note}")
     if not built.fit.ok:
         print("         <- the law did not pass its gate; this is a picture, not a number")
 
@@ -420,6 +433,35 @@ def _render(platform, scenario, args):
     return result, written, sheet_path
 
 
+def _report_validity(args, result) -> None:
+    """How much of the run was outside the range anybody checked (`TODO.md` #31).
+
+    Printed next to the numbers rather than in the banner at the top, because the banner is
+    read once and the numbers are what get copied out. A compliant claw ring reproduces the
+    FEA to 0.036% while **one** claw carries the load and straddles it by +75%/-46% once two
+    do, so a run's worth is what this line says it is.
+    """
+    if not args.compliant:
+        return
+    # Two separate questions, and a run can fail either without the other. Sharing is about
+    # the ELEMENT: past one claw the slide and the hinge straddle the FEA by +75%/-46%.
+    # Compression is about the LAW: past the sweep the tabulated law extrapolates on its last
+    # slope. A step-climb run is usually fine on the first and badly outside on the second.
+    fraction = result.multi_contact_fraction
+    print(f"  >1 claw sharing    {fraction:.0%} of the driving phase"
+          + ("" if fraction < 0.02 else
+             "   <- element unvalidated for that share (TODO #31)"))
+    peak = result.peak_compression_m
+    line = f"  peak compression   {peak * 1e3:.2f} mm on one segment"
+    law = args.ring.get("law")
+    knots = getattr(law, "knots_m", None)
+    if knots is not None:
+        measured = float(knots[-1])
+        line += f" (law measured to {measured * 1e3:.1f} mm"
+        line += ")" if peak <= measured else f", EXTRAPOLATED {peak / measured:.1f}x)"
+    print(line)
+
+
 def _report_harshness(platform, args, result, *, flat: bool) -> None:
     """The measured harshness, and the two analytic numbers that check it from outside.
 
@@ -502,9 +544,15 @@ def main(argv: list[str] | None = None) -> int:
         return 2 if "solver_missing" in message else 1
 
     def scenario_at(height_mm: float) -> RoverSpec:
-        return RoverSpec(step_height_m=height_mm * 1e-3, friction=args.friction,
-                         approach_deg=args.approach, duration_s=args.duration,
-                         throttle=args.throttle)
+        try:
+            return RoverSpec(step_height_m=height_mm * 1e-3, friction=args.friction,
+                             approach_deg=args.approach, duration_s=args.duration,
+                             throttle=args.throttle,
+                             washboard_amplitude_m=args.washboard * 1e-3,
+                             washboard_wavelength_m=args.wavelength * 1e-3)
+        except ValueError as exc:
+            print(f"scenario: {exc}")
+            raise SystemExit(1) from None
 
     if args.sweep:
         heights = np.arange(10.0, 2.1 * args.radius, 10.0)
@@ -540,7 +588,9 @@ def main(argv: list[str] | None = None) -> int:
             return 2
         result, written, sheet = _render(platform, scenario, args)
     else:
-        what = ("flat ground, measuring ride harshness" if flat else
+        what = (f"a {args.washboard:.0f} x {args.wavelength:.0f} mm washboard (S7)"
+                if flat and args.washboard > 0.0 else
+                "flat ground, measuring ride harshness" if flat else
                 f"a {args.obstacle_height:.0f} mm obstacle")
         with Stage(f"simulating {scenario.duration_s:.1f} s at {what}",
                    inline=False) as stage:
@@ -553,7 +603,10 @@ def main(argv: list[str] | None = None) -> int:
         print(f"\n{result.message}")
         return 1
 
-    if flat:
+    if flat and args.washboard > 0.0:
+        print(f"\nwashboard {args.washboard:.0f} mm x {args.wavelength:.0f} mm "
+              "(08-metrics.md S7, objective 3)")
+    elif flat:
         print("\nflat ground — no obstacle (08-metrics.md S5, objective 3)")
     else:
         print(f"\nobstacle {args.obstacle_height:.0f} mm "
@@ -568,6 +621,7 @@ def main(argv: list[str] | None = None) -> int:
     if not flat:
         print(f"  chassis hit step   {result.chassis_hit_step}")
     print(f"  axle work          {result.energy_j:.1f} J")
+    _report_validity(args, result)
     _report_harshness(platform, args, result, flat=flat)
     for path in [*written, sheet]:
         if path is not None:
