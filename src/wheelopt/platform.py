@@ -30,6 +30,7 @@ be.
 from __future__ import annotations
 
 import datetime as _dt
+import math
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -139,9 +140,13 @@ class PlatformSpec:
     chassis_inertia_kg_m2: tuple[float, float, float]
     #: Centre of mass relative to the chassis geometric centre, metres.
     com_offset_m: tuple[float, float, float]
-    #: Axle height above the ground under nominal load, metres. A box chassis will belly out
-    #: on a step taller than this, which is a real and wanted behaviour rather than a bug.
+    #: Clearance measured at the ORIGINAL r 22.5 mm wheels, metres. A reference measurement,
+    #: not the operating value: use :meth:`ground_clearance_for`, because clearance is
+    #: wheel-dependent on this robot.
     ground_clearance_m: float
+    #: Belly height above the axle line, metres — bracket geometry, invariant under wheel
+    #: swaps. Real clearance = wheel radius + this.
+    axle_to_belly_m: float
     #: Per driven wheel, **at the output** — after the gearbox. `motor.stall_torque` and
     #: `motor.no_load_speed` in the YAML.
     stall_torque_n_m: float
@@ -229,6 +234,71 @@ class PlatformSpec:
                 "meta.frozen and meta.frozen_date once the values are settled."
             )
 
+    def digest(self) -> str:
+        """Content hash of every numeric field, for run identity (invariant 5).
+
+        The platform shapes every simulated number — mass, motor curve, clearance, all of it —
+        and until 2026-08-11 none of that was in a run's identity: re-measuring the robot
+        produced the **same run_ids with different metrics inside**, which the cross-machine
+        manifest gate reads as non-determinism. It is the third instance of the same bug
+        (`S1Config.rung_name` and the FEA `SolverSpec` were the others), so the fix follows
+        the same rule: anything that changes the numbers is in the key. Provenance fields
+        (`name`, `source_path`, `frozen*`) are the named exclusions — renaming the file does
+        not change what it measured.
+        """
+        from .hashing import content_digest
+
+        payload = {
+            field: getattr(self, field)
+            for field in self.__dataclass_fields__
+            if field not in ("name", "frozen", "frozen_date", "source_path")
+        }
+        return content_digest(payload)[:12]
+
+    def ground_clearance_for(self, wheel_radius_m: float) -> float:
+        """Belly height above the ground with a given wheel fitted, metres.
+
+        ``wheel_radius + axle_to_belly``. The stated ``ground_clearance_m`` is the same
+        formula evaluated at the original r 22.5 mm wheels; treating it as a constant sank
+        an R 85 mm candidate's axle 55 mm above its own belly in the simulator, which is how
+        this method came to exist (2026-08-11 log). On this robot a bigger wheel buys belly
+        clearance one-for-one, which is most of why wheel radius matters at all.
+        """
+        if wheel_radius_m <= 0.0:
+            raise PlatformSpecError("wheel_radius_m must be positive")
+        return wheel_radius_m + self.axle_to_belly_m
+
+    def tipover_angles_rad(self) -> tuple[float, float]:
+        """Static tip-over angles ``(pitch_crit, roll_crit)``, radians.
+
+        The angle at which the chassis CG passes vertically over the wheel contact line:
+        ``atan(half_wheelbase / z_cg)`` about pitch, ``atan(half_track / z_cg)`` about roll,
+        with ``z_cg`` the CG height above the ground — ride height at the chassis centre plus
+        the stated CG offset. The stability objective (`08-metrics.md` objective 5) scores
+        peak excursions against these.
+
+        **Chassis-only, and that is the conservative side.** The wheels (~1.2 kg of a 10 kg
+        robot) sit at axle height, below the chassis CG, so the true combined CG is lower and
+        the true critical angles larger than these. A margin computed against this pair
+        under-reports safety rather than over-reporting it.
+
+        Static, not dynamic: a robot climbing at speed can tip below these angles (momentum)
+        or hang past them (a wheel against a riser). They are the reference the *margin* is
+        expressed in, not a prediction of the tipping instant — the same role ride height
+        plays for the climb predicate.
+        """
+        # At the reference wheels; the margin is a comparative score, and quoting it against
+        # one fixed yardstick keeps designs comparable (a per-wheel yardstick would let a
+        # taller wheel flatter its own margin by raising the angles it is scored against).
+        z_cg = self.ground_clearance_m + 0.5 * self.chassis_height_m + self.com_offset_m[2]
+        if z_cg <= 0.0:
+            raise PlatformSpecError(
+                f"CG height {z_cg:.4f} m is not above the ground; tip-over angles are "
+                "undefined. Check chassis.com_offset against the ride height."
+            )
+        return (math.atan2(0.5 * self.wheelbase_m, z_cg),
+                math.atan2(0.5 * self.track_width_m, z_cg))
+
     def consistency_warnings(self) -> list[str]:
         """Soft cross-checks between values that are stated independently.
 
@@ -270,12 +340,15 @@ class PlatformSpec:
         if self.min_width_m > self.max_width_m:
             out.append("wheel_envelope.min_width exceeds max_width")
 
-        # Wheels hang outboard, so the track is the chassis width plus two wheel widths at
-        # minimum. A track narrower than the chassis would mean they are inside it.
-        if self.track_width_m < self.chassis_width_m:
+        # The measured robot tucks its wheels UNDER the shell (track 157 inside a 231 mm
+        # body), so a track narrower than the chassis is the normal state, not a
+        # contradiction — the pre-2026-08-11 version of this check warned on exactly that,
+        # having been written for the fictional outboard-wheel box robot. What would still
+        # be inconsistent is a track so narrow the wheels overlap the centreline.
+        if self.track_width_m < self.max_width_m:
             out.append(
-                f"drivetrain.track_width = {self.track_width_m:g} m is narrower than the "
-                f"{self.chassis_width_m:g} m chassis, but the wheels are outboard"
+                f"drivetrain.track_width = {self.track_width_m:g} m leaves less than one "
+                f"max-width wheel between the two sides"
             )
 
         if self.wheel_well_radius_m < self.max_radius_m:
@@ -396,6 +469,7 @@ def load_platform(path: str | Path | None = None) -> PlatformSpec:
         chassis_inertia_kg_m2=_triple(raw, "chassis.inertia"),
         com_offset_m=_triple(raw, "chassis.com_offset"),
         ground_clearance_m=_number(raw, "chassis.ground_clearance_min"),
+        axle_to_belly_m=_number(raw, "chassis.axle_to_belly"),
         stall_torque_n_m=_number(raw, "motor.stall_torque"),
         no_load_speed_rad_s=_number(raw, "motor.no_load_speed"),
         target_speed_m_s=_number(raw, "operating_point.target_speed"),

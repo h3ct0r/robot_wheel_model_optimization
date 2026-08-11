@@ -5,11 +5,20 @@ Detail lives in `docs/`. This file points; it does not duplicate.
 
 ## What this project is
 
-Automatic optimisation of the 3D layout of **compliant (TPU) wheels** for a mobile
-terrestrial robot: a 400 × 300 × 200 mm, ~10 kg four-wheel skid-steer platform, 24.5 N per
-wheel, wheels 120–200 mm in diameter. A parametric CAD model generates candidate wheels; each is evaluated in
+Automatic optimisation of the 3D wheel layout for a **real, measured** four-wheel
+skid-steer robot (`configs/robot_piperobot.stl`): a pipe-robot chassis 426 × 231 × 187 mm,
+8.5 kg, wheelbase 250 / track 157 mm, four Dynamixel MX-64AT (6.0 N·m, 6.6 rad/s at the
+output), 20.6 N per wheel, wheels R 40–90 mm bolting to the D53 servo horn. The belly rides
+7.5 mm above the axle line, so **clearance = wheel radius + 7.5 mm** and the chassis nose
+overhangs the front axle by 88 mm — obstacle capability is wheel-limited below `R + 7.5`
+and nose-limited above it. Roll is the tight stability axis (35.9° vs 49.0°), not pitch. A parametric CAD model generates candidate wheels; each is evaluated in
 closed-loop dynamic simulation over an obstacle-traversal scenario suite; a multi-objective
-optimiser proposes the next candidates. Compliance is the object of study, not a detail.
+optimiser proposes the next candidates. **Both hard (PLA/PETG) and compliant (TPU) wheels are
+candidates the optimiser may pick** (re-framed 2026-08-11 — previously "compliance is the
+object of study"; the rigid families are being promoted from baseline to candidate, #37).
+Objectives: obstacle capability, cost of transport, ride harshness, mass, and **stability**
+(worst-moment margin to static tip-over — objective 5, added 2026-08-11). Ground truth is
+**printed hardware** (ADR-0008); Chrono is optional.
 
 **Research question.** For a fixed chassis and drivetrain, how should wheel geometry and
 material compliance be jointly chosen for rigid-obstacle mobility — and can that choice be
@@ -20,10 +29,22 @@ Full statement and sub-questions: `docs/plan/02-research-questions.md`
 
 ## Current state
 
-- **Phase:** 0 — Foundations, **closed 2026-08-11** except the three recorded deferrals in
+- **Phase:** 0 — Foundations, **closed 2026-08-11** except the recorded deferrals in
   `TODO.md` #36; the cross-machine gate runs in CI and its first real verdict arrives with
   the first push. Phase 1 (FEA/ROM pipeline) is substantially built ahead of schedule; its
-  gate — ROM vs Chrono on 10 designs — is untouched.
+  gate is now **hardware** — ROM within 10% of a printed wheel's measured press curve
+  (ADR-0008, superseding the Chrono gate). **The hardware data arrived 2026-08-11 and the
+  robot is not the robot the project assumed**: four Dynamixel MX-64AT (6.0 N·m, 6.6 rad/s
+  at the output — half the speed, 1.5x the torque of the estimate), 8.5 kg, and **30 mm of
+  clearance, not 70** — at an 80 mm step the measured robot parks its belly at 7° instead of
+  rearing to 90°, and the belly now protects the wheels. Mining the STL
+  (`configs/robot_piperobot.stl`): a **pipe robot**, 426x231x187, wheelbase 250, **track 157
+  (not 350)**, existing wheels **r ~22.5 mm** against a searched range of R 60-100 — the
+  design space is 3-4x oversized for the real machine. Adoption of the measured geometry is
+  ONE deliberate commit pending the pipe-bore/bracket questions in `17-hardware-baseline.md`
+  §A; until then the YAML carries it as a pending block, `nominal_wheel_load` stays 24.5
+  with its consistency warning pinned as the reminder, and the platform is in every run's
+  identity (`PlatformSpec.digest()` — invariant 5's third instance).
 - **Active work:** ROM feasibility spike, `docs/plan/16-first-week.md`.
   Steps 2 (CAD generator) and 3 (CalculiX radial compression) are **done and verified** —
   `scripts/verify_cad.py` 48/48, `scripts/verify_fea.py --full` 30/30 against CalculiX 2.23.
@@ -418,6 +439,10 @@ Full statement and sub-questions: `docs/plan/02-research-questions.md`
 | `data/cache/` | Content-addressed artifact cache. Never committed |
 
 ## Commands
+
+**README.md's "Running it" section is the authoritative command reference** — this block is
+the working subset and has drifted from it once already. When they disagree, README wins and
+this block gets fixed.
 
 <!-- Keep this section honest — remove anything that doesn't work. -->
 

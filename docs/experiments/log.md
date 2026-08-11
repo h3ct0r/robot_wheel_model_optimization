@@ -3629,3 +3629,190 @@ was: switching the *default* re-fits every banded result on record, and that re-
 been done. The tool now exists for the day it is.
 
 **Gates.** Unit suite 824/824 (15 new), ruff at the standing 71.
+
+---
+
+## 2026-08-11 — The review lands: objectives corrected, ground truth re-decided, two choke points re-scoped
+
+A project review against the restated objective — *a particular skid-steer robot, wheels hard
+or soft, maximise obstacle transposition and stability* — found inconsistencies, a missing
+objective, and two framing errors. This entry records what changed and why.
+
+### Stability is objective 5, and it was never harshness
+
+"Stability" for this project now means **not tipping over on obstacles and slopes** — rollover
+and pitch containment — which the harshness objective (a comfort axis) does not measure.
+`PlatformSpec.tipover_angles_rad` derives the static critical angles from the platform's own
+CG height, wheelbase and track: **37.4° pitch / 45.8° roll** on the current estimates, pitch
+the tighter axis — matching the observed failure mode, a robot rearing to 90° at a step it
+cannot climb. `RoverResult.stability_margin` is `1 − max(|pitch|/crit, |roll|/crit)` over the
+driving phase (worst moment, not average: a run that tips once has tipped), an S1 **metric**
+(designs rank on it) rather than a diagnostic, CVaR-aggregated like everything else. Measured:
++0.99 on the flat, +0.59 at a 60 mm step. Chassis-only CG makes the reference conservative —
+the wheels sit lower, so true critical angles are larger. Static reference, stated as such: a
+yardstick for comparison, not a tip-over predictor.
+
+### Hardware is the ground truth; Chrono is optional (ADR-0008)
+
+The robot exists and a printer sits beside it, so the thing Chrono was standing in for is
+cheaper than Chrono. The Phase 1 gate becomes: ROM within 10% of a **printed wheel's measured
+press curve** over the single-claw regime, multi-claw **calibrated against** the same curve,
+on ≥3 printed designs. This re-scopes #31: the multi-claw regime no longer waits on an
+analytic flank-bedding element — the printed curve becomes the law above second-claw
+engagement, and the element gets built only if the calibrated ring still cannot track the
+measured shape. The protocol (bench press rig: kitchen scale, screw jack or drill press,
+1 mm steps to 20 mm, both phases, two prints per design as material-realisation spread) is
+`17-hardware-baseline.md`, alongside the robot-freezing measurement list.
+
+### The scrub gap narrowed to a closed form, and what is left has a number (#38)
+
+The old docstring said lateral behaviour was "not validated against anything". Narrower now:
+a claw's out-of-plane stiffness is **(w/t)² ≈ 72×** its tangential one
+(`WheelParams.lateral_stiffness_ratio`, 156× at the tip; the taper only widens it, since
+in-plane enters cubically and lateral linearly), so the planar ROM is a defensible
+*structural* approximation for wide claws and a skid-steer turn is chiefly a **friction**
+problem MuJoCo does model. Unvalidated remainder, in #38: the ratio claim (needs a 3-D
+`TIP_LATERAL` case — the 2-D tier cannot express it), patch-level tip scrub, and low-`w/t`
+designs. Turning scenarios stay out until the first check passes.
+
+### The rigid family is a candidate, not just a baseline (#37)
+
+The pipeline could not have concluded "a hard wheel wins" even if true: no `T0` in CAD, no
+`T1`/`T2`, no CoACD path. That is a search biased by construction, now recorded as scheduled
+work — `T0`, grousers/lobes, CoACD→MJCF (promoted out of #36), and the first fair
+hard-vs-soft suite run. Carried with it: `outer_radius_mm`'s 100 mm cap traces to the dead
+220 mm printer; the true ceiling is the chassis wheel well, to be measured off the 3D model.
+
+### Housekeeping with content
+
+The dead printer's ghost was in four places, including the *rationale* for the radius bound
+and `wheel_envelope.max_radius` itself. README's status still led with the twice-superseded
+50-vs-20; now it leads with the washboard result and says why the old number died. Banded-`T3`
+machinery formally **dormant** (a frozen surface; #32's re-fit debt moot until revival). The
+slide element retired from both CLIs — it lost to the hinge twice and lives on in the library
+as the hinge's regression comparator; `--tangential slide` now errors. CLAUDE.md's command
+block subordinated to README's.
+
+**Gates.** Unit suite 828/828 (4 new), ruff at the standing 71.
+
+---
+
+## 2026-08-11 — The robot arrives, and it is not the robot the project assumed
+
+The hardware data landed: four Dynamixel MX-64AT at 12 V, 8.5 kg all-up, 3 cm clearance, and
+the 3D model (`configs/robot_piperobot.stl`, 156k triangles). Adopted into `robot.yaml` with
+provenance: **stall 6.0 N·m / no-load 6.597 rad/s at the output** (datasheet at 12 V; the
+200:1 is internal, so no efficiency factor on top), 12 V power, clearance 0.030, chassis mass
+7.3 kg under a stated wheel assumption. `nominal_wheel_load` stays 24.5 N deliberately — the
+measured mass implies ~20.9, but that number is baked into every FEA cache key, so it moves
+in one commit once the mass ambiguity is settled; the consistency warning that now fires is
+that note, enforced (pinned as a test asserting exactly one warning).
+
+### What the measured values already changed
+
+- **Half the speed, 1.5x the torque**: 0.40–0.56 m/s top speed against the old 1.19; the
+  scenario boxes shrink automatically (reach is computed), and the old `target_speed: 0.6`
+  was unreachable by any design — now 0.35.
+- **30 mm of clearance, not 70, and the failure mode flipped**: at an 80 mm step the
+  estimated robot reared toward 90°; the measured one **parks its belly on the riser at
+  7.2°**. The belly now protects the wheels (peak claw compression identical flat vs 50 mm
+  step, because the chassis grounds first). Three rover tests were re-pinned to the measured
+  physics; two of their old premises (a step deepens compression; stiffness leaves the
+  sharing fraction unchanged) were **measured false** — a 3.8x softer law shares 47 pp more,
+  which is physics, not criterion drift.
+- **The platform is now part of run identity** (`PlatformSpec.digest()` into
+  `RunRecord.versions`) — third instance of the invariant-5 bug: re-measuring the robot
+  produced the same run_ids with different metrics inside. CI manifests regenerated.
+
+### Mining the STL, with one cross-check that makes it trustworthy
+
+Vertex analysis of the binary STL (numpy, no mesh library): **overall 426 x 231 x 187 mm;
+wheelbase 250 mm; track 157 mm; four contact patches on the floor plane; existing wheels
+r ≈ 22.5 mm** (bottom-touch-constrained arc fits, four wheels agreeing 20.5–23.5). The
+model's own lowest mid-body material sits at **34 mm** — against the hand-measured 3 cm,
+which is the check from outside the extraction that makes the rest credible.
+
+**The assumed robot was fiction in two load-bearing places.** Track is 157, not 350 — the
+roll axis just got 2.2x tighter, which the new stability objective will feel directly. And
+the existing wheels are r 22.5 against a searched range of **R 60–100**: the entire design
+space is 3–4x oversized for the machine it is supposedly for. All four axles show structure
+at r 26.5 mm — numerically the MX-64 horn radius (Ø53), which *rotates* and caps nothing —
+so the true wheel ceiling is an application question (the 187 mm circular shell says
+pipe-fit) that an STL cannot answer.
+
+**Not adopted yet, deliberately**: chassis box, track, and wheel envelope drive every
+simulation and cache key, and re-deriving the design space around r ~22–45 invalidates the
+existing corpus. That adoption is one commit, after the pipe-bore and bracket questions in
+`17-hardware-baseline.md` §A are answered. The YAML carries the measured values as a
+prominent pending block so they cannot be lost.
+
+**Gates.** Suite green at 828 after the re-pins, ruff at the standing 71.
+
+---
+
+## 2026-08-11 — The adoption commit: the project now describes the machine that exists
+
+The user answered the four gating questions (no pipe-fit constraint; the r-26.5 structure is
+the servo horn, which rotates and caps nothing; wheel width is free outboard; 8.5 kg was
+ready-to-run, ~8.0 without wheels) — so the deliberate, cache-invalidating adoption promised
+by the pending block happened. Everything below moved in one sitting.
+
+### What moved
+
+- **`robot.yaml` geometry is the measured robot**: chassis 426 x 231 x 157 over a 30 mm belly,
+  wheelbase 250, **track 157**, mass 8.0 kg ex-wheels, inertia re-derived. The
+  0.400 x 0.300 x 0.200 "requirement" test now pins the measured dims, with the note that the
+  requirement is the machine that exists.
+- **The interface is the MX-64 horn, not a D-shaft.** Wheels bolt to a D53 rotating disc;
+  the 8 mm bore survives as the thrust-boss clearance hole. New screening check
+  `hub_seats_horn` (WARNING for now: hub >= 28 mm seats the horn directly, smaller hubs need
+  an adapter flange — the whole hub-22 corpus sits there, and hard-failing it the day the
+  horn was discovered would call every recorded design unbuildable when it is merely
+  un-direct. Promotes to INFEASIBLE when the default hub moves).
+- **`PARAM_BOUNDS` radius: (60, 100) → (40, 90).** Floor from the horn seat plus a claw that
+  is not a nub; ceiling is judgement (no pipe constraint, horn rotates, bed takes R 120) at
+  sane body lift (+67 mm) and top speed (0.59 m/s).
+- **`nominal_wheel_load` 24.5 → 20.6 N**, and `LoadCase.nominal_load_n` with it — every FEA
+  cache entry deliberately invalidated; the old scale described a fictional 10 kg robot. The
+  single-wheel rig's payload followed (2.5 → 2.1 kg).
+
+### The consistency checks earned their keep twice during the adoption itself
+
+The first attempt left 24.5 N in place — the YAML replace silently missed — and the warning
+that had been pinned as "the note, enforced" caught it. The second attempt set a target
+speed of 0.35 m/s, and the drivetrain check pointed out the smallest wheel in the new range
+(R 40) tops out at 0.26: target is now 0.25, reachable by every design. One check was
+retired *because the robot contradicts it*: "track narrower than the chassis" is the normal
+state of a machine whose wheels tuck under its shell; the check now guards the actual
+inconsistency (a track narrower than one wheel).
+
+### Clearance is wheel-dependent, and the constant version was hiding it
+
+The measured 30 mm belongs to the **original r 22.5 wheels**: the belly rides a fixed
+**7.5 mm above the axle line** (bracket geometry, `chassis.axle_to_belly`), so real clearance
+is `R + 7.5` and a bigger wheel buys belly height one-for-one. The constant-clearance sim had
+been sinking an R 85 candidate's axle 55 mm above its own belly — measured symptom: an 80 mm
+step "bellied" at 0.1 deg of pitch after 0.59 m, which was the *nose* of a chassis whose
+belly the sim had pinned at 30 mm regardless of wheel. `PlatformSpec.ground_clearance_for
+(wheel_radius)` is the fix, and the re-measured failure modes are now three regimes:
+
+```
+   R 85 fitted -> belly at 92.5 mm; chassis nose overhangs the front axle by 88 mm
+   step  25 mm   climbs, pitch  5.7 deg
+   step  80 mm   genuine climb attempt: pitch 20 deg, no belly, margin +0.59
+   step 100 mm   NOSE-IN: chassis strikes the riser at <1 deg -- the overhang, not the wheels
+```
+
+So on the measured robot, obstacle capability is **wheel-limited up to R + 7.5 mm and
+nose-limited above it** — wheel radius pays twice (climb reach and belly height), and the
+88 mm front overhang is the hard wall no wheel can move. Tip-over also inverted: track 157
+against wheelbase 250 makes **roll the tight axis** (35.9 vs 49.0 deg), the reverse of the
+fictional wide box — this robot's stability risk is sideways on a slope, not backwards on a
+step. The rover test pinning the failure signature is on its third version in one day, and
+its docstring keeps all three as the record.
+
+CI manifests regenerated against the measured platform (the platform digest in run identity
+made the old ones read as a different experiment, which is what they now are). URDF export
+noted as held back per the user (#39 stays open, unscheduled).
+
+**Gates.** Suite 828 green after the re-pins, ruff at the standing 71.

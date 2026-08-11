@@ -76,14 +76,14 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--step-height", type=float, default=None,
                    help="m; default is 0.05 for a nominal wheel, else 0.6 x radius")
     p.add_argument("--tangential", nargs="?", const="hinge", default=None,
-                   choices=("hinge", "slide"),
+                   choices=("hinge",),
                    help="give every claw a second in-plane freedom (TODO #20), with its law "
                         "measured by a TIP_TANGENTIAL sweep on this design's own claw sector. "
                         "'hinge' rotates the claw about its root and is the right element "
-                        "(TODO #27); 'slide' translates its tip and is kept only for "
-                        "comparison -- it lengthens the claw as it splays. Bandless rings "
-                        "only: the band tendons couple radial joints only, so a banded ring "
-                        "would shear for free.")
+                        "(TODO #27); the slide was retired 2026-08-11 after losing to it "
+                        "twice, and lives on in the library as the hinge's regression "
+                        "comparator. Bandless rings only: the band tendons couple radial "
+                        "joints only, so a banded ring would shear for free.")
     p.add_argument("--tangential-max", type=float, default=None, metavar="M",
                    help="how far the tangential sweep goes, metres. Must reach the "
                         "deflections the wheel actually sees: the claw stiffens 3.6x between "

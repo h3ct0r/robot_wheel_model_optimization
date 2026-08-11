@@ -13,10 +13,13 @@ hardware.
 **New here?** Read [`docs/OVERVIEW.md`](docs/OVERVIEW.md) — the project in plain language,
 with a glossary of every acronym. No prior knowledge assumed.
 
-**Status:** Phase 0. The one-week feasibility spike is **complete and its gate passed** — a
-compliant wheel clears a 50 mm step against a rigid wheel's 20 mm at matched mass, radius and
-rotational inertia, with 5/5 of the qualitative signatures the plan asked for. Current work is
-the `T7` compliant-claw family. Open items are numbered in
+**Status:** Phase 0 **closed** (2026-08-11); Phase 1's FEA→ROM pipeline is substantially
+built. Current family is the `T7` compliant claw. The headline that matters now is the
+**washboard**: a compliant twelve-claw wheel beats the rigid cylinder **4.8–6.9×** on ride
+harshness at every wavelength tested, at equal speed. (The spike's old "50 mm vs 20 mm" step
+number was superseded twice — it was a banded design on a single-wheel rig, and on the full
+four-wheel robot the step metric saturates; see `docs/plan/TODO.md` #30/#33.) The ROM's
+validity envelope is measured and printed on every run. Open items are numbered in
 [`docs/plan/TODO.md`](docs/plan/TODO.md).
 
 ## Quick start
@@ -24,7 +27,7 @@ the `T7` compliant-claw family. Open items are numbered in
 ```bash
 source /opt/homebrew/Caskroom/miniforge/base/etc/profile.d/conda.sh
 conda activate conda3.12
-python -m unittest discover -s tests -t .          # 508 tests, ~17 s
+python -m unittest discover -s tests -t .          # 824 tests, ~50 s
 python scripts/explore.py --spokes 8 --no-sim      # a design → one HTML page
 ```
 
@@ -53,8 +56,8 @@ Full setup, and why the first line is needed, is in [Environment](#environment) 
 
 One conda environment, `conda3.12` (Python 3.12). Conda rather than a venv for two specific
 reasons: **CalculiX has no PyPI distribution** (it is a Fortran binary, invoked as a
-subprocess — [ADR-0005](docs/decisions/0005-calculix-for-batch-fea.md)), and **PyChrono has none either**, which the
-ground-truth tier will need in Phase 1 ([ADR-0004](docs/decisions/0004-chrono-as-ground-truth.md)). Everything else
+subprocess — [ADR-0005](docs/decisions/0005-calculix-for-batch-fea.md)), and **PyChrono has none either** — optional
+since [ADR-0008](docs/decisions/0008-hardware-as-ground-truth.md) made printed hardware the ground truth. Everything else
 installs from PyPI into the same environment.
 
 ### Activating it
@@ -90,7 +93,7 @@ shell.
 brew install --cask miniforge
 conda create -y -n conda3.12 -c conda-forge python=3.12 calculix=2.23
 conda activate conda3.12
-pip install -e '.[cad,fea,sim,viz,dev]'
+pip install -e '.[cad,fea,sim,viz,store,dev]'
 ```
 
 ### Checking it
@@ -98,7 +101,7 @@ pip install -e '.[cad,fea,sim,viz,dev]'
 ```bash
 python -c "import sys; print(sys.executable)"   # .../envs/conda3.12/bin/python
 ccx -v                                          # CalculiX Version 2.23
-python -m unittest discover -s tests -t .       # 508 tests
+python -m unittest discover -s tests -t .       # 824 tests
 ```
 
 `ccx -v` prints the version and then **exits 201**. That is normal — it is not an error, and
@@ -116,6 +119,7 @@ numpy-only layers stay testable on a machine with no CAD kernel and no simulator
 | `fea` | gmsh | meshing. **The solver `ccx` is a conda binary, not a pip package** |
 | `sim` | mujoco | the ring in dynamics, the step-climb rig, rendering |
 | `viz` | matplotlib | `--plot-pdf` and the HTML report |
+| `store` | duckdb + pyarrow | the experiment store and the determinism gate |
 
 ## Running it
 
@@ -212,8 +216,8 @@ Chrono ANCF FEA tires, and finally against printed hardware.
   ([ADR-0002](docs/decisions/0002-reduced-order-model-over-fem.md))
 - **build123d** for CAD, because FEA needs STEP and multi-material needs region tagging.
   ([ADR-0003](docs/decisions/0003-build123d-over-openscad.md))
-- **Chrono ANCF** as computational ground truth, never in the loop.
-  ([ADR-0004](docs/decisions/0004-chrono-as-ground-truth.md))
+- **Printed hardware** as ground truth; Chrono ANCF demoted to an optional cross-check.
+  ([ADR-0008](docs/decisions/0008-hardware-as-ground-truth.md), superseding [ADR-0004](docs/decisions/0004-chrono-as-ground-truth.md)'s gating role)
 - **Pareto search on CVaR**, no scalarisation, measured termination.
   ([ADR-0006](docs/decisions/0006-multi-objective-not-scalarised.md))
 

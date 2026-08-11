@@ -36,7 +36,7 @@ import numpy as np
 from ..metrics.threshold import ThresholdFit, fit_threshold
 from ..platform import PlatformSpec
 from ..rom.ring import RingSpec
-from ..store import RunRecord, RunStatus
+from ..store import RunRecord, RunStatus, pipeline_versions
 from .rover import RoverSpec, run_rover
 
 __all__ = ["S1_NAME", "S1Config", "S1Outcome", "run_s1", "terrain_for_seed"]
@@ -170,6 +170,10 @@ def run_s1(
     successes: list[bool] = []
     records: list[RunRecord] = []
     n_failed = 0
+    # The platform is in the run identity (invariant 5, third instance of the same bug):
+    # re-measuring the robot must produce NEW run_ids, not the old ids with new numbers —
+    # the manifest gate would read the latter as non-determinism.
+    versions = {**pipeline_versions(), "platform": platform.digest()}
 
     for seed in range(config.n_seeds):
         friction, approach = terrain_for_seed(seed, config)
@@ -195,6 +199,7 @@ def run_s1(
                     design_hash=design_hash, scenario=config.rung_name(float(height)),
                     seed=seed, material_realisation=material_realisation,
                     status=RunStatus.SIM_FAILED, message=result.message, params=row_params,
+                    versions=versions,
                 ))
                 continue
             heights.append(float(height))
@@ -208,12 +213,18 @@ def run_s1(
                     "distance_m": result.distance_m,
                     "final_clearance_m": result.final_clearance_m,
                     "energy_j": result.energy_j,
+                    # Objective 5 (stability). A METRIC, not a diagnostic, since 2026-08-11:
+                    # diagnostics are artifact detectors, and this is a number designs are
+                    # ranked on. Aggregate with CVaR over seeds like everything else --
+                    # stability is a worst-moment property, which is what CVaR rewards.
+                    "stability_margin": result.stability_margin,
                 },
                 diagnostics={
                     "peak_pitch_rad": result.peak_pitch_rad,
                     "peak_roll_rad": result.peak_roll_rad,
                     "chassis_hit_step": float(result.chassis_hit_step),
                 },
+                versions=versions,
             ))
 
     if not heights:

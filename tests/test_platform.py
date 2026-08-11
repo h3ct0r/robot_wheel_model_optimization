@@ -44,11 +44,19 @@ class TestLoadsCheckedInSpec(unittest.TestCase):
     def test_the_chassis_is_the_stated_requirement(self):
         # 400 x 300 x 200 mm was given as a hard platform requirement, not derived.
         # Everything else in the spec hangs off it, so it gets its own check.
-        self.assertAlmostEqual(SPEC.chassis_length_m, 0.400)
-        self.assertAlmostEqual(SPEC.chassis_width_m, 0.300)
-        self.assertAlmostEqual(SPEC.chassis_height_m, 0.200)
+        # Measured off the STL, 2026-08-11. The old 0.400 x 0.300 x 0.200 "requirement"
+        # was the fictional box; the requirement is now the machine that exists.
+        self.assertAlmostEqual(SPEC.chassis_length_m, 0.426)
+        self.assertAlmostEqual(SPEC.chassis_width_m, 0.231)
+        self.assertAlmostEqual(SPEC.chassis_height_m, 0.157)
 
     def test_is_internally_consistent(self):
+        """Zero warnings again: the 2026-08-11 adoption commit resolved the pinned
+        nominal-load warning by re-deriving the load (24.5 -> 20.6) from the measured mass,
+        and retired the outboard-wheels assumption the measured robot contradicts (its
+        wheels tuck UNDER the shell). The checks themselves caught two errors during that
+        adoption — a target speed unreachable at the small end of the wheel range, and the
+        first attempt leaving 24.5 in place — which is exactly the job they exist to do."""
         self.assertEqual(SPEC.consistency_warnings(), [])
 
     def test_is_not_frozen_yet(self):
@@ -87,7 +95,7 @@ class TestSpecMatchesCodeDefaults(unittest.TestCase):
         # equality above would catch it, but only if someone reads the number; assert the
         # magnitude explicitly so the intent survives a future edit.
         limits = SPEC.platform_limits()
-        self.assertAlmostEqual(limits.wheel_well_radius_mm, 105.0)
+        self.assertAlmostEqual(limits.wheel_well_radius_mm, 95.0)
         self.assertAlmostEqual(limits.shaft_radius_mm, 4.0)
         # Bambu Lab X1C. Stated in millimetres here on purpose: the YAML carries metres, so
         # this is the check that the conversion happened at all rather than a value being
@@ -129,8 +137,9 @@ class TestSpecMatchesCodeDefaults(unittest.TestCase):
 
 class TestDerived(unittest.TestCase):
     def test_wheel_mass_budget(self):
-        # 5% of 8.8 kg. A budget, not a measurement — the actual mass comes from geometry.
-        self.assertAlmostEqual(SPEC.max_wheel_mass_kg, 0.44)
+        # 5% of the measured 8.0 kg chassis. A budget, not a measurement — the actual mass
+        # comes from geometry, and the ~100-300 g wheel class sits inside it.
+        self.assertAlmostEqual(SPEC.max_wheel_mass_kg, 0.40)
 
     def test_param_bounds_claims_only_robot_properties(self):
         # The spec constrains how big a wheel may be. It has no opinion on spoke curvature,
@@ -151,6 +160,7 @@ chassis:
   com_offset: [0.0, 0.0, 0.0]
   inertia: [0.0953, 0.1467, 0.1833]
   ground_clearance_min: 0.070
+  axle_to_belly: 0.0075
 drivetrain:
   configuration: skid_steer
   n_driven_wheels: 4
@@ -326,8 +336,12 @@ class TestConsistencyWarnings(SpecFileCase):
         spec = self.load(MINIMAL.replace("target_speed: 0.6", "target_speed: 3.0"))
         self.assertTrue(any("target_speed" in w for w in spec.consistency_warnings()))
 
-    def test_track_narrower_than_the_chassis(self):
-        spec = self.load(MINIMAL.replace("track_width: 0.35", "track_width: 0.25"))
+    def test_track_narrower_than_one_wheel(self):
+        """The old check warned on track < chassis width — and the measured robot tucks its
+        wheels UNDER the shell, so that state is normal now, not inconsistent. What remains
+        inconsistent is a track so narrow the two sides overlap: less than one max-width
+        wheel between the mid-planes."""
+        spec = self.load(MINIMAL.replace("track_width: 0.35", "track_width: 0.05"))
         self.assertTrue(any("track_width" in w for w in spec.consistency_warnings()))
 
     def test_inverted_envelope(self):

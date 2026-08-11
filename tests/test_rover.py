@@ -456,11 +456,17 @@ class TestDrive(unittest.TestCase):
 @unittest.skipUnless(HAVE_MUJOCO, "MuJoCo not installed")
 class TestRuns(unittest.TestCase):
     def test_a_low_step_is_climbed_and_the_robot_ends_standing_on_it(self):
-        scenario = RoverSpec(step_height_m=0.04, duration_s=5.0)
+        # 25 mm, not the old 40: the MEASURED robot has 30 mm of ground clearance
+        # (2026-08-11, was a 70 mm estimate), so anything taller than the belly is a
+        # different test — the one below.
+        scenario = RoverSpec(step_height_m=0.025, duration_s=6.0)
         result = observe_rover(PLATFORM, scenario, **WHEEL)
         self.assertTrue(result.ok, result.message)
         self.assertTrue(result.climbed)
-        ride = PLATFORM.ground_clearance_m + 0.5 * PLATFORM.chassis_height_m
+        # Wheel-dependent since the axle_to_belly adoption: an R 85 wheel rides at
+        # 92.5 mm of belly clearance, not the 30 mm measured at the original r 22.5 wheels.
+        ride = (PLATFORM.ground_clearance_for(WHEEL["wheel_radius_m"])
+                + 0.5 * PLATFORM.chassis_height_m)
         # Standing on the upper ground, not leaning on it: the chassis centre is one ride
         # height above the step's top face.
         self.assertAlmostEqual(result.final_clearance_m, ride, delta=0.02)
@@ -495,14 +501,27 @@ class TestRuns(unittest.TestCase):
         self.assertFalse(result.ok)
         self.assertTrue(result.message)
 
-    def test_the_robot_pitches_at_a_step_and_not_on_the_flat(self):
-        """The signature a single-wheel rig cannot produce, and the reason this model exists."""
+    def test_the_robot_pitches_below_its_clearance_and_noses_in_above_it(self):
+        """The signature a single-wheel rig cannot produce — re-pinned twice on 2026-08-11
+        and the history is the point. v1 (estimated robot, 70 mm constant clearance): rears
+        toward 90 at an 80 mm step. v2 (measured robot, 30 mm CONSTANT clearance): bellies
+        at 7 deg — but the constant was wrong, because the belly rides a fixed 7.5 mm above
+        the AXLE and the measured 30 mm belonged to the original r 22.5 wheels. v3, this
+        one: with R 85 fitted the belly sits at 92.5 mm, so an 80 mm step is a genuine climb
+        attempt (pitch ~20 deg, no belly) and a 100 mm step is a NOSE-IN — the chassis
+        overhangs the front axle by 88 mm and strikes the riser at under 1 deg of pitch."""
         flat = observe_rover(PLATFORM, RoverSpec(step_height_m=0.001, duration_s=4.0), **WHEEL)
-        stepped = observe_rover(PLATFORM, RoverSpec(step_height_m=0.08, duration_s=4.0),
-                                **WHEEL)
-        self.assertTrue(flat.ok and stepped.ok)
+        climbing = observe_rover(PLATFORM, RoverSpec(step_height_m=0.08, duration_s=6.0),
+                                 **WHEEL)
+        nosing = observe_rover(PLATFORM, RoverSpec(step_height_m=0.10, duration_s=6.0),
+                               **WHEEL)
+        self.assertTrue(flat.ok and climbing.ok and nosing.ok)
         self.assertLess(np.degrees(flat.peak_pitch_rad), 3.0)
-        self.assertGreater(np.degrees(stepped.peak_pitch_rad), 8.0)
+        self.assertGreater(np.degrees(climbing.peak_pitch_rad), 10.0)
+        self.assertFalse(climbing.chassis_hit_step, "80 mm is below the R85 belly line")
+        self.assertTrue(nosing.chassis_hit_step, "100 mm is above it: nose-in")
+        self.assertLess(np.degrees(nosing.peak_pitch_rad), 3.0,
+                        "a nose-in stops the robot before it can pitch")
 
 
 class TestFlatGroundIsAScenario(unittest.TestCase):
@@ -613,17 +632,27 @@ class TestValidityEnvelope(unittest.TestCase):
         self.assertLess(result.multi_contact_fraction, 0.35)
         self.assertGreater(result.peak_compression_m, 0.0, "the claws must actually compress")
 
-    def test_the_criterion_is_a_share_and_therefore_scale_free(self):
-        """Sharing is 'how many claws carry this wheel', which must not change meaning between
-        a light load and a heavy one. A step drives compressions several times deeper without
-        changing how many claws are down at a time."""
-        flat = observe_rover(PLATFORM, RoverSpec(step_height_m=0.0, duration_s=3.0),
-                             **self.SEGMENTED)
-        step = observe_rover(PLATFORM, RoverSpec(step_height_m=0.05, duration_s=3.0),
-                             **self.SEGMENTED)
-        self.assertTrue(flat.ok and step.ok)
-        self.assertGreater(step.peak_compression_m, 2.0 * flat.peak_compression_m)
-        self.assertLess(abs(step.multi_contact_fraction - flat.multi_contact_fraction), 0.35)
+    def test_a_softer_wheel_shares_more_and_the_fraction_stays_a_fraction(self):
+        """Two iterations of this test asserted things the physics refused, and the record
+        is the point. v1 said a step deepens compression — the measured robot's 30 mm belly
+        grounds on the step first and protects the wheels. v2 said stiffness leaves the
+        share unchanged — measured, a 3.8x softer law shares 47 pp MORE, because its static
+        sag genuinely engages the neighbours; the share criterion is relative (10% of the
+        deepest claw, `MULTI_CONTACT_SHARE`) but the physics it measures is allowed to move.
+        What is actually invariant: softer never shares less, and the fraction stays in
+        [0, 1] with working claws on both sides."""
+        soft = dict(self.SEGMENTED)
+        soft["law"] = self.SpringLaw(6000.0)
+        stiff = observe_rover(PLATFORM, RoverSpec(step_height_m=0.0, duration_s=3.0),
+                              **self.SEGMENTED)
+        softer = observe_rover(PLATFORM, RoverSpec(step_height_m=0.0, duration_s=3.0), **soft)
+        self.assertTrue(stiff.ok and softer.ok)
+        self.assertGreater(stiff.peak_compression_m, 0.001, "the claws must actually work")
+        self.assertGreaterEqual(softer.multi_contact_fraction,
+                                stiff.multi_contact_fraction)
+        for r in (stiff, softer):
+            self.assertGreaterEqual(r.multi_contact_fraction, 0.0)
+            self.assertLessEqual(r.multi_contact_fraction, 1.0)
 
     def test_the_fraction_is_a_fraction(self):
         result = observe_rover(PLATFORM, RoverSpec(step_height_m=0.03, duration_s=3.0),
@@ -701,6 +730,52 @@ class TestWashboardDynamics(unittest.TestCase):
         self.assertLess(flat.harshness_rms_m_s2, 0.1)
         self.assertGreater(rough.harshness_rms_m_s2, 10.0 * max(flat.harshness_rms_m_s2, 0.5))
         self.assertGreater(rough.mean_speed_m_s, 0.2, "it must still make progress")
+
+
+@unittest.skipUnless(HAVE_MUJOCO, "MuJoCo not installed")
+class TestStabilityMargin(unittest.TestCase):
+    """Objective 5: worst-moment distance to static tip-over (`08-metrics.md`)."""
+
+    def test_flat_ground_is_nearly_level_and_a_step_eats_margin(self):
+        flat = observe_rover(PLATFORM, RoverSpec(step_height_m=0.0, duration_s=3.0), **WHEEL)
+        step = observe_rover(PLATFORM, RoverSpec(step_height_m=0.08, duration_s=4.0), **WHEEL)
+        self.assertTrue(flat.ok and step.ok)
+        self.assertGreater(flat.stability_margin, 0.9, "driving on the flat barely pitches")
+        self.assertLess(step.stability_margin, flat.stability_margin - 0.1)
+
+    def test_the_margin_is_the_peaks_against_the_platforms_own_angles(self):
+        """Derived, not invented in the sim: the same peaks the result already carries,
+        scored against `tipover_angles_rad`. If the platform's CG or track changes, the
+        margin moves with no simulator change — invariant 2 for an objective."""
+        result = observe_rover(PLATFORM, RoverSpec(step_height_m=0.06, duration_s=4.0),
+                               **WHEEL)
+        self.assertTrue(result.ok, result.message)
+        pitch_crit, roll_crit = PLATFORM.tipover_angles_rad()
+        expected = 1.0 - max(result.peak_pitch_rad / pitch_crit,
+                             result.peak_roll_rad / roll_crit)
+        self.assertAlmostEqual(result.stability_margin, expected, places=12)
+
+
+class TestTipoverAngles(unittest.TestCase):
+    def test_the_angles_come_from_the_geometry(self):
+        """atan(half_span / z_cg). On the MEASURED robot the track (157) is far shorter
+        than the wheelbase (250) — the wheels tuck under the shell — so ROLL is the tight
+        axis (35.9 against 49.0 deg), the reverse of the fictional wide-track box this test
+        first pinned. The stability objective inherits that: this robot's risk is tipping
+        sideways on a slope, not backwards on a step."""
+        pitch_crit, roll_crit = PLATFORM.tipover_angles_rad()
+        z_cg = (PLATFORM.ground_clearance_m + 0.5 * PLATFORM.chassis_height_m
+                + PLATFORM.com_offset_m[2])
+        self.assertAlmostEqual(pitch_crit, np.arctan2(0.5 * PLATFORM.wheelbase_m, z_cg))
+        self.assertAlmostEqual(roll_crit, np.arctan2(0.5 * PLATFORM.track_width_m, z_cg))
+        self.assertLess(roll_crit, pitch_crit)
+
+    def test_a_cg_below_ground_is_refused(self):
+        from wheelopt.platform import PlatformSpecError
+
+        impossible = replace(PLATFORM, com_offset_m=(0.0, 0.0, -1.0))
+        with self.assertRaises(PlatformSpecError):
+            impossible.tipover_angles_rad()
 
 
 if __name__ == "__main__":  # pragma: no cover

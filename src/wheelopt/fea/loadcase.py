@@ -149,10 +149,11 @@ class LoadCase:
     """
 
     kind: LoadCaseKind = LoadCaseKind.RADIAL_FLAT
-    #: Static load per wheel, newtons. 10 kg all-up on four wheels = 24.5 N each.
-    #: Provisional until configs/robot.yaml is frozen. Every sweep is scaled against this,
-    #: so changing it changes what "3x nominal" means and invalidates cached results.
-    nominal_load_n: float = 24.5
+    #: Static load per wheel, newtons. MEASURED robot, 2026-08-11: 8.0 kg chassis plus four
+    #: ~0.10 kg printed wheels on four wheels = 20.6 N each. Every sweep is scaled against
+    #: this, so this change deliberately invalidated every prior FEA cache entry — the old
+    #: 24.5 described a fictional 10 kg platform (the log entry of that date has the story).
+    nominal_load_n: float = 20.6
     #: The sweep should reach this multiple of nominal. Verified after the fact.
     max_load_multiple: float = 3.0
     #: Peak imposed displacement, metres. Chosen to overshoot 3x nominal on a soft design;

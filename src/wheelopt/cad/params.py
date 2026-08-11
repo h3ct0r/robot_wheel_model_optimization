@@ -197,6 +197,33 @@ class WheelParams:
         return self.claw_taper_ratio < 1.0 and not self.has_shear_band
 
     @property
+    def lateral_stiffness_ratio(self) -> float:
+        """How much stiffer a claw is **out of plane** than tangentially, dimensionless.
+
+        The closed form that reframes the skid-steer scrub question (``TODO.md`` #38). A claw
+        is a cantilever of rectangular section ``width x thickness``; its tip stiffness goes
+        as ``E I / L³`` in both directions with the same ``L``, so the ratio is the ratio of
+        second moments: lateral ``I = t w³/12`` against in-plane ``I = w t³/12``, i.e.
+        ``(w/t)²``. On the R 60 claw family — width 45, effective thickness ~5.3 — that is
+        **~72x**, and read at the tip (3.6 mm) it is 156x.
+
+        Evaluated on :attr:`effective_thickness_mm`, which makes it a **lower bound**: the
+        taper thins the in-plane dimension, which enters the in-plane stiffness *cubically*
+        and the lateral one only *linearly*, so the true ratio of a tapered claw is higher
+        than this everywhere. Understating is the safe direction for a number whose job is to
+        justify treating the structure as laterally rigid.
+
+        What it licenses, and what it does not. Two orders of magnitude means the ROM's
+        planar rigidity is a **defensible structural approximation** for wide claws — the
+        lateral scrub of a skid-steer turn is then a *friction* problem, which MuJoCo's
+        Coulomb cone does model, not a missing-compliance problem. It does **not** cover the
+        tread's local lateral squirm in the contact patch, and it degrades as ``w/t`` falls;
+        anything below ~10 here deserves the 3-D FEA lateral case #38 names before its turns
+        are believed.
+        """
+        return (self.width_mm / max(self.effective_thickness_mm, 1e-9)) ** 2
+
+    @property
     def is_l_claw(self) -> bool:
         """Whether this claw has a tangential foot at its tip — family ``T7L``.
 
@@ -389,9 +416,15 @@ def _taper_compliance_factor(r: float) -> float:
 #: continuous variable — widening the range to ``[0, 6]`` instead would quietly admit the
 #: 0.3 mm rims in between, which no nozzle can print.
 PARAM_BOUNDS: dict[str, tuple[float, float]] = {
-    # Upper limit is the print bed, not the robot: 100 mm radius is a 200 mm disc on a
-    # 220 mm bed. The chassis would happily take more.
-    "outer_radius_mm": (60.0, 100.0),
+    # RE-DERIVED 2026-08-11 from the measured robot (the pipe robot in
+    # configs/robot_piperobot.stl, whose original wheels are r 22.5 mm). The floor is the
+    # MX-64 horn: the hub must seat a D53 rotating disc (hub >= ~28 mm), and a bandless claw
+    # off a 28 mm hub needs R >= ~40 to be a claw rather than a nub. The ceiling is
+    # judgement, not a wall — no pipe-fit constraint (user decision 2026-08-11), the horn
+    # rotates, the bed takes R 120 — chosen where body lift (+67 mm) and top speed
+    # (0.59 m/s) are still sane. This change deliberately re-scoped the search space and
+    # invalidated the R 60-100 corpus, which described a fictional 10 kg box robot.
+    "outer_radius_mm": (40.0, 90.0),
     "width_mm": (30.0, 70.0),
     # Below the 1.6 mm TPU wall for the same reason `spoke_thickness_mm` is (see #34, decided
     # 2026-08-11): the range must be able to express a design that `rim_min_wall` rejects, or

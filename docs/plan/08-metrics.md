@@ -9,7 +9,7 @@
 | **S3 Gap** | width 20–200 mm | Max gap crossed |
 | **S4 Rubble** | procedural rock field, size/density | Traverse success rate, mean speed |
 | **S5 Flat sprint** | surface friction, 10 m | **Cost of transport (hysteresis-sensitive)**, top speed |
-| **S6 Path track** | figure-8 / slalom, fixed load | RMS tracking error, energy |
+| **S6 Path track** | ~~figure-8 / slalom~~ **spin-in-place proxy** (decision 2026-08-11): yaw rate at differential torque + per-wheel scrub energy | Turn capability and turning cost. Full path-tracking deferred — it sits behind #38's lateral validation *and* a controller, and would measure the controller as much as the wheel. Revisit if designs differ meaningfully on the spin test |
 | **S7 Washboard** | sinusoidal ripple, amplitude and wavelength | **RMS chassis acceleration — where compliance wins** |
 | **S8 Sustained load** | nominal + 2× load, long duration | Sag, buckling margin, predicted fatigue cycles |
 
@@ -23,13 +23,21 @@ everything maximally soft; without S8 it makes everything soft enough to collaps
 3. **Minimise** ride harshness, RMS vertical chassis acceleration (S5–S7) — compliance's
    payoff axis
 4. **Minimise** wheel mass
+5. **Maximise** the stability margin (S1–S4, S7) — worst-moment distance to static tip-over,
+   ``1 − max(|pitch|/pitch_crit, |roll|/roll_crit)`` with the critical angles derived from
+   the platform's own CG height, wheelbase and track
+   (`PlatformSpec.tipover_angles_rad`). Added 2026-08-11: "stability" for this project is
+   *not tipping over on obstacles and slopes* — rollover and pitch containment — which
+   harshness (objective 3, a comfort axis) does not measure. Aggregated like everything
+   else, CVaR at 25% over seeds, which for a worst-moment property is exactly the right
+   emphasis: a design that is upright on average and tips on the worst seed has tipped.
 
 Report the 4-D Pareto front. Select finalists by hypervolume contribution and by named
 preference profiles (obstacle-first, efficiency-first, balanced).
 
 ## Logged but not optimised
 
-Slip ratio, peak motor current, rollover margin, **loaded rolling radius**, **contact patch
+Slip ratio, peak motor current, **loaded rolling radius**, **contact patch
 area vs load**, **peak spoke stress**, **predicted fatigue cycles**, **buckling margin**,
 print time and mass, solver warning count, contact-impulse spectrum, FEA convergence
 iterations, ROM fit residual.

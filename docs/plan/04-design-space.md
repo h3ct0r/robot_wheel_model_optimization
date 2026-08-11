@@ -22,7 +22,12 @@ progressively.
 ## Direction, 2026-08-08: bandless claws
 
 **Every future design is bandless.** The shear band is retained in the code and in `T3` as the
-thing already measured against, not as a candidate. What replaces it is `T7`, the compliant
+thing already measured against, not as a candidate. **Formalised 2026-08-11: the banded-`T3`
+machinery is DORMANT** — the coupled ring solver, the hoop/bending band stiffnesses and the
+whole-wheel deconvolution fits stay in the tree with their tests as the record of what was
+measured, but they are a frozen surface: no new work targets them, their known debts (#32's
+default-interval re-fit) are moot until revival, and reviving them is a decision to record
+here, not a drive-by. The claw path (`--law claw`) never touches them. What replaces it is `T7`, the compliant
 claw: tapered fingers cantilevered off the hub with free tips that are themselves the running
 surface.
 
@@ -134,7 +139,7 @@ cannot be built, not a design that scores badly.
 
 | Parameter | Symbol | Range | Notes |
 |---|---|---|---|
-| Outer radius | `R` | 60–100 mm | **Capped by the 220 mm print bed**, not by the robot |
+| Outer radius | `R` | **40–90 mm** (re-derived 2026-08-11 from the measured robot) | Floor: the hub must seat the D53 servo horn and leave a claw. Ceiling: judgement — no pipe constraint, the horn rotates, the bed takes R 120; chosen at sane body lift and speed. On this robot **clearance = R + 7.5 mm**, so radius pays twice |
 | Width | `W` | 30–70 mm | Capped by track width |
 | Rim (shear band) thickness | `t_rim` | 1.2–8 mm, **or exactly 0** | Lower bound from printability; 0 selects the bandless variant below |
 | Hub radius | `R_hub` | 0.2–0.6 · `R` | Sets spoke length |
@@ -146,7 +151,7 @@ cannot be built, not a design that scores badly.
 | Parameter | Range | Type |
 |---|---|---|
 | Spoke count `N_s` | 6–36 | integer |
-| Spoke thickness `t_s` | 1.2–8 mm | continuous — **the dominant stiffness knob**. The upper bound is set by buckling at 24.5 N: at a 60 mm span, 6–8 mm is what survives 2.5× nominal |
+| Spoke thickness `t_s` | 1.2–8 mm | continuous — **the dominant stiffness knob**. The upper bound is set by buckling at the per-wheel load (20.6 N measured; the 6–8 mm figure was derived at the old fictional 24.5 N and errs stiff) |
 | Spoke curvature `κ` | −0.03 to +0.03 mm⁻¹ | continuous; sign sets buckling direction |
 | Spoke profile | {straight, curved, S-curve, V, honeycomb cell, chevron} | categorical |
 | Spanwise pattern | {uniform, tapered, split-pair} | categorical |
@@ -200,7 +205,8 @@ What it costs, and none of it is visible in the CAD:
   which is far stiffer than bending a band — and then Euler-buckles it. At equal
   indentation the bandless wheel carries **7.2× the load on the flat plate and 6.0× on the
   step edge**, and the flat case snaps through at 31.4 N. That is **below the 61.2 N the
-  buckling constraint demands** (2.5 × 24.5 N), so this particular bandless design is
+  buckling constraint demands** (2.5 × nominal; 24.5 N at the time, 20.6 N since the
+  2026-08-11 adoption), so this particular bandless design is
   infeasible — `fea_buckling` rejects it. Thicker or more numerous spokes are the lever;
   `P_cr ∝ t³/L²`.
 - **Contact pressure is an order of magnitude higher**, over `t_s` rather than a patch.
@@ -251,9 +257,9 @@ last now **load-dependent**, since the wheel squashes.
 - Maximum unsupported overhang ≤ 45° (tighter than rigid: TPU droops)
 - No unsupported bridges > 15 mm — TPU bridges badly
 - Minimum gap between spokes ≥ 2 mm so the nozzle can traverse without dragging
-- Bounding box fits the 220 × 220 mm bed; print time ≤ 24 h; material ≤ 450 g. A 170 mm
+- Bounding box fits the 250 × 225 mm X1C bed; print time ≤ 24 h; material ≤ 450 g. A 170 mm
   wheel in TPU is an overnight print — the old 200 g cap predates the larger platform and
-  would have rejected every design that survives 24.5 N
+  would have rejected every design that survives the per-wheel load
 - Requires direct-drive extruder — a fixed capability, not a variable
 
 **Why two searched thickness ranges start below the TPU wall** (#34, decided 2026-08-11).

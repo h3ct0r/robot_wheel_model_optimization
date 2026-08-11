@@ -31,82 +31,139 @@ meta:
     facts to be mutually consistent. Motors, battery and inertia are class-typical
     estimates, not measurements.
 
+# =========================================================================================
+# MEASURED FROM THE 3D MODEL, 2026-08-11 (configs/robot_piperobot.stl, units mm, 156k tris;
+# the model's own mid-body clearance of 34 mm cross-checks the hand-measured 3 cm):
+#   overall               426 x 231 x 187 mm  (length x width x height, wheels included)
+#   wheelbase             250 mm     (stated value below: 260 -- close, PENDING adoption)
+#   track                 157 mm     (stated value below: 350 -- FICTION, PENDING adoption)
+#   existing wheels       r ~22.5 mm, four contact patches confirmed on the floor plane
+#   structure at r 26.5 from every axle -- consistent with the MX-64 servo horn (D53), which
+#     ROTATES with the wheel and therefore caps nothing; the true wheel-radius ceiling is an
+#     APPLICATION question (the circular ~187 mm shell says pipe-fit) the STL cannot answer.
+# ADOPTED 2026-08-11 after the user answered the gating questions: no pipe-fit constraint,
+# the r-26.5 structure is the servo HORN (rotates, caps nothing), wheel width is free
+# outboard, and the 8.5 kg was ready-to-run (~8.0 without wheels). This commit is the
+# deliberate cache-invalidating adoption the pending block promised.
+# =========================================================================================
 chassis:
-  mass: 8.8                         # kg, total robot mass EXCLUDING wheels
-                                    #   10.0 kg all-up minus 4 x ~0.30 kg wheels.
-                                    #   0.30 kg is the computed mass of the nominal TPU
-                                    #   wheel below at 40% infill — derived from geometry,
-                                    #   not assumed (invariant 2).
-  length: 0.40                      # m, the driving direction
-  width: 0.30                       # m
-  height: 0.20                      # m
+  mass: 8.0                         # kg, EXCLUDING wheels. MEASURED 2026-08-11 (user):
+                                    #   8.5 kg ready-to-run with batteries, motors and the
+                                    #   original wheels; ~8.0 without wheels. Conservative
+                                    #   estimate by the user's own statement.
+  length: 0.426                     # m. MEASURED off the 3D model (STL bbox, cross-checked
+  width: 0.231                      #   by the hand-measured clearance). The body is a
+  height: 0.157                     #   circular ~187 mm shell; the box is its envelope
+                                    #   above the belly line (187 - 30 clearance = 157),
+                                    #   which is what the belly-contact geom needs.
   com_offset: [0.0, 0.0, 0.0]       # m, assumed geometric centre until measured
-  inertia: [0.0953, 0.1467, 0.1833] # kg·m², uniform-box formula on the dims above:
-                                    #   Ixx = m(w²+h²)/12, Iyy = m(l²+h²)/12,
-                                    #   Izz = m(l²+w²)/12
-  ground_clearance_min: 0.070       # m, under nominal load. Roughly the wheel radius: the
+  inertia: [0.0512, 0.1374, 0.1566] # kg·m², uniform-box formula at 8.0 kg on the measured
+                                    #   dims (estimate; the real one needs component masses
+                                    #   in the 3D model -- 17-hardware-baseline.md)
+  ground_clearance_min: 0.030       # m. MEASURED 2026-08-11, twice: by hand (3 cm) and off
+                                    #   the STL (34 mm lowest mid-body) -- AT THE ORIGINAL
+                                    #   r 22.5 mm WHEELS. Clearance is wheel-dependent:
+                                    #   see axle_to_belly below, which is the invariant.
+                                    #   Old note: the
                                     #   axles sit near the bottom of the chassis.
+  axle_to_belly: 0.0075             # m, belly height ABOVE the axle line: 0.030 clearance
+                                    #   minus the 0.0225 original wheel radius. This is the
+                                    #   bracket geometry and does not change with the wheel,
+                                    #   so real clearance = wheel radius + this -- a bigger
+                                    #   wheel buys belly clearance one-for-one, which is
+                                    #   most of why wheel radius matters on this robot. The
+                                    #   sim treating clearance as a constant 0.030 sank an
+                                    #   R 85 wheel's axle 55 mm above its own belly.
 
 drivetrain:
   configuration: skid_steer
   n_driven_wheels: 4                # no caster. A caster is a liability on a step edge,
                                     #   which is the scenario this project exists to study.
-  wheelbase: 0.26                   # m, front axle to rear axle (±130 mm about centre)
-  track_width: 0.35                 # m, wheels outboard of the 300 mm chassis
+  wheelbase: 0.250                  # m. MEASURED off the STL: contact patches at z=104.5
+                                    #   and z=354.9 on both sides
+  track_width: 0.157                # m. MEASURED off the STL: wheel mid-planes at x=36.9
+                                    #   and x=194.2 -- the wheels tuck UNDER the shell, not
+                                    #   outboard of it, and the narrow track makes ROLL the
+                                    #   tight stability axis (the old 0.35 was fiction)
 
 motor:
-  # Per driven wheel, at the wheel output (i.e. after the gearbox).
-  # Sized from the climbing requirement: tractive force of ~1.3x vehicle weight needs
-  # 4 x 4.0 N·m x 0.7 / 0.085 m = 132 N against a 98 N vehicle.
-  stall_torque: 4.0                 # N·m at the output
-  no_load_speed: 14.0               # rad/s at the output = 134 rpm -> 1.19 m/s unloaded
-  gear_ratio: 100.0                 # motor:output
-  gearbox_efficiency: 0.65          # planetary stack at this reduction
-  motor_constant_kt: 0.030          # N·m/A at the motor shaft
-  winding_resistance: 1.8           # ohm
+  # MEASURED HARDWARE 2026-08-11: four ROBOTIS Dynamixel MX-64AT at 12 V. Datasheet values
+  # at 12 V, quoted AT THE OUTPUT — the 200:1 is the servo's internal gearbox and the
+  # datasheet measures through it, so no efficiency factor is applied on top.
+  # Verify against the label: 6.0 N·m stall / 63 rev/min no-load / ~4.1 A stall at 12 V.
+  # Tractive sanity: 4 x 6.0 / 0.060 m = 400 N of stall tractive force against an ~83 N
+  # vehicle — traction-limited long before torque-limited, at any radius in the range.
+  brand: dynamixel-mx-64at
+  stall_torque: 6.0                 # N·m at the output, 12 V (datasheet)
+  no_load_speed: 6.597              # rad/s at the output = 63 rev/min (datasheet).
+                                    #   Top speed R60: 0.40 m/s, R85: 0.56 m/s -- half the
+                                    #   old estimate's; every duration-sized scenario box
+                                    #   shrinks with it automatically (reach = w*R*t)
+  gear_ratio: 200.0                 # internal to the MX-64
+  gearbox_efficiency: 1.0           # already included in the output-shaft datasheet values
+  motor_constant_kt: null           # not needed while torque/speed are output-measured
+  winding_resistance: null          # ditto
   torque_safety_factor: 0.7
 
 power:
-  battery_voltage: 22.2             # V, 6S LiPo. 24 V class rather than 12 V: four motors
-                                    #   at 100:1 draw more than a 3S pack should deliver.
-  battery_capacity: 111.0           # Wh, 5000 mAh at 22.2 V
+  battery_voltage: 12.0             # V. MEASURED 2026-08-11: the MX-64AT bus runs at 12 V
+                                    #   (the old 22.2 V estimate would exceed the servo's
+                                    #   10-14.8 V range).
+  battery_capacity: 55.0            # Wh, PLACEHOLDER -- pack unknown; nothing reads this yet
 
 wheel_interface:
-  # Fixed geometry the wheel must mate to. NOT optimised.
-  shaft_diameter: 0.008             # m, 8 mm D-shaft.
-                                    #   Matches PlatformLimits.shaft_radius_mm = 4.0 and
-                                    #   WheelParams.hub_bore_radius_mm = 4.0.
+  # Fixed geometry the wheel must mate to. NOT optimised. Re-derived 2026-08-11: there is
+  # no D-shaft — wheels bolt to the MX-64 servo HORN, a rotating disc measured at r 26.5 mm
+  # in the STL (= the HN05 horn's D53). The 8 mm centre hole clears the horn's thrust boss;
+  # the bolt pattern comes from the horn datasheet and is not modelled in CAD (a hub POCKET
+  # seating a D53 disc is; see the hub_seats_horn screening warning).
+  shaft_diameter: 0.008             # m, centre-boss clearance hole (kept as the loader's
+                                    #   bore key; matches hub_bore_radius_mm = 4.0)
   hub_bore_depth: 0.030             # m
-  mounting: d-shaft
-  bolt_circle_diameter: null        # not applicable to a D-shaft
+  mounting: dynamixel-horn
+  horn_diameter: 0.053              # m, MEASURED off the STL (r 26.5 at all four axles)
+  bolt_circle_diameter: null        # from the HN05 horn drawing, when bolts are modelled
 
 wheel_envelope:
   # Hard geometric limits on any candidate wheel. These now agree with PARAM_BOUNDS in
   # src/wheelopt/cad/params.py and with PlatformLimits — the three-way disagreement that
   # this file used to document is resolved.
-  max_radius: 0.100                 # m. **Set by the print bed, not the robot.** A 100 mm
-                                    #   radius is a 200 mm disc on a 220 mm bed. The
-                                    #   chassis would accept a larger wheel; the printer
-                                    #   will not.
-  min_radius: 0.060                 # m, below this the wheel cannot clear the obstacles
-                                    #   in the scenario suite
-  max_width: 0.070                  # m, keeps the track inside 0.44 m
+  max_radius: 0.090                 # m. RE-DERIVED 2026-08-11: no pipe-fit constraint (user
+                                    #   decision), the horn rotates so it caps nothing, and
+                                    #   the X1C bed takes more -- so the cap is judgement:
+                                    #   at R 90 the body lifts 67 mm and top speed is
+                                    #   0.59 m/s, both still sane. Revisit against brackets
+                                    #   when the first big wheel is printed.
+  min_radius: 0.040                 # m. The floor is the HORN: the hub must seat a D53
+                                    #   rotating disc, so hub >= ~0.028, and a bandless claw
+                                    #   shorter than ~12 mm is a nub, not a claw. (The
+                                    #   original wheels are r 0.0225 -- mountable only via
+                                    #   their own small hubs, which a horn-seating printed
+                                    #   hub replaces.)
+  max_width: 0.070                  # m, free outboard (user decision); bounded by print
+                                    #   time and proportion, not the robot
   min_width: 0.030                  # m
-  wheel_well_radius: 0.105          # m. Nothing encloses the wheels — they hang outboard —
-                                    #   so this is clearance to the chassis corner, not a
-                                    #   well. It is deliberately just inside the bed limit.
-  max_mass_fraction: 0.05           # per wheel, as fraction of chassis mass -> 0.44 kg.
-                                    #   Was 0.15 when the robot was 4 kg; at 8.8 kg that
-                                    #   would permit a 1.3 kg wheel, which is not a limit.
+  wheel_well_radius: 0.095          # m. There is no enclosing well; nearest fixed structure
+                                    #   is the side plate, and the belly rises with the
+                                    #   wheel. Set just above max_radius so it cannot bind
+                                    #   before the explicit max does.
+  max_mass_fraction: 0.05           # per wheel, as fraction of chassis mass -> 0.365 kg at
+                                    #   the measured 7.3. Was 0.15 when the robot was 4 kg,
+                                    #   which would permit a 1.1 kg wheel -- not a limit.
 
 operating_point:
-  nominal_wheel_load: 24.5          # N, static load per wheel.
-                                    #   10.0 kg x 9.81 = 98.1 N total, four wheels, mass
-                                    #   centred -> 24.5 N each. This is the value
-                                    #   LoadCase.nominal_load_n uses and therefore what
-                                    #   every FEA sweep is scaled against.
-                                    #   The buckling constraint asks for 2.5x = 61.3 N.
-  target_speed: 0.6                 # m/s
+  nominal_wheel_load: 20.6          # N. RE-DERIVED 2026-08-11 from the measured mass:
+                                    #   (8.0 kg chassis + 4 x ~0.10 kg printed wheel)
+                                    #   x 9.81 / 4 = 20.6. THIS IS THE CACHE-INVALIDATING
+                                    #   COMMIT the old PENDING note promised; the FEA scale
+                                    #   and LoadCase.nominal_load_n move with it. The
+                                    #   buckling constraint asks 2.5x = 51.5 N.
+  target_speed: 0.25                # m/s. Re-derived 2026-08-11 twice: the MX-64's no-load
+                                    #   speed reaches 0.26 m/s on the smallest wheel (R 40)
+                                    #   and 0.59 on the largest, so 0.25 is attainable by
+                                    #   every design in the space -- the consistency check
+                                    #   caught the first attempt (0.35) being unreachable
+                                    #   at the small end
   payload_range: [0.0, 3.0]         # kg, additional payload
 
 manufacturing:

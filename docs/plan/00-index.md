@@ -32,3 +32,5 @@ Read `01` and `02` for orientation. `06` is the technical core. `16` is what to 
 Non-obvious choices and their reasoning live in [`../decisions/`](../decisions/). Read the
 relevant ADR before proposing a change to simulator choice, modelling fidelity or CAD
 toolchain — several plausible alternatives were evaluated and rejected for specific reasons.
+
+- `17-hardware-baseline.md` — freezing robot.yaml + the hardware ground-truth protocol (ADR-0008)

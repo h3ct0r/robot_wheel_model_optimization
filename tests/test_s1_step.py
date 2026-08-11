@@ -103,7 +103,10 @@ class TestApproachAngle(unittest.TestCase):
             line = next(x for x in text.splitlines() if 'name="step"' in x)
             return float(line.split('size="')[1].split()[1])
 
-        self.assertGreater(half_width(self.xml(approach_deg=15.0)),
+        # duration 10 rather than the default 6: the MEASURED motors (6.6 rad/s no-load,
+        # 2026-08-11) halve the robot's reach, and at 6 s the yaw-widening term sits under
+        # the 1.5 m floor -- the guard would pass vacuously.
+        self.assertGreater(half_width(self.xml(approach_deg=15.0, duration_s=10.0)),
                            half_width(self.xml(approach_deg=0.0)))
 
     def test_driving_along_the_face_is_refused(self):

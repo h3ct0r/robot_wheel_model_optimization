@@ -177,11 +177,12 @@ def build_parser() -> argparse.ArgumentParser:
                            help="ring resolution. IGNORED by --law claw, where the segments "
                                 "are the claws and the count is --spokes")
     compliant.add_argument("--tangential", nargs="?", const="hinge", default=None,
-                           choices=("hinge", "slide"), metavar="{hinge,slide}",
-                           help="give every claw a second in-plane freedom. 'hinge' rotates "
-                                "it about its root and is the right element; 'slide' moves "
-                                "the tip and is kept only for comparison. Bare --tangential "
-                                "means hinge")
+                           choices=("hinge",), metavar="hinge",
+                           help="give every claw a second in-plane freedom: a hinge at its "
+                                "root. The slide element was retired 2026-08-11 after losing "
+                                "to the hinge twice (kinematics and the straddle); it lives "
+                                "on in the library as the thing the hinge is tested against. "
+                                "Bare --tangential means hinge")
     compliant.add_argument("--plane-strain", action="store_true",
                            help="use the 2-D screening FEA tier -- seconds instead of hours. "
                                 "The 3-D tier is the reference and cannot see lateral spoke "
@@ -524,7 +525,8 @@ def main(argv: list[str] | None = None) -> int:
 
     for warning in platform.consistency_warnings():
         print(f"  [platform] {warning}")
-    ride = platform.ground_clearance_m + 0.5 * platform.chassis_height_m
+    ride = (platform.ground_clearance_for(args.radius * 1e-3)
+            + 0.5 * platform.chassis_height_m)
     print(f"robot: {platform.name}, {platform.chassis_mass_kg:.1f} kg chassis + "
           f"4 x {args.wheel_mass:.0f} g wheels, "
           f"{platform.chassis_length_m * 1e3:.0f}x{platform.chassis_width_m * 1e3:.0f}x"
@@ -618,6 +620,10 @@ def main(argv: list[str] | None = None) -> int:
               f"(standing is {ride * 1e3:.0f} mm)")
     print(f"  peak pitch / roll  {np.degrees(result.peak_pitch_rad):.1f}° / "
           f"{np.degrees(result.peak_roll_rad):.2f}°")
+    pc, rc = platform.tipover_angles_rad()
+    print(f"  stability margin   {result.stability_margin:+.2f} "
+          f"(1 = level; 0 = CG over the wheel line; crit {np.degrees(pc):.0f}°/"
+          f"{np.degrees(rc):.0f}° pitch/roll)")
     if not flat:
         print(f"  chassis hit step   {result.chassis_hit_step}")
     print(f"  axle work          {result.energy_j:.1f} J")

@@ -21,17 +21,17 @@ in the body and the only compliance in the vehicle is the wheels. That is the po
 the wheel the whole story — but it means a four-wheel rover on rigid wheels is a rigid body on
 four contact points, and it will climb by pitching and by luck rather than by conforming.
 
-**Skid steer scrubs, and this drives straight.** Four non-steered wheels cannot turn without
-sliding sideways, and lateral scrub of a segmented capsule ring is not validated against
-anything in this project. :func:`build_rover_mjcf` will happily let you command different
-torques left and right; the results would not be trustworthy yet, which is why nothing here
-does it and :func:`drive_straight` is the only drive supplied.
-
-**The ROM is planar and a robot is not.** Each ring lies in its own x-z plane and its segments
-move radially and in-plane-tangentially. A rover that rolls, or drops one wheel off an edge,
-loads a wheel **out of plane**, and there the ring is perfectly rigid. That is a real gap of
-the same family as "the shear band does not shear": ``F(delta)`` can be right while the
-behaviour is not. It does not bite for a rigid-wheel run, which is why that comes first.
+**Skid steer scrubs, and this drives straight — but the gap is narrower than it reads**
+(re-scoped 2026-08-11, ``TODO.md`` #38). The ring is planar, and for a *wide* claw that is a
+defensible structural approximation rather than a hole: a claw's out-of-plane stiffness is
+``(w/t)²`` times its tangential one — ~72x on the R 60 family, a closed form on
+``WheelParams.lateral_stiffness_ratio`` — so laterally the wheel is quasi-rigid and a
+skid-steer turn is a **friction** problem, which MuJoCo's Coulomb cone does model. What is
+genuinely unvalidated is narrower: the discrete tips scrubbing sideways (patch-level
+behaviour, not structure), and any design where ``w/t`` collapses. Turning scenarios stay
+out of this module until #38's checks land — a 3-D FEA lateral case for the structure, and a
+printed-wheel spin-in-place test for the friction (ADR-0008 makes hardware the ground
+truth). :func:`drive_straight` is the only drive supplied, deliberately, until then.
 """
 
 from __future__ import annotations
@@ -279,6 +279,19 @@ class RoverResult:
     peak_roll_rad: float = 0.0
     #: Whether the chassis box itself touched the step — bellying out rather than climbing.
     chassis_hit_step: bool = False
+    #: **Objective 5** (`08-metrics.md`): worst-case margin to static tip-over, unitless.
+    #: ``1 − max(|pitch|/pitch_crit, |roll|/roll_crit)`` over the driving phase, with the
+    #: critical angles from :meth:`~wheelopt.platform.PlatformSpec.tipover_angles_rad`.
+    #: 1.0 is a run that never pitched or rolled at all; 0.0 is the CG passing vertically
+    #: over a wheel contact line; negative is past it. **Maximise the minimum** (CVaR'd over
+    #: seeds), because stability is a worst-moment property — a run that averages upright and
+    #: tips once has tipped.
+    #:
+    #: Static reference, deliberately: the angles are where the CG crosses the support
+    #: polygon at rest, and a fast robot can tip earlier (momentum) or hang on later (a wheel
+    #: pressed against a riser). The margin is a *score against a fixed yardstick*, which is
+    #: what an objective needs — comparable across designs — not a tip-over predictor.
+    stability_margin: float = 1.0
     #: Mechanical work at the four axles, joules.
     energy_j: float = 0.0
     #: RMS vertical chassis acceleration over the steady window, m/s². **Objective 3**
@@ -433,7 +446,10 @@ def build_rover_mjcf(
     # rather than from the wheel so that a wheel outside the envelope shows up as a chassis
     # sitting wrong, instead of being silently accommodated.
     axle_z = wheel_radius_m
-    body_z = platform.ground_clearance_m + half[2]
+    # Wheel-dependent, not the stated constant: the belly rides a fixed 7.5 mm above the
+    # axle line (bracket geometry), so a bigger wheel lifts the chassis one-for-one. The
+    # constant-clearance version put an R 85 axle 55 mm above its own belly.
+    body_z = platform.ground_clearance_for(wheel_radius_m) + half[2]
     # How far the robot could possibly travel, plus a margin, so the step cannot run out.
     reach = scenario.duration_s * platform.no_load_speed_rad_s * wheel_radius_m
     step_half_len = 0.5 * (reach + 2.0 * platform.chassis_length_m)
@@ -784,7 +800,7 @@ def _summarise(platform, scenario, history, settle_steps, energy_j, hit_step, *,
     """Turn the history into the handful of numbers worth quoting."""
     x, z = history[:, 1], history[:, 2]
     driving = slice(settle_steps, None)
-    ride = platform.ground_clearance_m + 0.5 * platform.chassis_height_m
+    ride = platform.ground_clearance_for(wheel_radius_m) + 0.5 * platform.chassis_height_m
     clearance = float(z[-1]) - scenario.step_height_m
 
     # The steady window: the second half of the driving phase. The first half is the launch
@@ -808,6 +824,14 @@ def _summarise(platform, scenario, history, settle_steps, energy_j, hit_step, *,
     # climbed sits at its ride height, so a loose height threshold passes the leaner too.
     # Require the chassis centre a full half-length beyond the face, and within a fifth of
     # its ride height of where it would stand.
+    # Objective 5: worst-moment margin to static tip-over. Peak excursions are already
+    # computed below; the margin is the same numbers against the platform's own critical
+    # angles, so a taller CG or a narrower track shows up here without any code changing.
+    pitch_crit, roll_crit = platform.tipover_angles_rad()
+    peak_pitch = float(np.max(np.abs(history[driving, 3])))
+    peak_roll = float(np.max(np.abs(history[driving, 4])))
+    stability = 1.0 - max(peak_pitch / pitch_crit, peak_roll / roll_crit)
+
     on_top = ((x > scenario.step_x_m + 0.5 * platform.chassis_length_m)
               & (np.abs(z - scenario.step_height_m - ride) < 0.2 * ride))
     # On flat ground both halves of that test pass the moment the robot has driven a metre,
@@ -819,9 +843,10 @@ def _summarise(platform, scenario, history, settle_steps, energy_j, hit_step, *,
         climbed=climbed,
         distance_m=float(np.max(x) - x[settle_steps]),
         final_clearance_m=clearance,
-        peak_pitch_rad=float(np.max(np.abs(history[driving, 3]))),
-        peak_roll_rad=float(np.max(np.abs(history[driving, 4]))),
+        peak_pitch_rad=peak_pitch,
+        peak_roll_rad=peak_roll,
         chassis_hit_step=bool(hit_step),
+        stability_margin=float(stability),
         energy_j=float(energy_j),
         harshness_rms_m_s2=harshness,
         mean_speed_m_s=speed,

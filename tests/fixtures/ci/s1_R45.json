@@ -1,0 +1,132 @@
+{
+ "rows": {
+  "145db6c841bf2dbe": {
+   "metrics": {
+    "climbed": 0.0,
+    "distance_m": 0.6302989977115533,
+    "energy_j": 40.46562034861683,
+    "final_clearance_m": 0.09106707830793528,
+    "stability_margin": 0.9958350479439856
+   },
+   "status": "ok"
+  },
+  "2043fb98ee8f7069": {
+   "metrics": {
+    "climbed": 0.0,
+    "distance_m": 0.5870248674357479,
+    "energy_j": 52.650790453088206,
+    "final_clearance_m": 0.05101941582109355,
+    "stability_margin": 0.9982786090856207
+   },
+   "status": "ok"
+  },
+  "375ef2baf484982f": {
+   "metrics": {
+    "climbed": 0.0,
+    "distance_m": 0.5870125692524063,
+    "energy_j": 40.19555726925217,
+    "final_clearance_m": 0.011054022991704215,
+    "stability_margin": 0.9985491742543162
+   },
+   "status": "ok"
+  },
+  "439b618b56c11d7f": {
+   "metrics": {
+    "climbed": 0.0,
+    "distance_m": 0.5870172889167214,
+    "energy_j": 63.61312964093723,
+    "final_clearance_m": 0.01103569765237361,
+    "stability_margin": 0.9984641272933454
+   },
+   "status": "ok"
+  },
+  "8eb1b03925c316bb": {
+   "metrics": {
+    "climbed": 0.0,
+    "distance_m": 0.5870143019797427,
+    "energy_j": 50.86303846612646,
+    "final_clearance_m": 0.011024834895505042,
+    "stability_margin": 0.9986844637631911
+   },
+   "status": "ok"
+  },
+  "957941c738c8d3a5": {
+   "metrics": {
+    "climbed": 0.0,
+    "distance_m": 0.5870193229953156,
+    "energy_j": 64.39669769827232,
+    "final_clearance_m": 0.05101648523352774,
+    "stability_margin": 0.9979350255169503
+   },
+   "status": "ok"
+  },
+  "a2b91bec1d8664f4": {
+   "metrics": {
+    "climbed": 0.0,
+    "distance_m": 0.5870328739962146,
+    "energy_j": 42.16060388482418,
+    "final_clearance_m": 0.051053238280306626,
+    "stability_margin": 0.9987702268786851
+   },
+   "status": "ok"
+  },
+  "c0f8f31e264185f9": {
+   "metrics": {
+    "climbed": 0.0,
+    "distance_m": 0.5870090818466962,
+    "energy_j": 32.33642866644772,
+    "final_clearance_m": 0.011027264987470614,
+    "stability_margin": 0.9982818233462533
+   },
+   "status": "ok"
+  },
+  "e11785fe8dc00b8d": {
+   "metrics": {
+    "climbed": 0.0,
+    "distance_m": 0.6303006396595574,
+    "energy_j": 36.78567970142764,
+    "final_clearance_m": 0.09101162764200596,
+    "stability_margin": 0.9956426651119036
+   },
+   "status": "ok"
+  },
+  "e435404f1427c1ad": {
+   "metrics": {
+    "climbed": 0.0,
+    "distance_m": 0.5870365194661986,
+    "energy_j": 32.849880870353736,
+    "final_clearance_m": 0.05109798235120057,
+    "stability_margin": 0.9984127380795449
+   },
+   "status": "ok"
+  },
+  "e70e76a415eafb3b": {
+   "metrics": {
+    "climbed": 0.0,
+    "distance_m": 0.6303096892231369,
+    "energy_j": 28.113137519915693,
+    "final_clearance_m": 0.0910221214590124,
+    "stability_margin": 0.9946664898021573
+   },
+   "status": "ok"
+  },
+  "fa00005767981640": {
+   "metrics": {
+    "climbed": 0.0,
+    "distance_m": 0.6303173291071201,
+    "energy_j": 32.46039821563087,
+    "final_clearance_m": 0.0910673970526,
+    "stability_margin": 0.9963600746050927
+   },
+   "status": "ok"
+  }
+ },
+ "schema": "store-0.1.0",
+ "versions": {
+  "cad": "cad-0.1.0",
+  "fea": "fea-0.1.0",
+  "platform": "f7df95bd5e23",
+  "rom": "rom-0.7.0",
+  "store": "store-0.1.0"
+ }
+}

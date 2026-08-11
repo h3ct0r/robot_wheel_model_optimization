@@ -50,7 +50,8 @@ jobs:
         run: pip install -e '.[sim,store]'
       - name: "Cross-machine gate: 3 designs against the committed manifests"
         run: |
-          for r in 60 85 100; do
+          # Radii spanning the ADOPTED envelope (R 40-90, 2026-08-11)
+          for r in 45 65 85; do
             python scripts/run_s1.py --radius "$r" --heights 40:120:40 --seeds 4 \
               --no-store --manifest "tests/fixtures/ci/s1_R${r}.json"
           done

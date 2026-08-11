@@ -1,6 +1,6 @@
 # ADR-0004 — Project Chrono as ground truth, never in the loop
 
-**Status:** accepted
+**Status:** superseded in its gating role by ADR-0008 (2026-08-11) — hardware is the ground truth; Chrono remains the documented option for a sim-to-sim cross-check
 **Date:** 2026-08-04
 **Depends on:** ADR-0002
 

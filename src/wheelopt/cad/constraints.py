@@ -58,10 +58,15 @@ class PlatformLimits:
     #: Geometric room for the wheel. On this platform the wheels hang outboard of a
     #: 400 x 300 x 200 mm chassis, so nothing encloses them — the binding limit is the
     #: print bed below, and this sits just inside it.
-    wheel_well_radius_mm: float = 105.0
+    wheel_well_radius_mm: float = 95.0
+    #: The MX-64 horn is a D53 rotating disc the wheel bolts to, so a hub that cannot house
+    #: it cannot be mounted without an adapter flange. Horn radius 26.5 mm (measured off the
+    #: robot STL at all four axles) plus a 1.5 mm printed wall.
+    horn_seat_radius_mm: float = 28.0
     max_width_mm: float = 70.0
-    #: Half of an 8 mm D-shaft. Four 24.5 N wheels with climbing torque need more than the
-    #: 6 mm shaft a 4 kg robot would use.
+    #: Half of the 8 mm centre clearance hole over the MX-64 horn's thrust boss. Not a
+    #: D-shaft since 2026-08-11 — torque comes through the horn bolts, the bore just clears
+    #: the boss — but the screening check is the same shape: the bore is fixed, not searched.
     shaft_radius_mm: float = 4.0
     #: Bambu Lab X1C, matching `manufacturing.bed_size` in configs/robot.yaml. These two
     #: used to disagree; the YAML is the one that describes the actual printer, and
@@ -202,6 +207,26 @@ def check_design(
                 lim.shaft_radius_mm,
                 "bore does not match the drivetrain shaft (interface is fixed, not searched)",
                 lower_bound=False,
+            )
+        )
+
+    # The wheel bolts to the MX-64 horn, a D53 rotating disc; a hub smaller than the seat
+    # needs a printed adapter flange between wheel and horn. WARNING rather than INFEASIBLE,
+    # deliberately, for now: an adapter is a real and cheap workaround, the whole existing
+    # design corpus (hub 22) sits below the seat, and hard-failing it the day the horn was
+    # discovered would call every recorded design unbuildable when it is merely un-direct.
+    # Promote to INFEASIBLE when the default hub moves to 28 and the corpus is re-run.
+    if params.hub_radius_mm < lim.horn_seat_radius_mm:
+        v.append(
+            _violation(
+                "hub_seats_horn",
+                Severity.WARNING,
+                params.hub_radius_mm,
+                lim.horn_seat_radius_mm,
+                f"hub r {params.hub_radius_mm:g} mm cannot house the D53 servo horn "
+                f"(needs >= {lim.horn_seat_radius_mm:g}); the wheel mounts via an adapter "
+                "flange until the hub grows",
+                lower_bound=True,
             )
         )
 

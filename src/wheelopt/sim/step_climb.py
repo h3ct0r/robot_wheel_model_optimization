@@ -106,7 +106,9 @@ class RigSpec:
     #: Mass on the axle, kg. Set it from the load the wheel is *fitted* for, not from the
     #: platform, when the two disagree — a wheel driven outside its fitted range answers a
     #: question about extrapolation rather than about compliance.
-    payload_kg: float = 2.5
+    #: 20.6 N at the measured platform's per-wheel load (was 2.5 kg for the fictional
+    #: 24.5 N one).
+    payload_kg: float = 2.1
     #: Step height, metres. The plan's headline case is 0.050.
     step_height_m: float = 0.050
     #: Where the step's face sits, metres. Far enough that the wheel is rolling steadily.

@@ -60,6 +60,72 @@ the headline did not. The collapse is gone; the grading hole is not.
 
 ---
 
+### #37 — The rigid family is the baseline and a candidate, and it cannot be built yet
+
+Opened 2026-08-11 by the project review: the stated objective lets the optimiser pick **hard
+plastic wheels**, and today the rigid side of the design space can express only a smooth
+analytic cylinder in simulation — no `T0` in CAD, no `T1` grousers, no `T2` lobes, no
+STL→CoACD→MJCF path for a shaped rigid wheel to collide with anything. As built, "a hard
+wheel wins on this platform" is a conclusion the pipeline **cannot reach even if it is
+true**, which biases the search by construction.
+
+**Work, in dependency order.**
+1. `T0` in CAD: a rigid cylinder with bore and (optionally) tread — a new topology switch,
+   since `WheelParams` mandates spokes. Gives the hardware baseline a printable artefact and
+   the sim baseline a mass/inertia derived from real geometry instead of the analytic ring.
+2. `T1`/`T2`: grouser and lobe parameters (count, height, width / lobe count, depth), their
+   screening (a grouser is an overhang; lobes change `polygon_drop`), and the CAD.
+3. **CoACD→MJCF** (ADR-0007, promoted from #36): decompose the STL, enforce the hull and
+   vertex budgets the ADR names, and mount the hulls on the rover's axles. This is the piece
+   that lets a *shaped* rigid wheel collide.
+4. Re-run the metric suite with `T1` in it — the first genuinely fair hard-vs-soft
+   comparison this project will have produced.
+
+~~Also carried here: re-derive `outer_radius_mm`'s bound from the wheel well.~~ **Done
+2026-08-11 in the adoption commit**: bounds are (40, 90), floor from the horn seat, ceiling
+by judgement with no pipe constraint — see the log entry of that date. What #37 still owns
+is the rigid family itself (`T0`/`T1`/`T2` + CoACD) — noting that the interface is now the
+**D53 horn**, so `T0`'s hub must seat it, and the small original wheels (r 22.5) are the
+natural first `T0` print target for the bench-rig shakedown.
+
+### #38 — Skid-steer scrub: the lateral gap, re-scoped and still open
+
+Opened 2026-08-11 by the project review; the platform steers by scrubbing sideways and
+"stability" is now an objective, so lateral behaviour stopped being deferrable by silence.
+
+**The gap is narrower than the old docstrings said, and the narrowing is a closed form.** A
+claw's out-of-plane stiffness is ``(w/t)²`` times its tangential one
+(`WheelParams.lateral_stiffness_ratio`) — **~72x** on the R 60 family at the effective
+thickness, 156x at the tip, and the taper only widens it (in-plane enters cubically, lateral
+linearly). So the ROM's planar rigidity is a defensible *structural* approximation for wide
+claws, and a skid-steer turn is chiefly a **friction** problem, which MuJoCo's Coulomb cone
+models. What is actually unvalidated: (a) the ratio claim itself, against a 3-D FEA lateral
+tip case (the 2-D tier cannot express it); (b) patch-level scrub of discrete tips — stick,
+squirm and wear are not structure; (c) any design where ``w/t`` falls toward ~10.
+
+**Work.** A 3-D `TIP_LATERAL` case on the claw sector to check the ``(w/t)²`` claim; a
+differential-drive scenario in `sim/rover.py` (`WheelMount.side` already carries the sign)
+measuring yaw rate and per-wheel scrub; and the hardware spin-in-place test from the
+ADR-0008 protocol as the ground truth for the friction half. Turning results stay quarantined
+until (a) passes.
+
+**Decision 2026-08-11: spin-in-place is also S6's proxy.** The full figure-8/slalom path
+track is deferred (recorded in `08-metrics.md`) — it needs #38's validation *and* a
+path-following controller, and would measure the controller as much as the wheel. The spin
+test answers S6's essential question (does this wheel let the robot turn, at what cost) as
+one number per design; the full scenario returns only if designs differ meaningfully on it.
+
+### #39 — Export a URDF from the platform spec (generated, never hand-written)
+
+Opened 2026-08-11 from the ROS2 question. `robot.yaml` stays the source of truth — it holds
+what URDF cannot say (print constraints, wheel envelope, operating point, provenance/frozen)
+— and a `scripts/export_urdf.py` generates URDF from `PlatformSpec` + a chosen wheel, the
+same way `build_rover_mjcf` generates MJCF. Hand-maintaining a second robot description is
+the dual-source drift this repo keeps finding, so the generator is the only acceptable form.
+Useful the day the robot runs ROS2 nav or someone wants RViz; nothing in the optimisation
+loop needs it. USD/Isaac explicitly out (ADR-0001 rejected Isaac). Xacro only if the URDF
+grows parameters worth templating — the generator IS the parameterisation, so likely never.
+
 ## The claw family's own gaps
 
 These arrived with the `T7` redirection on 2026-08-08 and are listed in that log entry.
@@ -118,12 +184,16 @@ out.** See the log entry of that date. What changed:
   **21.98 mm** against a law measured to 12, which is the *other* failure and is reported
   separately.
 
-**What is left is one decision, and it is now well posed.** Either build a segment that can
-carry a distributed flank contact — a beam-on-foundation per claw, or a collision surface with
-length — or accept the single-claw regime as the ROM's envelope and screen designs on where
-their duty cycle sits inside it. The second is what the code does today, honestly and with
-numbers. The first is the only way to a trustworthy `T7L` (#35) or a trustworthy step-climb
-comparison on the rover (#30).
+**What is left is one decision, and ADR-0008 (2026-08-11) changed its terms.** With printed
+hardware as the ground truth, the multi-claw regime no longer needs an analytic flank-bedding
+element to become trustworthy — it needs a **measured whole-wheel curve past second-claw
+engagement from a printed wheel**, against which the ring's multi-claw response is calibrated
+(the analytic element stays exact in the single-claw regime; above it, the printed curve is
+the law). That path is: print the R 60 twelve-claw design, run the bench press protocol
+(`docs/plan/17-hardware-baseline.md`), and fit. The analytic element (beam-on-foundation, or
+a two-bar claw) remains the option if the calibrated ring still cannot track the *shape* of
+the measured curve — build it then, against data, not before. Blocks a trustworthy `T7L`
+(#35) and the rover step comparison (#30) either way.
 
 Original statement follows.
 
@@ -351,10 +421,9 @@ gets frozen:
   `T0` is for printing a hardware baseline, which is Phase 4, and it does not fit
   `WheelParams` (spokes are mandatory there), so it is a new topology switch with its own
   screening — real surface area to add for a part nobody prints yet.
-- **`STL → CoACD hulls → MJCF`** (ADR-0007). Needed the day a rigid *shaped* wheel — `T1`
-  grousered, `T2` lobed — must collide in MuJoCo. Today rigid wheels are cylinders and
-  compliant ones are capsule rings; there is no mesh that needs decomposing. The ADR stands;
-  the wiring waits for the first `T1`.
+- **`STL → CoACD hulls → MJCF`** (ADR-0007). ~~Waits for the first `T1`~~ — **promoted into
+  #37 on 2026-08-11**: the rigid family became a first-class candidate, so the first `T1` is
+  now scheduled work rather than a hypothetical.
 - **Hydra.** `configs/robot.yaml` is read by a tested loader and every CLI is argparse; the
   conventions section still names Hydra as the intended config system. Wiring it now churns
   eleven entry points for no behavioural change. The honest trigger is the optimiser (#9 in
