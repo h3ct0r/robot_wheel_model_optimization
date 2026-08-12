@@ -146,6 +146,21 @@ class TestDerived(unittest.TestCase):
         # and must not acquire one by accident.
         self.assertEqual(set(SPEC.param_bounds()), {"outer_radius_mm", "width_mm"})
 
+    def test_track_derives_from_the_mount_face_and_the_wheel(self):
+        """External mounting (2026-08-11, pipebot_simplified.stl): inner face against the
+        side plate at ±97.5 mm, so track = 195 mm + width and a wider wheel widens its own
+        support polygon. The stored track_width is the ORIGINAL tucked-under wheels'."""
+        self.assertAlmostEqual(SPEC.track_for(0.030), 0.225)
+        self.assertAlmostEqual(SPEC.track_for(0.060), 0.255)
+        with self.assertRaises(PlatformSpecError):
+            SPEC.track_for(0.0)
+
+    def test_tipover_roll_axis_follows_the_actual_track(self):
+        pitch_ref, roll_ref = SPEC.tipover_angles_rad()
+        pitch, roll = SPEC.tipover_angles_rad(track_m=SPEC.track_for(0.030))
+        self.assertEqual(pitch, pitch_ref)          # pitch never moves with track
+        self.assertGreater(roll, roll_ref)          # a wider stance is harder to roll
+
 
 MINIMAL = """
 meta:
@@ -165,6 +180,7 @@ drivetrain:
   configuration: skid_steer
   n_driven_wheels: 4
   track_width: 0.35
+  wheel_mount_face: 0.0975
   wheelbase: 0.26
 motor:
   stall_torque: 4.0

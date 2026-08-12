@@ -8,7 +8,7 @@
     # Four segmented rings instead of four cylinders, built from this design's own FEA:
     python scripts/run_rover.py --compliant --radius 60 --rim-thickness 0 --spokes 12 \\
         --thickness 6 --claw-taper 0.6 --spoke-phase -90 --plane-strain --law claw \\
-        --tangential hinge --obstacle-height 50 --render
+        --tangential hinge --obstacle-height 40 --render
 
 The robot is `configs/robot.yaml` — chassis box, wheelbase, track, inertia and the motor's
 own torque-speed curve, all read rather than invented.
@@ -92,7 +92,7 @@ examples:
   # over them, filmed. Needs CalculiX for the ring and build123d for the overlay.
   run_rover.py --compliant --stl --radius 60 --rim-thickness 0 --spokes 12 \\
       --thickness 6 --claw-taper 0.6 --spoke-phase -90 --plane-strain \\
-      --law claw --tangential hinge --obstacle-height 50 --render --no-gif
+      --law claw --tangential hinge --obstacle-height 40 --render --no-gif
 
 exit codes:
   0  the robot cleared the obstacle (or --sweep / a flat run finished)
@@ -159,6 +159,13 @@ def build_parser() -> argparse.ArgumentParser:
                      help="instead of one run, sweep 10 mm to 2.1 R in 10 mm buckets and "
                           "report the tallest cleared plus the profile. Quote the answer as "
                           "a bucket, not a millimetre")
+    run.add_argument("--chassis-collision", choices=("box", "primitives"), default="box",
+                     help="which chassis collides. 'box' is the calibrated flat-bellied "
+                          "box; 'primitives' is the pipe + dome nose + bracket plates read "
+                          "off pipebot_simplified.stl — a PHYSICS change: the plates reach "
+                          "23 mm below the axle and the dome can ride a step edge. For "
+                          "comparing the two chassis models on the same runs; neither low "
+                          "point is confirmed on hardware yet")
 
     compliant = p.add_argument_group(
         "compliant wheels (TODO #30/#31 -- a picture, not a measurement)")
@@ -210,6 +217,14 @@ def build_parser() -> argparse.ArgumentParser:
     overlay.add_argument("--mesh-alpha", type=float, default=CAD_OVERLAY_RGBA[3],
                          metavar="A",
                          help="opacity of the CAD overlay, 0 invisible to 1 solid")
+    overlay.add_argument("--chassis-stl", type=Path,
+                         default=REPO_ROOT / "configs" / "pipebot_simplified.stl",
+                         help="the robot's real shell, drawn over the chassis box and placed "
+                              "by its measured axle line. The box stays the contact geom, "
+                              "faded to a ghost; the mesh has no mass and no collision, so "
+                              "every number is identical with and without it")
+    overlay.add_argument("--no-chassis-stl", action="store_true",
+                         help="draw the plain chassis box instead of the robot's shell")
 
     output = p.add_argument_group("output")
     output.add_argument("--render", action="store_true",
@@ -220,7 +235,11 @@ def build_parser() -> argparse.ArgumentParser:
                         help="skip the GIF; the MP4 is around 13x smaller and full-colour")
     output.add_argument("--fps", type=int, default=25,
                         help="frames per second, used BOTH to sample the simulation and to "
-                             "play it back, so the video runs at real speed")
+                             "play it back, so the video runs at real speed. Mind the "
+                             "wagon-wheel effect on clawed wheels: 12 claws at top speed "
+                             "pass ~13 tips/s, just past 25 fps's 12.5 Hz Nyquist limit, "
+                             "and the wheel films as spinning BACKWARDS while the physics "
+                             "(and the robot) move forward. Film claw wheels at 60")
     output.add_argument("--pixels", type=int, default=900,
                         help="frame width in pixels; height is 9/16 of it")
     output.add_argument("--out", type=Path, default=REPO_ROOT / "data" / "renders",
@@ -237,7 +256,26 @@ def _wheel_args(args) -> dict:
         **({} if args.mesh is None else
            {"visual_mesh": args.mesh,
             "visual_rgba": (*CAD_OVERLAY_RGBA[:3], args.mesh_alpha)}),
+        **({} if args.chassis_mesh is None else {"chassis_mesh": args.chassis_mesh}),
+        "chassis_collision": args.chassis_collision,
     }
+
+
+def _resolve_chassis_stl(args) -> None:
+    """The robot's shell for the chassis, stashed on ``args.chassis_mesh``, or ``None``.
+
+    On by default because the file ships with the repo and the mesh is decoration — it
+    changes no number (tests pin that). A missing file downgrades to the box with a note
+    rather than an error, for the same reason the wheel overlay does: only the picture is
+    at stake, never the simulation.
+    """
+    args.chassis_mesh = None
+    if args.no_chassis_stl:
+        return
+    if args.chassis_stl.is_file():
+        args.chassis_mesh = args.chassis_stl
+    else:
+        print(f"   no chassis shell: {args.chassis_stl} not found -- drawing the box")
 
 
 def _build_the_overlay(args) -> str:
@@ -531,15 +569,21 @@ def main(argv: list[str] | None = None) -> int:
           f"4 x {args.wheel_mass:.0f} g wheels, "
           f"{platform.chassis_length_m * 1e3:.0f}x{platform.chassis_width_m * 1e3:.0f}x"
           f"{platform.chassis_height_m * 1e3:.0f} mm")
+    track = platform.track_for(args.width * 1e-3)
     print(f"       wheelbase {platform.wheelbase_m * 1e3:.0f} mm, track "
-          f"{platform.track_width_m * 1e3:.0f} mm, R {args.radius:.0f} mm, ride "
-          f"{ride * 1e3:.0f} mm")
+          f"{track * 1e3:.0f} mm (external mount, {args.width:.0f} mm wheels), "
+          f"R {args.radius:.0f} mm, ride {ride * 1e3:.0f} mm")
     print(f"drive: {platform.stall_torque_n_m:.1f} N·m stall x4 at "
           f"{args.throttle:.2f} throttle, {platform.no_load_speed_rad_s:.1f} rad/s free "
           f"({platform.no_load_speed_rad_s * args.radius * 1e-3:.2f} m/s)")
     if not platform.frozen:
         print("       NOTE meta.frozen is false — these are estimates, not a measured robot")
+    if args.chassis_collision == "primitives":
+        print("       chassis collision: PRIMITIVES from the simplified model — the belly "
+              "is the bracket points at R−23 mm and the nose is a dome. A physics change; "
+              "do not compare against box-chassis numbers")
 
+    _resolve_chassis_stl(args)
     message = _build_the_rings(args) or _build_the_overlay(args)
     if message:
         print(message)
@@ -620,7 +664,7 @@ def main(argv: list[str] | None = None) -> int:
               f"(standing is {ride * 1e3:.0f} mm)")
     print(f"  peak pitch / roll  {np.degrees(result.peak_pitch_rad):.1f}° / "
           f"{np.degrees(result.peak_roll_rad):.2f}°")
-    pc, rc = platform.tipover_angles_rad()
+    pc, rc = platform.tipover_angles_rad(track_m=platform.track_for(args.width * 1e-3))
     print(f"  stability margin   {result.stability_margin:+.2f} "
           f"(1 = level; 0 = CG over the wheel line; crit {np.degrees(pc):.0f}°/"
           f"{np.degrees(rc):.0f}° pitch/roll)")

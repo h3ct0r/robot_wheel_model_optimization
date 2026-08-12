@@ -124,6 +124,99 @@ SEGMENT_RGBA = (0.93, 0.55, 0.13, 1.0)
 #: Neutral grey on purpose: it should recede behind the capsules rather than compete with them.
 CAD_OVERLAY_RGBA = (0.62, 0.63, 0.67, 0.40)
 
+#: Colour of the chassis STL, when one is drawn. Near-solid, because unlike the wheel overlay
+#: it does not stand in front of any physics — the box it replaces visually is faded instead
+#: (`CHASSIS_BOX_GHOST_RGBA`), so the contact proxy stays visible through the shell.
+CHASSIS_MESH_RGBA = (0.80, 0.80, 0.84, 0.95)
+
+#: The chassis box when a mesh is drawn over it: a faint ghost. Still the **contact geom** —
+#: fading it is a render choice, hiding it entirely would hide the surface a belly strike
+#: actually happens on, which is most of why the box exists.
+CHASSIS_BOX_GHOST_RGBA = (0.85, 0.85, 0.88, 0.12)
+
+#: Where the axle line sits in ``configs/pipebot_simplified.stl``'s own frame, millimetres,
+#: as ``(lateral, vertical, longitudinal)`` — the model's axes are (x lateral, z vertical,
+#: y longitudinal), spanning 233 × 153 × 425 mm. Measured, not read from anywhere: the model
+#: carries explicit **axle stubs** (r 7.5 cylinders, confirmed in the STEP), whose axes sit
+#: at y = 103.48/353.51 — wheelbase 250.03 against the platform's 250, the cross-check —
+#: midpoint 228.49, all at z = 24.50. Lateral midline −0.50 (stub tips at +116/−117, plate
+#: faces at +97/−98, both symmetric about it).
+CHASSIS_MESH_AXLE_MM = (-0.50, 24.50, 228.49)
+
+#: Rotation taking the mesh frame to the chassis body frame, MuJoCo w-x-y-z. The mesh axes
+#: are (lateral, longitudinal, vertical); the body's are (forward, left, up). Front is the
+#: mesh's **low**-y end — the end with the ~105 mm overhang, the nose — so the map is
+#: body_x = −y, body_y = +x, body_z = +z: a +90° rotation about z (det +1, verified
+#: numerically against the stub positions).
+CHASSIS_MESH_QUAT = (0.7071067811865476, 0.0, 0.0, 0.7071067811865476)
+
+#: The chassis as collision **primitives** read off ``pipebot_simplified.stl`` — the
+#: alternative to the calibrated box (``chassis_collision="primitives"``). Each entry is
+#: ``(name, kind, centre, size)`` in the MESH frame, millimetres, so the one registration
+#: (`CHASSIS_MESH_AXLE_MM`) places physics and picture alike. Measured 2026-08-11:
+#:
+#: - ``shell``: the pipe is an exact r 72.5 cylinder about (x 0, z 82), y 54–424.
+#: - ``nose``: the front cap is an exact r 55 hemisphere centred at (0, 54, 82) — 10 673
+#:   mesh vertices within 1 mm. A dome, not a wall: it can ride a step edge up.
+#: - ``plate_*``: the outer bracket plates at |x| ≈ 97.25, one per axle station, y spans
+#:   79–155 and 302–378 (asymmetric about their stations, mirror-symmetric about the body),
+#:   z 1.5–47.5 — their pointed bottom corners are the lowest material on the machine,
+#:   23 mm BELOW the axle line. The box these replace has no belly there at all.
+#: - ``web_*``: the matching inner walls at |x| ≈ 52.5, same spans below the pipe.
+#:
+#: Boxes over-fill the plates' chamfered corners (a box bottom edge runs the full length
+#: where the real plate rises to a point) — conservative, and stated rather than hidden.
+#: The axle stubs are deliberately absent: they live inside the wheels' hubs, and the wheel
+#: bodies are children of the chassis, which MuJoCo never collides with their parent.
+CHASSIS_PRIMITIVES_MM = (
+    ("shell", "cylinder", (0.0, 239.0, 82.0), (72.5, 185.0)),
+    ("nose", "sphere", (0.0, 54.0, 82.0), (55.0,)),
+    # (name, "box", centre (lat, long, vert), HALF sizes (lat, long, vert)); mesh +x is
+    # body +y = the robot's LEFT, so the l/r in the names is the body's side, not the sign.
+    ("plate_fl", "box", (+97.25, 117.0, 24.5), (0.75, 38.0, 23.0)),
+    ("plate_fr", "box", (-97.25, 117.0, 24.5), (0.75, 38.0, 23.0)),
+    ("plate_rl", "box", (+97.25, 340.0, 24.5), (0.75, 38.0, 23.0)),
+    ("plate_rr", "box", (-97.25, 340.0, 24.5), (0.75, 38.0, 23.0)),
+    ("web_fl", "box", (+52.5, 117.0, 24.5), (1.0, 38.0, 23.0)),
+    ("web_fr", "box", (-52.5, 117.0, 24.5), (1.0, 38.0, 23.0)),
+    ("web_rl", "box", (+52.5, 340.0, 24.5), (1.0, 38.0, 23.0)),
+    ("web_rr", "box", (-52.5, 340.0, 24.5), (1.0, 38.0, 23.0)),
+)
+
+
+def _chassis_collision_primitives(dz_axle_m: float, *, ghosted: bool) -> list[str]:
+    """Geom lines for `CHASSIS_PRIMITIVES_MM`, transformed mesh frame → body frame.
+
+    Same translation the mesh geom uses — the axle line is the registration for both — so
+    the primitives sit exactly under the drawn shell. ``ghosted`` fades them to the box's
+    ghost colour when the shell is drawn over them; without a shell they are the visible
+    robot and keep the body colour.
+    """
+    lat_mid, z_axle, long_mid = CHASSIS_MESH_AXLE_MM
+    rgba = CHASSIS_BOX_GHOST_RGBA if ghosted else (0.85, 0.85, 0.88, 1.0)
+    common = ('mass="0" density="0" '
+              f'rgba="{rgba[0]:.3f} {rgba[1]:.3f} {rgba[2]:.3f} {rgba[3]:.3f}"')
+    lines = []
+    for name, kind, centre, size in CHASSIS_PRIMITIVES_MM:
+        pos = (f'pos="{(long_mid - centre[1]) * 1e-3:.9f} '
+               f'{(centre[0] - lat_mid) * 1e-3:.9f} '
+               f'{dz_axle_m + (centre[2] - z_axle) * 1e-3:.9f}"')
+        if kind == "cylinder":
+            radius, half_len = size
+            # MuJoCo's cylinder axis is local z; Ry(+90°) lays it along body x.
+            lines.append(f'      <geom name="chassis_col_{name}" type="cylinder" {pos} '
+                         f'euler="0 1.5707963 0" size="{radius * 1e-3:.9f} '
+                         f'{half_len * 1e-3:.9f}" {common}/>')
+        elif kind == "sphere":
+            lines.append(f'      <geom name="chassis_col_{name}" type="sphere" {pos} '
+                         f'size="{size[0] * 1e-3:.9f}" {common}/>')
+        else:
+            half_lat, half_long, half_vert = size
+            lines.append(f'      <geom name="chassis_col_{name}" type="box" {pos} '
+                         f'size="{half_long * 1e-3:.9f} {half_lat * 1e-3:.9f} '
+                         f'{half_vert * 1e-3:.9f}" {common}/>')
+    return lines
+
 
 @dataclass(frozen=True, slots=True)
 class WheelMount:
@@ -137,19 +230,23 @@ class WheelMount:
     side: int
 
 
-def wheel_mounts(platform: PlatformSpec) -> list[WheelMount]:
-    """The four axle positions implied by the wheelbase and the track.
+def wheel_mounts(platform: PlatformSpec,
+                 wheel_width_m: float | None = None) -> list[WheelMount]:
+    """The four axle positions: ``±wheelbase/2`` along x, ``±track/2`` along y.
 
-    Centred on the chassis: front and rear at ``±wheelbase/2`` along x, left and right at
-    ``±track/2`` along y. The track is measured wheel-centre to wheel-centre, so half of it
-    is where the wheel's mid-plane goes, and the wheels sit **outboard** of the 300 mm body
-    on this platform — which is what ``robot.yaml`` says and what
-    :meth:`~wheelopt.platform.PlatformSpec.consistency_warnings` checks.
+    **The track depends on the wheel** (2026-08-11): candidate wheels mount externally,
+    inner face against the side plates, so ``wheel_width_m`` sets the track through
+    :meth:`~wheelopt.platform.PlatformSpec.track_for` — a wider wheel stands further out
+    and widens its own support polygon. ``None`` falls back to the stored
+    ``track_width_m``, which is the ORIGINAL r 22.5 wheels' tucked-under track, kept as
+    the reference configuration.
 
     Ordered front-left, front-right, rear-left, rear-right, and that order is the order of
     every per-wheel array this module returns.
     """
-    half_base, half_track = 0.5 * platform.wheelbase_m, 0.5 * platform.track_width_m
+    track = (platform.track_width_m if wheel_width_m is None
+             else platform.track_for(wheel_width_m))
+    half_base, half_track = 0.5 * platform.wheelbase_m, 0.5 * track
     return [
         WheelMount("fl", +half_base, +half_track, +1),
         WheelMount("fr", +half_base, -half_track, -1),
@@ -391,6 +488,8 @@ def build_rover_mjcf(
     tangential_damping_c: float = 0.0,
     visual_mesh: Path | str | None = None,
     visual_rgba: tuple[float, float, float, float] = CAD_OVERLAY_RGBA,
+    chassis_mesh: Path | str | None = None,
+    chassis_collision: str = "box",
 ) -> str:
     """MJCF for the whole robot, on rigid wheels or on four segmented rings.
 
@@ -426,9 +525,35 @@ def build_rover_mjcf(
     on a free joint. It is a **contact geom**, not a decoration: a box with 70 mm of ground
     clearance will belly out on a step taller than that, and watching it do so is most of why
     this model exists.
+
+    ``chassis_collision`` picks which chassis collides. ``"box"`` (the default) is the
+    calibrated flat-bellied box above. ``"primitives"`` replaces it with the shapes read off
+    the simplified model (`CHASSIS_PRIMITIVES_MM`): the pipe cylinder, the hemispherical
+    nose, and the bracket plates whose points reach 23 mm below the axle line. **This is a
+    physics change, not a rendering one** — the primitives belly out ~30 mm earlier and
+    lower than the box, and the dome nose can ride a step edge the box's flat face
+    hard-stops against. It exists so the two chassis models can be compared on the same
+    runs; neither is validated against the machine yet (the plates' low points are in the
+    CAD, unconfirmed on hardware).
+
+    ``chassis_mesh`` draws the robot's **real shell** (``configs/pipebot_simplified.stl``)
+    over that box, under the same contract as ``visual_mesh``: zero mass, zero collision,
+    every number byte-identical with and without it. The box stays the contact geom and is
+    faded to a ghost rather than removed, because it is the surface a belly strike actually
+    happens on. The mesh must never become the physics: MuJoCo collides a mesh by its convex
+    hull, which would replace the measured flat belly with the hull of a pipe shell. The mesh
+    is placed by its **axle stubs** (`CHASSIS_MESH_AXLE_MM`), not its bounding box — so where
+    the shell disagrees with the box, the shell is telling the truth: its overhang is
+    asymmetric, ~105 mm at the nose against the box's centred 88, and its axle stubs run
+    from the side plates into the wheels, which mount externally on them.
     """
     if segmented and spec is None:
         raise ValueError("segmented wheels need a RingSpec; there is nothing to build")
+    if chassis_collision not in ("box", "primitives"):
+        raise ValueError(
+            f"chassis_collision {chassis_collision!r} is neither 'box' nor 'primitives'; "
+            "honouring it silently would simulate a chassis nobody asked for"
+        )
     segment_mass_kg = (
         (wheel_mass_kg - HUB_MASS_KG) / max(spec.n_segments, 1) if spec is not None else 0.0
     )
@@ -437,7 +562,7 @@ def build_rover_mjcf(
             f"wheel_mass_kg {wheel_mass_kg:.4f} does not exceed the {HUB_MASS_KG:.4f} kg hub, "
             "so the segments would have zero or negative mass"
         )
-    mounts = wheel_mounts(platform)
+    mounts = wheel_mounts(platform, wheel_width_m)
     half = (0.5 * platform.chassis_length_m, 0.5 * platform.chassis_width_m,
             0.5 * platform.chassis_height_m)
     ixx, iyy, izz = platform.chassis_inertia_kg_m2
@@ -492,6 +617,10 @@ def build_rover_mjcf(
             (f'    <mesh name="cadwheel" file="{Path(visual_mesh).resolve()}" '
              f'scale="{CAD_MESH_SCALE} {CAD_MESH_SCALE} {CAD_MESH_SCALE}"/>'),
         ]),
+        *([] if chassis_mesh is None else [
+            (f'    <mesh name="cadchassis" file="{Path(chassis_mesh).resolve()}" '
+             f'scale="{CAD_MESH_SCALE} {CAD_MESH_SCALE} {CAD_MESH_SCALE}"/>'),
+        ]),
         "  </asset>",
         "  <worldbody>",
         '    <light pos="0 -2 3" dir="0 0.4 -1" directional="true" diffuse="0.7 0.7 0.7"/>',
@@ -523,8 +652,38 @@ def build_rover_mjcf(
          f'{platform.com_offset_m[1]:.9f} {platform.com_offset_m[2]:.9f}" '
          f'mass="{platform.chassis_mass_kg:.9f}" '
          f'diaginertia="{ixx:.9g} {iyy:.9g} {izz:.9g}"/>'),
-        (f'      <geom name="body" type="box" size="{half[0]:.9f} {half[1]:.9f} '
-         f'{half[2]:.9f}" mass="0" density="0" material="bodymat"/>'),
+        # The contact chassis. In "box" mode one calibrated box, and only its paint changes
+        # when the shell is drawn over it — the box recedes to a ghost so the render shows
+        # the robot rather than its proxy, but a belly strike still happens on (and is
+        # visible on) it. In "primitives" mode the box is gone entirely and the shapes read
+        # off the simplified model collide instead.
+        *([
+            (f'      <geom name="body" type="box" size="{half[0]:.9f} {half[1]:.9f} '
+             f'{half[2]:.9f}" mass="0" density="0" '
+             + ('material="bodymat"/>' if chassis_mesh is None else
+                f'rgba="{CHASSIS_BOX_GHOST_RGBA[0]:.3f} {CHASSIS_BOX_GHOST_RGBA[1]:.3f} '
+                f'{CHASSIS_BOX_GHOST_RGBA[2]:.3f} {CHASSIS_BOX_GHOST_RGBA[3]:.3f}"/>')),
+        ] if chassis_collision == "box" else
+            _chassis_collision_primitives(axle_z - body_z,
+                                          ghosted=chassis_mesh is not None)),
+        *([] if chassis_mesh is None else [
+            # The real shell, placed by its axle line: the mesh's axle-stub midpoint lands
+            # on the body's (the translation below), and its axle height lands at the sim's
+            # axle depth — which is (axle_z − body_z) below the chassis centre and
+            # independent of wheel radius, because clearance is R + axle_to_belly. With the
+            # +90° z rotation the mesh's lateral axis maps to +body_y, so the lateral
+            # midline enters the y term NEGATED. Same decoration contract as the wheel
+            # overlay: no mass, no contact, no number moves.
+            (f'      <geom name="chassis_cad" type="mesh" mesh="cadchassis" '
+             f'pos="{CHASSIS_MESH_AXLE_MM[2] * 1e-3:.9f} '
+             f'{-CHASSIS_MESH_AXLE_MM[0] * 1e-3:.9f} '
+             f'{(axle_z - body_z) - CHASSIS_MESH_AXLE_MM[1] * 1e-3:.9f}" '
+             f'quat="{CHASSIS_MESH_QUAT[0]} {CHASSIS_MESH_QUAT[1]} '
+             f'{CHASSIS_MESH_QUAT[2]} {CHASSIS_MESH_QUAT[3]}" '
+             f'contype="0" conaffinity="0" mass="0" density="0" '
+             f'rgba="{CHASSIS_MESH_RGBA[0]:.3f} {CHASSIS_MESH_RGBA[1]:.3f} '
+             f'{CHASSIS_MESH_RGBA[2]:.3f} {CHASSIS_MESH_RGBA[3]:.3f}"/>'),
+        ]),
     ]
 
     # The rigid wheel's inertia about its own axle. Matched to the ring when a spec is given.
@@ -615,6 +774,8 @@ def observe_rover(
     tangential_element: TangentialElement | None = None,
     visual_mesh: Path | str | None = None,
     visual_rgba: tuple[float, float, float, float] = CAD_OVERLAY_RGBA,
+    chassis_mesh: Path | str | None = None,
+    chassis_collision: str = "box",
 ) -> RoverResult:
     """Drive the robot straight at the step. ``observer(k, model, data)`` after every step.
 
@@ -674,13 +835,15 @@ def observe_rover(
                                tangential=element if segmented else None,
                                radial_damping=radial_damping,
                                tangential_damping_c=tan_damping,
-                               visual_mesh=visual_mesh, visual_rgba=visual_rgba)
+                               visual_mesh=visual_mesh, visual_rgba=visual_rgba,
+                               chassis_mesh=chassis_mesh,
+                               chassis_collision=chassis_collision)
         model = mujoco.MjModel.from_xml_string(xml)
         data = mujoco.MjData(model)
     except Exception as exc:  # noqa: BLE001 - a bad model is a result, not a crash
         return RoverResult(ok=False, message=f"{type(exc).__name__}: {exc}")
 
-    mounts = wheel_mounts(platform)
+    mounts = wheel_mounts(platform, wheel_width_m)
     axle_dofs = np.array(
         [model.jnt_dofadr[mujoco.mj_name2id(model, mujoco.mjtObj.mjOBJ_JOINT,
                                             f"{m.name}_axle")] for m in mounts],
@@ -700,7 +863,14 @@ def observe_rover(
     tangential_dofs, tangential_qpos = (joint_addr("t") if tangential_law is not None
                                         else (empty, empty))
     chassis = mujoco.mj_name2id(model, mujoco.mjtObj.mjOBJ_BODY, "chassis")
-    body_geom = mujoco.mj_name2id(model, mujoco.mjtObj.mjOBJ_GEOM, "body")
+    # Every geom the chassis collides with the world through: the one calibrated box, or
+    # the primitive set. Collected by name rather than assumed singular, so the belly-strike
+    # verdict means the same thing under either chassis model.
+    chassis_geoms = frozenset(
+        g for g in range(model.ngeom)
+        if (name := mujoco.mj_id2name(model, mujoco.mjtObj.mjOBJ_GEOM, g))
+        and (name == "body" or name.startswith("chassis_col_"))
+    )
     # -1 on a flat run, where there is no step to hit. Geom ids are non-negative, so the
     # membership test below is simply never true and `chassis_hit_step` stays False.
     step_geom = mujoco.mj_name2id(model, mujoco.mjtObj.mjOBJ_GEOM, "step")
@@ -777,7 +947,8 @@ def observe_rover(
             if not hit_step:
                 for c in range(data.ncon):
                     pair = (data.contact[c].geom1, data.contact[c].geom2)
-                    if body_geom in pair and step_geom in pair:
+                    if step_geom in pair and (pair[0] in chassis_geoms
+                                              or pair[1] in chassis_geoms):
                         hit_step = True
                         break
     except Exception as exc:  # noqa: BLE001 - a diverged scenario is a result
@@ -788,13 +959,13 @@ def observe_rover(
     driving_steps = max(n_steps - settle_steps, 1)
     return _summarise(platform, scenario, history, settle_steps, energy, hit_step,
                       n_tips=0 if spec is None else spec.n_segments,
-                      wheel_radius_m=wheel_radius_m,
+                      wheel_radius_m=wheel_radius_m, wheel_width_m=wheel_width_m,
                       multi_contact_fraction=multi_contact_steps / driving_steps,
                       peak_compression_m=peak_compression)
 
 
 def _summarise(platform, scenario, history, settle_steps, energy_j, hit_step, *,
-               n_tips: int = 0, wheel_radius_m: float = 0.0,
+               n_tips: int = 0, wheel_radius_m: float = 0.0, wheel_width_m: float = 0.0,
                multi_contact_fraction: float = 0.0,
                peak_compression_m: float = 0.0) -> RoverResult:
     """Turn the history into the handful of numbers worth quoting."""
@@ -827,7 +998,10 @@ def _summarise(platform, scenario, history, settle_steps, energy_j, hit_step, *,
     # Objective 5: worst-moment margin to static tip-over. Peak excursions are already
     # computed below; the margin is the same numbers against the platform's own critical
     # angles, so a taller CG or a narrower track shows up here without any code changing.
-    pitch_crit, roll_crit = platform.tipover_angles_rad()
+    # The wheel this run was fitted with sets the track (external mounting), so the roll
+    # yardstick moves with it — that is the support polygon actually under the robot.
+    pitch_crit, roll_crit = platform.tipover_angles_rad(
+        track_m=platform.track_for(wheel_width_m) if wheel_width_m > 0.0 else None)
     peak_pitch = float(np.max(np.abs(history[driving, 3])))
     peak_roll = float(np.max(np.abs(history[driving, 4])))
     stability = 1.0 - max(peak_pitch / pitch_crit, peak_roll / roll_crit)
@@ -864,6 +1038,8 @@ def run_rover(platform: PlatformSpec | None = None, scenario: RoverSpec | None =
               tangential_element: TangentialElement | None = None,
               visual_mesh: Path | str | None = None,
               visual_rgba: tuple[float, float, float, float] = CAD_OVERLAY_RGBA,
+              chassis_mesh: Path | str | None = None,
+              chassis_collision: str = "box",
               ) -> RoverResult:
     """Convenience entry point: load the platform, run one scenario, return the result."""
     return observe_rover(platform or load_platform(), scenario or RoverSpec(),
@@ -871,4 +1047,5 @@ def run_rover(platform: PlatformSpec | None = None, scenario: RoverSpec | None =
                          wheel_mass_kg=wheel_mass_kg, spec=spec, law=law,
                          tangential_law=tangential_law,
                          tangential_element=tangential_element,
-                         visual_mesh=visual_mesh, visual_rgba=visual_rgba)
+                         visual_mesh=visual_mesh, visual_rgba=visual_rgba,
+                         chassis_mesh=chassis_mesh, chassis_collision=chassis_collision)

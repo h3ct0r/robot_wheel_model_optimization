@@ -87,6 +87,20 @@ class TestMounts(unittest.TestCase):
         self.assertLess(mounts["fr"].y_m, 0.0)
         self.assertEqual(mounts["fl"].side, -mounts["fr"].side)
 
+    def test_a_wider_wheel_stands_further_out(self):
+        """External mounting (2026-08-11): the inner face seats against the side plate, so
+        the track is 2·(mount_face + width/2) and the wheel's own width widens the support
+        polygon. The no-width call is the ORIGINAL tucked-under wheels' reference track."""
+        narrow = wheel_mounts(PLATFORM, wheel_width_m=0.030)
+        wide = wheel_mounts(PLATFORM, wheel_width_m=0.060)
+        self.assertEqual({abs(m.y_m) for m in narrow},
+                         {PLATFORM.wheel_mount_face_m + 0.015})
+        self.assertEqual({abs(m.y_m) for m in wide},
+                         {PLATFORM.wheel_mount_face_m + 0.030})
+        # And the reference configuration is narrower than any external mount: the original
+        # wheels tuck under the shell, inboard of the plates.
+        self.assertLess(0.5 * PLATFORM.track_width_m, PLATFORM.wheel_mount_face_m)
+
 
 class TestMjcf(unittest.TestCase):
     def xml(self, scenario: RoverSpec | None = None, **kwargs) -> str:
@@ -430,6 +444,253 @@ class TestCadOverlay(unittest.TestCase):
                            visual_mesh=Path("does/not/exist.stl"), **self.SMALL)
         self.assertFalse(result.ok)
         self.assertTrue(result.message)
+
+
+class TestChassisMesh(unittest.TestCase):
+    """The robot's real shell drawn over the chassis box. Decoration, like the wheel overlay —
+    and the box must remain the contact geom, because MuJoCo would collide the shell by its
+    convex hull, replacing the measured flat belly the nose-in regime depends on with the
+    hull of a pipe."""
+
+    @property
+    def SMALL(self) -> dict:
+        return {"wheel_radius_m": 0.060, "wheel_width_m": 0.045, "wheel_mass_kg": 0.30}
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.stl = Path(self.tmp.name) / "shell.stl"
+        self.stl.write_bytes(_tetrahedron_stl())
+
+    def tearDown(self):
+        self.tmp.cleanup()
+
+    def xml(self, **kwargs) -> str:
+        return build_rover_mjcf(PLATFORM, RoverSpec(), **{**self.SMALL, **kwargs})
+
+    def test_it_is_absent_unless_asked_for(self):
+        text = self.xml()
+        self.assertNotIn("cadchassis", text)
+        self.assertIn('name="body" type="box"', text)
+        self.assertIn('material="bodymat"', text)
+
+    def test_the_box_stays_the_contact_geom_and_only_fades(self):
+        """The safety property. The shell is a picture; the box is the surface a belly strike
+        happens on, and it must keep colliding — faded, never removed."""
+        text = self.xml(chassis_mesh=self.stl)
+        box = next(x for x in text.splitlines() if 'name="body" type="box"' in x)
+        self.assertNotIn('contype="0"', box)          # still collides
+        self.assertIn('rgba=', box)                    # but only as a ghost
+        self.assertNotIn('material="bodymat"', box)
+
+    def test_the_shell_collides_with_nothing_and_weighs_nothing(self):
+        line = next(x for x in self.xml(chassis_mesh=self.stl).splitlines()
+                    if 'name="chassis_cad"' in x)
+        for attribute in ('contype="0"', 'conaffinity="0"', 'mass="0"', 'density="0"'):
+            self.assertIn(attribute, line)
+
+    def test_the_path_is_absolute_and_millimetres_convert_at_the_asset(self):
+        text = self.xml(chassis_mesh=Path("configs/x.stl"))
+        line = next(x for x in text.splitlines() if 'name="cadchassis"' in x)
+        self.assertTrue(Path(line.split('file="')[1].split('"')[0]).is_absolute())
+        self.assertIn('scale="0.001 0.001 0.001"', line)
+
+    def test_it_is_placed_by_the_axle_line_not_the_bounding_box(self):
+        """The formula, pinned: the mesh's measured axle-stub midpoint must land on the
+        body's axle line, which sits (axle_to_belly + half height) below the chassis centre
+        regardless of wheel radius. Placing by bounding box instead would centre the shell's
+        asymmetric overhang (~105 mm nose / ~71 mm tail) and put all four stubs off their
+        axles."""
+        from wheelopt.sim.rover import CHASSIS_MESH_AXLE_MM, CHASSIS_MESH_QUAT
+
+        line = next(x for x in self.xml(chassis_mesh=self.stl).splitlines()
+                    if 'name="chassis_cad"' in x)
+        pos = [float(v) for v in line.split('pos="')[1].split('"')[0].split()]
+        lat, tall, long_mid = CHASSIS_MESH_AXLE_MM
+        self.assertAlmostEqual(pos[0], long_mid * 1e-3, places=9)
+        # Negated: the +90 deg z rotation maps the mesh's lateral axis to +body_y, so a
+        # midline left of the mesh's own origin shifts the mesh right, not left.
+        self.assertAlmostEqual(pos[1], -lat * 1e-3, places=9)
+        dz = -(PLATFORM.axle_to_belly_m + 0.5 * PLATFORM.chassis_height_m)
+        self.assertAlmostEqual(pos[2], dz - tall * 1e-3, places=9)
+        self.assertIn(f'quat="{CHASSIS_MESH_QUAT[0]} {CHASSIS_MESH_QUAT[1]} '
+                      f'{CHASSIS_MESH_QUAT[2]} {CHASSIS_MESH_QUAT[3]}"', line)
+
+    @unittest.skipUnless(HAVE_MUJOCO, "MuJoCo not installed")
+    def test_the_shell_changes_no_number_at_all(self):
+        """The claim the default-on flag rests on, checked: same deterministic scenario with
+        and without the shell, every reported quantity identical."""
+        scenario = RoverSpec(step_height_m=0.04, duration_s=3.0)
+        plain = observe_rover(PLATFORM, scenario, **self.SMALL)
+        drawn = observe_rover(PLATFORM, scenario, chassis_mesh=self.stl, **self.SMALL)
+        self.assertTrue(plain.ok and drawn.ok, drawn.message)
+        self.assertEqual(plain.climbed, drawn.climbed)
+        for field_name in ("distance_m", "final_clearance_m", "peak_pitch_rad",
+                           "peak_roll_rad", "energy_j", "harshness_rms_m_s2"):
+            with self.subTest(field=field_name):
+                self.assertEqual(getattr(plain, field_name), getattr(drawn, field_name))
+
+    @unittest.skipUnless(HAVE_MUJOCO, "MuJoCo not installed")
+    def test_a_model_with_the_shell_compiles(self):
+        import mujoco
+
+        model = mujoco.MjModel.from_xml_string(self.xml(chassis_mesh=self.stl))
+        self.assertEqual(model.nmesh, 1)
+
+    @unittest.skipUnless(HAVE_MUJOCO, "MuJoCo not installed")
+    def test_the_real_shell_puts_its_axle_stubs_on_the_sims_axles(self):
+        """The transform checked against the artefact it was measured from, not against its
+        own constants: load the real simplified STL, map every vertex through the compiled
+        geom pose, and the four axle stubs (the r 7.5 cylinders the external wheels mount
+        on) must land on the sim's axle line — x at ±wheelbase/2, z at the axle depth, and
+        y starting at the wheel-mount face the platform states."""
+        import mujoco
+
+        real = Path(__file__).resolve().parents[1] / "configs" / "pipebot_simplified.stl"
+        if not real.is_file():
+            self.skipTest("configs/pipebot_simplified.stl not present")
+        model = mujoco.MjModel.from_xml_string(self.xml(chassis_mesh=real))
+        data = mujoco.MjData(model)
+        mujoco.mj_forward(model, data)
+        geom = mujoco.mj_name2id(model, mujoco.mjtObj.mjOBJ_GEOM, "chassis_cad")
+        chassis = mujoco.mj_name2id(model, mujoco.mjtObj.mjOBJ_BODY, "chassis")
+        mesh = model.geom_dataid[geom]
+        start = model.mesh_vertadr[mesh]
+        verts = model.mesh_vert[start:start + model.mesh_vertnum[mesh]]
+        world = verts @ data.geom_xmat[geom].reshape(3, 3).T + data.geom_xpos[geom]
+        local = (world - data.xpos[chassis]) @ data.xmat[chassis].reshape(3, 3)
+
+        # The stubs are the only structure outboard of the wheel-mount face.
+        dz_axle = -(PLATFORM.axle_to_belly_m + 0.5 * PLATFORM.chassis_height_m)
+        stubs = local[np.abs(local[:, 1]) > PLATFORM.wheel_mount_face_m - 5e-4]
+        self.assertGreater(len(stubs), 0)
+        for x_sign in (+1.0, -1.0):
+            for y_sign in (+1.0, -1.0):
+                stub = stubs[(np.sign(stubs[:, 0]) == x_sign)
+                             & (np.sign(stubs[:, 1]) == y_sign)]
+                self.assertGreater(len(stub), 0)
+                # Axis of the cylinder: mean over the surface points.
+                self.assertLess(
+                    abs(abs(stub[:, 0].mean()) - 0.5 * PLATFORM.wheelbase_m), 0.003)
+                self.assertLess(abs(stub[:, 2].mean() - dz_axle), 0.003)
+
+
+class TestChassisCollision(unittest.TestCase):
+    """`chassis_collision="primitives"`: the pipe, the dome nose and the bracket plates as
+    real contact geoms, against the calibrated box. A physics switch, not a rendering one —
+    each test here pins one half of that sentence."""
+
+    @property
+    def SMALL(self) -> dict:
+        return {"wheel_radius_m": 0.060, "wheel_width_m": 0.030, "wheel_mass_kg": 0.30}
+
+    def xml(self, **kwargs) -> str:
+        return build_rover_mjcf(PLATFORM, RoverSpec(), **{**self.SMALL, **kwargs})
+
+    def test_the_default_is_the_calibrated_box(self):
+        text = self.xml()
+        self.assertIn('name="body" type="box"', text)
+        self.assertNotIn("chassis_col_", text)
+
+    def test_primitives_replace_the_box_entirely(self):
+        """Both at once would collide the step against two overlapping chassis and count
+        every belly strike twice."""
+        text = self.xml(chassis_collision="primitives")
+        self.assertNotIn('name="body"', text)
+        from wheelopt.sim.rover import CHASSIS_PRIMITIVES_MM
+
+        for name, _, _, _ in CHASSIS_PRIMITIVES_MM:
+            line = next(x for x in text.splitlines() if f'name="chassis_col_{name}"' in x)
+            self.assertIn('mass="0" density="0"', line)     # inertia stays the platform's
+            self.assertNotIn('contype="0"', line)           # but they DO collide
+
+    def test_nonsense_mode_is_refused_by_name(self):
+        with self.assertRaises(ValueError):
+            self.xml(chassis_collision="hull")
+
+    def test_the_primitives_are_the_simplified_model_exactly(self):
+        """Coverage measured, not asserted from hope: every non-stub vertex of
+        `pipebot_simplified.stl` lies ON or INSIDE the primitive union (p100 = 0.00 mm when
+        this was pinned) — the simplified model was CAD-authored from these same shapes, so
+        the collision set is lossless, not an approximation. If the model is re-exported
+        with new geometry, this is the test that says the primitives no longer describe it."""
+        real = Path(__file__).resolve().parents[1] / "configs" / "pipebot_simplified.stl"
+        if not real.is_file():
+            self.skipTest("configs/pipebot_simplified.stl not present")
+        with open(real, "rb") as f:
+            f.seek(80)
+            (n,) = struct.unpack("<I", f.read(4))
+            raw = np.frombuffer(f.read(n * 50), dtype=np.uint8).reshape(n, 50)
+        v = raw[:, 12:48].copy().view("<f4").reshape(n, 3, 3).astype(np.float64)
+        pts = v.reshape(-1, 3)
+        pts = pts[np.abs(pts[:, 0]) <= 98.2]        # the stubs live inside the wheels
+        from wheelopt.sim.rover import CHASSIS_PRIMITIVES_MM
+
+        dists = np.full(len(pts), np.inf)
+        for _, kind, centre, size in CHASSIS_PRIMITIVES_MM:
+            c = np.asarray(centre)
+            if kind == "cylinder":
+                radius, half = size
+                dr = np.maximum(np.hypot(pts[:, 0] - c[0], pts[:, 2] - c[2]) - radius, 0.0)
+                dy = np.maximum(np.abs(pts[:, 1] - c[1]) - half, 0.0)
+                d = np.hypot(dr, dy)
+            elif kind == "sphere":
+                d = np.maximum(np.linalg.norm(pts - c, axis=1) - size[0], 0.0)
+            else:
+                excess = np.maximum(np.abs(pts - c) - np.asarray(size), 0.0)
+                d = np.linalg.norm(excess, axis=1)
+            dists = np.minimum(dists, d)
+        self.assertLess(float(dists.max()), 0.5, "a mesh vertex escaped the primitives")
+
+    @unittest.skipUnless(HAVE_MUJOCO, "MuJoCo not installed")
+    def test_the_primitive_belly_hangs_below_the_box_belly(self):
+        """The number that makes this a physics change: the bracket plates' bottoms sit
+        23 mm BELOW the axle line, where the box belly sits 7.5 mm ABOVE it — 30.5 mm of
+        clearance the box claims and the model denies."""
+        import mujoco
+
+        model = mujoco.MjModel.from_xml_string(self.xml(chassis_collision="primitives"))
+        data = mujoco.MjData(model)
+        mujoco.mj_forward(model, data)
+        chassis = mujoco.mj_name2id(model, mujoco.mjtObj.mjOBJ_BODY, "chassis")
+        lows = []
+        for g in range(model.ngeom):
+            name = mujoco.mj_id2name(model, mujoco.mjtObj.mjOBJ_GEOM, g)
+            if name and name.startswith("chassis_col_") and model.geom_type[g] == 6:  # box
+                lows.append(float(data.geom_xpos[g, 2] - model.geom_size[g, 2]))
+        # In the chassis frame, so the start-height whisker cancels: the plates reach
+        # (axle depth + 23 mm) below the centre, against the box belly's half-height.
+        low = min(lows) - float(data.xpos[chassis, 2])
+        dz_axle = -(PLATFORM.axle_to_belly_m + 0.5 * PLATFORM.chassis_height_m)
+        self.assertAlmostEqual(low, dz_axle - 0.023, places=6)
+        box_belly = -0.5 * PLATFORM.chassis_height_m
+        self.assertAlmostEqual(box_belly - low, 0.0305, places=6)
+
+    @unittest.skipUnless(HAVE_MUJOCO, "MuJoCo not installed")
+    def test_an_untouched_chassis_changes_nothing(self):
+        """On flat ground the chassis never contacts anything, so the two collision models
+        must produce identical numbers — the difference between them is entirely in what
+        happens when chassis meets terrain, never in free dynamics."""
+        scenario = RoverSpec(step_height_m=0.0, duration_s=2.0)
+        box = observe_rover(PLATFORM, scenario, **self.SMALL)
+        prim = observe_rover(PLATFORM, scenario, chassis_collision="primitives",
+                             **self.SMALL)
+        self.assertTrue(box.ok and prim.ok, prim.message)
+        for field_name in ("distance_m", "peak_pitch_rad", "energy_j",
+                           "harshness_rms_m_s2", "mean_speed_m_s"):
+            with self.subTest(field=field_name):
+                self.assertEqual(getattr(box, field_name), getattr(prim, field_name))
+
+    @unittest.skipUnless(HAVE_MUJOCO, "MuJoCo not installed")
+    def test_the_dome_meets_a_tall_step_and_the_strike_is_detected(self):
+        """At a 100 mm step on R 60 wheels the dome's leading surface protrudes past the
+        wheels (226 mm from the chassis centre at riser-top height against the wheel's
+        185), so the nose strikes the riser — and `chassis_hit_step` must see it now that
+        there is no geom called "body" to watch."""
+        result = run_rover(PLATFORM, RoverSpec(step_height_m=0.100, duration_s=4.0),
+                           chassis_collision="primitives", **self.SMALL)
+        self.assertTrue(result.ok, result.message)
+        self.assertTrue(result.chassis_hit_step)
+        self.assertFalse(result.climbed)
 
 
 class TestDrive(unittest.TestCase):

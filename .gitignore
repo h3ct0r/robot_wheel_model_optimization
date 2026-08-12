@@ -12,6 +12,12 @@ data/figures/
 *.duckdb
 *.parquet
 
+# FreeCAD working files — the source of truth for the robot model lives in the user's
+# CAD; the repo carries only the exported STL/STEP below. The .FCStd is 63 MB.
+configs/freecad/
+*.FCStd
+*.FCBak
+
 # Generated geometry and simulation assets
 *.stl
 *.step
@@ -55,3 +61,10 @@ multirun/
 .idea/
 data/explore/
 data/explore_*/
+
+# NOT generated: the measured robot's exported model files. The sim draws the simplified
+# shell by default, the platform numbers were mined from the detailed one, and three tests
+# validate against them (they skip, silently, when these are missing -- which is the trap).
+!configs/pipebot_detailed.stl
+!configs/pipebot_simplified.stl
+!configs/pipebot_simplified.step

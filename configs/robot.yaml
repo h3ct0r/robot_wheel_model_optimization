@@ -21,7 +21,7 @@
 # no longer also a contradiction. Wiring the loader is what first-week step 1 really is.
 
 meta:
-  name: rover-400x300               # 400 x 300 x 200 mm four-wheel skid-steer research rover
+  name: piperobot-426x231           # the measured pipe robot (configs/pipebot_detailed.stl)
   frozen: false                     # pipeline should refuse to run a campaign while false
   frozen_date: null
   provenance: >
@@ -32,7 +32,7 @@ meta:
     estimates, not measurements.
 
 # =========================================================================================
-# MEASURED FROM THE 3D MODEL, 2026-08-11 (configs/robot_piperobot.stl, units mm, 156k tris;
+# MEASURED FROM THE 3D MODEL, 2026-08-11 (configs/pipebot_detailed.stl, units mm, 156k tris;
 # the model's own mid-body clearance of 34 mm cross-checks the hand-measured 3 cm):
 #   overall               426 x 231 x 187 mm  (length x width x height, wheels included)
 #   wheelbase             250 mm     (stated value below: 260 -- close, PENDING adoption)
@@ -81,10 +81,16 @@ drivetrain:
                                     #   which is the scenario this project exists to study.
   wheelbase: 0.250                  # m. MEASURED off the STL: contact patches at z=104.5
                                     #   and z=354.9 on both sides
-  track_width: 0.157                # m. MEASURED off the STL: wheel mid-planes at x=36.9
-                                    #   and x=194.2 -- the wheels tuck UNDER the shell, not
-                                    #   outboard of it, and the narrow track makes ROLL the
-                                    #   tight stability axis (the old 0.35 was fiction)
+  track_width: 0.157                # m. MEASURED off the detailed STL: the ORIGINAL r 22.5
+                                    #   wheels' mid-planes, tucked UNDER the shell. A
+                                    #   reference value -- candidate wheels (R 40-90) cannot
+                                    #   tuck under and mount EXTERNALLY; their track derives
+                                    #   from wheel_mount_face below (PlatformSpec.track_for)
+  wheel_mount_face: 0.0975          # m. Centreline to the side-plate face an external
+                                    #   wheel's inner side seats against. MEASURED off
+                                    #   pipebot_simplified.stl 2026-08-11: axle stubs (r 7.5,
+                                    #   z 24.5) emerge at x=+97/-98 about midline -0.5 --
+                                    #   +/-97.5 exactly. Track = 0.195 + wheel width
 
 motor:
   # MEASURED HARDWARE 2026-08-11: four ROBOTIS Dynamixel MX-64AT at 12 V. Datasheet values

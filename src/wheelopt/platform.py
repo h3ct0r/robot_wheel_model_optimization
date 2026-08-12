@@ -130,7 +130,15 @@ class PlatformSpec:
     #: --- drivetrain -------------------------------------------------------------------
     configuration: str
     n_driven_wheels: int
+    #: Track measured at the ORIGINAL r 22.5 mm wheels, which tuck under the shell, metres.
+    #: A reference measurement, not the operating value: candidate wheels (R 40–90) cannot
+    #: tuck under and mount EXTERNALLY on the axle stubs, so use :meth:`track_for` — track is
+    #: wheel-dependent on this robot, exactly as clearance is.
     track_width_m: float
+    #: Lateral distance from the chassis centreline to the plate face an external wheel's
+    #: inner side seats against, metres. Measured off `configs/pipebot_simplified.stl`
+    #: (2026-08-11): axle stubs emerge at x = +97/−98 about a midline of −0.5 — ±97.5 exactly.
+    wheel_mount_face_m: float
     #: Front axle to rear axle, metres. Needed to place wheels; unused by screening.
     wheelbase_m: float
 
@@ -268,7 +276,21 @@ class PlatformSpec:
             raise PlatformSpecError("wheel_radius_m must be positive")
         return wheel_radius_m + self.axle_to_belly_m
 
-    def tipover_angles_rad(self) -> tuple[float, float]:
+    def track_for(self, wheel_width_m: float) -> float:
+        """Track with a given external wheel fitted, metres: ``2·(mount_face + width/2)``.
+
+        Candidate wheels mount **externally** — inner face against the side plate at
+        ``wheel_mount_face_m``, hub on the axle stub — so a wider wheel stands further out
+        and widens its own support polygon. That is physics, not flattery: unlike the
+        radius yardstick in :meth:`tipover_angles_rad`, width genuinely moves the wheel
+        contact line. The stated ``track_width_m`` is the ORIGINAL r 22.5 wheels' track
+        (they tuck under the shell, a mounting no candidate wheel can reach).
+        """
+        if wheel_width_m <= 0.0:
+            raise PlatformSpecError("wheel_width_m must be positive")
+        return 2.0 * (self.wheel_mount_face_m + 0.5 * wheel_width_m)
+
+    def tipover_angles_rad(self, track_m: float | None = None) -> tuple[float, float]:
         """Static tip-over angles ``(pitch_crit, roll_crit)``, radians.
 
         The angle at which the chassis CG passes vertically over the wheel contact line:
@@ -290,14 +312,18 @@ class PlatformSpec:
         # At the reference wheels; the margin is a comparative score, and quoting it against
         # one fixed yardstick keeps designs comparable (a per-wheel yardstick would let a
         # taller wheel flatter its own margin by raising the angles it is scored against).
+        # The TRACK may be overridden, and that is not the same concession: an external
+        # wheel's width genuinely moves the contact line outward (`track_for`), where a
+        # wheel's radius merely raises the CG it is scored under.
         z_cg = self.ground_clearance_m + 0.5 * self.chassis_height_m + self.com_offset_m[2]
         if z_cg <= 0.0:
             raise PlatformSpecError(
                 f"CG height {z_cg:.4f} m is not above the ground; tip-over angles are "
                 "undefined. Check chassis.com_offset against the ride height."
             )
+        track = self.track_width_m if track_m is None else track_m
         return (math.atan2(0.5 * self.wheelbase_m, z_cg),
-                math.atan2(0.5 * self.track_width_m, z_cg))
+                math.atan2(0.5 * track, z_cg))
 
     def consistency_warnings(self) -> list[str]:
         """Soft cross-checks between values that are stated independently.
@@ -465,6 +491,7 @@ def load_platform(path: str | Path | None = None) -> PlatformSpec:
         configuration=str(_require(raw, "drivetrain.configuration")),
         n_driven_wheels=n_driven,
         track_width_m=_number(raw, "drivetrain.track_width"),
+        wheel_mount_face_m=_number(raw, "drivetrain.wheel_mount_face"),
         wheelbase_m=_number(raw, "drivetrain.wheelbase"),
         chassis_inertia_kg_m2=_triple(raw, "chassis.inertia"),
         com_offset_m=_triple(raw, "chassis.com_offset"),

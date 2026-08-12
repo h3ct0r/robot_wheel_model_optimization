@@ -9,7 +9,7 @@ caveat until (A) is done, and the ROM's multi-claw regime has no calibration pat
 
 **Status 2026-08-11: the measurements arrived, and they changed the robot.** Received: the
 motor (4x Dynamixel MX-64AT at 12 V — 6.0 N·m stall, 63 rpm no-load, at the output), 8.5 kg
-all-up, 3 cm clearance, and the 3D model (`configs/robot_piperobot.stl`). Mining the STL:
+all-up, 3 cm clearance, and the 3D model (`configs/pipebot_detailed.stl`, at the time named `robot_piperobot.stl`). Mining the STL:
 **wheelbase 250 mm, track 157 mm (not the assumed 350), overall 426 x 231 x 187, existing
 wheels r ~22.5 mm** — a pipe robot with a circular ~187 mm shell, not the assumed
 400x300x200 box. The model's own clearance (34 mm) cross-checks the hand measurement. The

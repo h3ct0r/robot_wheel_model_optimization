@@ -417,7 +417,7 @@ def _taper_compliance_factor(r: float) -> float:
 #: 0.3 mm rims in between, which no nozzle can print.
 PARAM_BOUNDS: dict[str, tuple[float, float]] = {
     # RE-DERIVED 2026-08-11 from the measured robot (the pipe robot in
-    # configs/robot_piperobot.stl, whose original wheels are r 22.5 mm). The floor is the
+    # configs/pipebot_detailed.stl, whose original wheels are r 22.5 mm). The floor is the
     # MX-64 horn: the hub must seat a D53 rotating disc (hub >= ~28 mm), and a bandless claw
     # off a 28 mm hub needs R >= ~40 to be a claw rather than a nub. The ceiling is
     # judgement, not a wall — no pipe-fit constraint (user decision 2026-08-11), the horn

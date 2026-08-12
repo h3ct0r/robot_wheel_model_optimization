@@ -193,7 +193,9 @@ def main(argv: list[str] | None = None) -> int:
     # is honestly unusable — 3 rungs cannot locate P=0.9 — and failing the job for that would
     # make the determinism gate unrunnable at exactly the size a CI budget allows. Reaching
     # this line means every requested gate passed; a plain run keeps the fit as its verdict.
-    if args.gate or args.manifest is not None:
+    # `--manifest-out` counts as a gate run too: writing the reference is the other half of
+    # the same instrument, and exit 1 there broke `write && verify` chains on the CI ladder.
+    if args.gate or args.manifest is not None or args.manifest_out is not None:
         if not outcome.ok:
             print(f"  (fit not usable on this ladder — {outcome.fit.reason or 'small ladder'}"
                   " — which is not what a gate run is judged by)")

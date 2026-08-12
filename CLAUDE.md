@@ -6,12 +6,16 @@ Detail lives in `docs/`. This file points; it does not duplicate.
 ## What this project is
 
 Automatic optimisation of the 3D wheel layout for a **real, measured** four-wheel
-skid-steer robot (`configs/robot_piperobot.stl`): a pipe-robot chassis 426 × 231 × 187 mm,
-8.5 kg, wheelbase 250 / track 157 mm, four Dynamixel MX-64AT (6.0 N·m, 6.6 rad/s at the
-output), 20.6 N per wheel, wheels R 40–90 mm bolting to the D53 servo horn. The belly rides
-7.5 mm above the axle line, so **clearance = wheel radius + 7.5 mm** and the chassis nose
-overhangs the front axle by 88 mm — obstacle capability is wheel-limited below `R + 7.5`
-and nose-limited above it. Roll is the tight stability axis (35.9° vs 49.0°), not pitch. A parametric CAD model generates candidate wheels; each is evaluated in
+skid-steer robot (`configs/pipebot_detailed.stl`; `pipebot_simplified.stl` is the sim's
+visual shell): a pipe-robot chassis 426 × 231 × 187 mm, 8.5 kg, wheelbase 250, four
+Dynamixel MX-64AT (6.0 N·m, 6.6 rad/s at the output), 20.6 N per wheel, wheels R 40–90 mm
+bolting to the D53 servo horn. Candidate wheels mount **externally** on axle stubs at the
+side plates (±97.5 mm), so **track = 195 mm + wheel width** (`track_for`; the stored 157 is
+the original tucked-under wheels). The belly rides 7.5 mm above the axle line, so
+**clearance = wheel radius + 7.5 mm** and the chassis nose overhangs the front axle by
+88 mm — obstacle capability is wheel-limited below `R + 7.5` and nose-limited above it.
+Roll is still the tight stability axis, but barely and width-dependent (46.1° at a 30 mm
+wheel vs 49.0° pitch; it was 35.9° at the original track). A parametric CAD model generates candidate wheels; each is evaluated in
 closed-loop dynamic simulation over an obstacle-traversal scenario suite; a multi-objective
 optimiser proposes the next candidates. **Both hard (PLA/PETG) and compliant (TPU) wheels are
 candidates the optimiser may pick** (re-framed 2026-08-11 — previously "compliance is the
@@ -38,7 +42,8 @@ Full statement and sub-questions: `docs/plan/02-research-questions.md`
   at the output — half the speed, 1.5x the torque of the estimate), 8.5 kg, and **30 mm of
   clearance, not 70** — at an 80 mm step the measured robot parks its belly at 7° instead of
   rearing to 90°, and the belly now protects the wheels. Mining the STL
-  (`configs/robot_piperobot.stl`): a **pipe robot**, 426x231x187, wheelbase 250, **track 157
+  (`configs/pipebot_detailed.stl`, renamed from `robot_piperobot.stl` 2026-08-11): a **pipe
+  robot**, 426x231x187, wheelbase 250, **track 157
   (not 350)**, existing wheels **r ~22.5 mm** against a searched range of R 60-100 — the
   design space is 3-4x oversized for the real machine. Adoption of the measured geometry is
   ONE deliberate commit pending the pipe-bore/bracket questions in `17-hardware-baseline.md`
@@ -520,7 +525,7 @@ python scripts/run_rover.py --obstacle-height 0 --compliant --radius 60 --rim-th
 # smaller and full-colour, so --no-gif is usually what you want.
 python scripts/run_rover.py --compliant --stl --radius 60 --rim-thickness 0 --spokes 12 \
     --thickness 6 --claw-taper 0.6 --spoke-phase -90 --plane-strain --law claw \
-    --tangential hinge --obstacle-height 50 --render
+    --tangential hinge --obstacle-height 40 --render
 
 # Scenario S1: the step ladder across terrain seeds, the P=0.9 height, and every run stored.
 # ~25 s for 80 runs. --repeat 2 --gate is the Phase 0 determinism gate.

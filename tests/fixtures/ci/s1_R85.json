@@ -1,122 +1,122 @@
 {
  "rows": {
-  "5b55176d4538bf40": {
+  "02354dc1836a7b26": {
    "metrics": {
     "climbed": 1.0,
-    "distance_m": 2.444732898480791,
-    "energy_j": 15.760230959136148,
-    "final_clearance_m": 0.17099991393723943,
-    "stability_margin": 0.8122594257562032
+    "distance_m": 2.2080503066002586,
+    "energy_j": 21.05101021409418,
+    "final_clearance_m": 0.17099941407362404,
+    "stability_margin": 0.8122560170754691
    },
    "status": "ok"
   },
-  "9348c3494f9cd5bd": {
+  "1bf6ac6b3c925b25": {
    "metrics": {
     "climbed": 0.0,
-    "distance_m": 0.5870173065139965,
-    "energy_j": 61.115846671712305,
-    "final_clearance_m": 0.05102183201690355,
-    "stability_margin": 0.9963867316185021
+    "distance_m": 0.5870154523373441,
+    "energy_j": 61.30818494333513,
+    "final_clearance_m": 0.05105750273522669,
+    "stability_margin": 0.9954599016862575
    },
    "status": "ok"
   },
-  "986e434454890180": {
-   "metrics": {
-    "climbed": 0.0,
-    "distance_m": 0.5901652069403349,
-    "energy_j": 56.4931499998299,
-    "final_clearance_m": 0.09106712405821514,
-    "stability_margin": 0.9822414231524843
-   },
-   "status": "ok"
-  },
-  "abdd68c8e8699a44": {
-   "metrics": {
-    "climbed": 0.0,
-    "distance_m": 0.5901730147902873,
-    "energy_j": 67.42210769380324,
-    "final_clearance_m": 0.09104608885364458,
-    "stability_margin": 0.9846921309651185
-   },
-   "status": "ok"
-  },
-  "ae22ea729465160d": {
-   "metrics": {
-    "climbed": 0.0,
-    "distance_m": 0.5870142264883107,
-    "energy_j": 83.84665505129946,
-    "final_clearance_m": 0.051018784611478685,
-    "stability_margin": 0.9927756836470696
-   },
-   "status": "ok"
-  },
-  "b4e36c5d9af877c5": {
-   "metrics": {
-    "climbed": 0.0,
-    "distance_m": 0.6032775518087363,
-    "energy_j": 47.70636771157043,
-    "final_clearance_m": 0.13104750513789276,
-    "stability_margin": 0.9243422419284668
-   },
-   "status": "ok"
-  },
-  "e31dad5dbff4baa6": {
-   "metrics": {
-    "climbed": 0.0,
-    "distance_m": 0.5870159861206888,
-    "energy_j": 81.30638962815459,
-    "final_clearance_m": 0.05101330342154817,
-    "stability_margin": 0.9955299432557717
-   },
-   "status": "ok"
-  },
-  "e5ca7692d5e58dc3": {
-   "metrics": {
-    "climbed": 0.0,
-    "distance_m": 0.5870190827363588,
-    "energy_j": 50.53323279301904,
-    "final_clearance_m": 0.05103782065745999,
-    "stability_margin": 0.9952882088234193
-   },
-   "status": "ok"
-  },
-  "ea10194e1a1fec3d": {
-   "metrics": {
-    "climbed": 0.0,
-    "distance_m": 0.852238836051835,
-    "energy_j": 53.48254226673001,
-    "final_clearance_m": 0.14994295445172867,
-    "stability_margin": 0.8080499244249133
-   },
-   "status": "ok"
-  },
-  "ecdccde8dba41db9": {
+  "2115a01bc3e51ce5": {
    "metrics": {
     "climbed": 1.0,
-    "distance_m": 2.6284521249259813,
-    "energy_j": 12.114802580417766,
-    "final_clearance_m": 0.1709993937593974,
-    "stability_margin": 0.8120762959365277
+    "distance_m": 2.6429678904778964,
+    "energy_j": 11.959447495776063,
+    "final_clearance_m": 0.17100035052487547,
+    "stability_margin": 0.8042998918062705
    },
    "status": "ok"
   },
-  "ee6b0742d6e30e90": {
+  "48d8455858200525": {
    "metrics": {
     "climbed": 0.0,
-    "distance_m": 0.8115002529132052,
-    "energy_j": 59.42394513426502,
-    "final_clearance_m": 0.1264926594559191,
-    "stability_margin": 0.5995345559296588
+    "distance_m": 0.5901645334250198,
+    "energy_j": 68.5039060548927,
+    "final_clearance_m": 0.09111950513048543,
+    "stability_margin": 0.9859156012590757
    },
    "status": "ok"
   },
-  "f28214ab0eafe0f3": {
+  "50bf41e09a6945bd": {
    "metrics": {
     "climbed": 0.0,
-    "distance_m": 0.5901657107718318,
-    "energy_j": 49.89211074068354,
-    "final_clearance_m": 0.09110276108622649,
-    "stability_margin": 0.9817964199824428
+    "distance_m": 0.8129466118284943,
+    "energy_j": 60.533256338495285,
+    "final_clearance_m": 0.12653114737726956,
+    "stability_margin": 0.5987898901357647
+   },
+   "status": "ok"
+  },
+  "57893cc392e8e942": {
+   "metrics": {
+    "climbed": 0.0,
+    "distance_m": 0.5870160788118383,
+    "energy_j": 86.0523451167302,
+    "final_clearance_m": 0.05102001005763529,
+    "stability_margin": 0.9949617964401466
+   },
+   "status": "ok"
+  },
+  "647d00615cf5595d": {
+   "metrics": {
+    "climbed": 0.0,
+    "distance_m": 0.6034712170613007,
+    "energy_j": 48.75921155635617,
+    "final_clearance_m": 0.13143697381560487,
+    "stability_margin": 0.9676953958086535
+   },
+   "status": "ok"
+  },
+  "69fa5e722ff6f42f": {
+   "metrics": {
+    "climbed": 1.0,
+    "distance_m": 2.4776235724870412,
+    "energy_j": 15.514676060763723,
+    "final_clearance_m": 0.17099961693413354,
+    "stability_margin": 0.8122509031601425
+   },
+   "status": "ok"
+  },
+  "88aaac5ed1f6bca7": {
+   "metrics": {
+    "climbed": 0.0,
+    "distance_m": 0.5901693876258983,
+    "energy_j": 58.58311561626394,
+    "final_clearance_m": 0.09110291105745726,
+    "stability_margin": 0.9833747880496032
+   },
+   "status": "ok"
+  },
+  "a1c93c872050ec38": {
+   "metrics": {
+    "climbed": 0.0,
+    "distance_m": 0.5901594896151785,
+    "energy_j": 51.842633260834894,
+    "final_clearance_m": 0.09110462329871839,
+    "stability_margin": 0.9873222702353318
+   },
+   "status": "ok"
+  },
+  "c4aece7639b32a2c": {
+   "metrics": {
+    "climbed": 0.0,
+    "distance_m": 0.5870194147572092,
+    "energy_j": 51.03134848220915,
+    "final_clearance_m": 0.051026740985782165,
+    "stability_margin": 0.9953732028054058
+   },
+   "status": "ok"
+  },
+  "f53cfa66800fe757": {
+   "metrics": {
+    "climbed": 0.0,
+    "distance_m": 0.5870122968757423,
+    "energy_j": 76.32013615711041,
+    "final_clearance_m": 0.05101154960434581,
+    "stability_margin": 0.9956204294396314
    },
    "status": "ok"
   }
@@ -125,7 +125,7 @@
  "versions": {
   "cad": "cad-0.1.0",
   "fea": "fea-0.1.0",
-  "platform": "f7df95bd5e23",
+  "platform": "7752e72ba438",
   "rom": "rom-0.7.0",
   "store": "store-0.1.0"
  }

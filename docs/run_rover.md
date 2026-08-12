@@ -29,15 +29,15 @@ Side view, to scale in spirit. Everything dimensional is read from
       ·····> drive direction                        │  upper ground (top of step)
                                                     │
      ┌───────────────────────┐                      │      ↑
-     │       chassis         │ 200 mm high          │  --obstacle-height
-     │   8.8 kg + 4x wheels  │                      │      ↓
+     │       chassis         │ 157 mm high          │  --obstacle-height
+     │   8.0 kg + 4x wheels  │                      │      ↓
      └───┬───────────────┬───┘                      │
-     70 mm ground clearance                         │
+     R + 7.5 mm ground clearance                    │
         ( )             ( )   R = --radius     ┌────┴──────────────────────────────
   ══════════════════════════════════════════════════════════════════════════
    floor (plane, friction = --friction)        ^
                                                x = 0.80 m, the step face
-     |<-- 260 mm -->|                          (fixed; the robot starts at x = 0)
+     |<-- 250 mm -->|                          (fixed; the robot starts at x = 0)
        --wheelbase, from robot.yaml
 ```
 
@@ -47,9 +47,21 @@ Two things about that box are deliberate and occasionally surprising:
   `--duration × no-load speed × --radius`, so the robot cannot climb it, cross it and drive
   off the far end — which used to end with a final frame at exactly the ride height, reading
   as "never climbed" when the truth was the opposite.
-- **The chassis is a collision geom, not a decoration.** With 70 mm of ground clearance, a
-  taller step gets bellied out on, and `chassis_hit_step` reports it. Watching that happen is
-  most of why this model exists.
+- **The chassis is a collision geom, not a decoration.** The belly rides a fixed 7.5 mm
+  above the axle line, so clearance is `R + 7.5 mm`; a step taller than that gets bellied
+  out on, and `chassis_hit_step` reports it. Watching that happen is most of why this model
+  exists.
+- **What you see standing on the wheels is the robot's real shell**
+  (`configs/pipebot_simplified.stl`), drawn over the box by default and placed by its
+  **axle stubs** — the r 7.5 mm cylinders the external wheels mount on. The box fades to a
+  ghost but **stays the contact geom**: MuJoCo would collide a mesh by its convex hull,
+  replacing the measured flat belly the nose-in regime depends on with the hull of a pipe.
+  `--no-chassis-stl` brings the plain box back; either way, every number is identical
+  (`tests/test_rover.py::TestChassisMesh`).
+- **The wheels mount externally, and the track follows the wheel** (2026-08-11): the inner
+  face seats against the side plates at ±97.5 mm, so track = `195 mm + width` —
+  `PlatformSpec.track_for` — and a wider wheel widens its own support polygon. The 157 mm
+  in `robot.yaml` is the original r 22.5 wheels' tucked-under track, kept as reference.
 
 Plan view, with `--approach` doing the one thing it does:
 
@@ -59,8 +71,9 @@ Plan view, with `--approach` doing the one thing it does:
    │  ▲      │    │                    ╲   ▲    ╲  │
    │  │ x    │    │                     ╲  │     ╲ │
    └─────────┘    │                      └ ─ ─ ─ ─┘│
-   |<- 350 mm ->|                                   ^ still normal to world x
-    --track                          the heading is yawed; the face is not
+   |<- 225 mm ->|                                   ^ still normal to world x
+    track = 195 + wheel width        the heading is yawed; the face is not
+    (225 at the default 30 mm)
 ```
 
 `--approach` rotates the *robot's heading*. It does not steer — four non-steered wheels
@@ -96,6 +109,9 @@ the geometry group is **silently unused** in the default mode.
                          (byte-identical numbers)                 inside a grey
                                                                   CAD shell
 ```
+
+The chassis shell is independent of both flags — it is on by default in every row and
+governed only by `--chassis-stl` / `--no-chassis-stl`.
 
 The overlay is enforced decoration, not a promise: the mesh geom carries
 `contype=0 conaffinity=0 mass=0 density=0`, so it collides with nothing and weighs nothing,
@@ -306,13 +322,26 @@ problem; it is the missing flank contact, filed as TODO #31.
 |---|---|---|
 | `--stl` | off | Draw the real CAD geometry over each wheel, translucent grey. Needs build123d; the STL is cached under `data/wheels` by design hash. |
 | `--mesh-alpha` | `0.40` | 0 invisible, 1 solid. |
+| `--chassis-stl` | `configs/pipebot_simplified.stl` | The robot's shell, drawn over the chassis box and placed by its **axle stubs** (r 7.5 cylinders in the model, stations 103.5/353.5 mm — wheelbase 250.03 against the platform's 250, the cross-check). The box stays the contact geom, faded to a ghost. A missing file downgrades to the box with a note. |
+| `--chassis-collision` | `box` | **A physics switch, not a rendering one.** `box` is the calibrated flat-bellied box. `primitives` collides the shapes read off the simplified model instead — the r 72.5 pipe, the r 55 dome nose, and the bracket plates whose points reach **23 mm below the axle line** (the box belly sits 7.5 mm above it: 30.5 mm apart). Lossless: every non-stub mesh vertex lies on or inside the primitive union, pinned by test. Measured on the R 85 ladder: 60/80 mm byte-identical (the chassis never touches), 100 mm a different failure — the box hard-stops at 0.9° pitch where the dome rides the edge to 24.6°. Neither belly is confirmed on hardware; do not mix the two in one comparison. |
+| `--no-chassis-stl` | off | The plain chassis box, as before. |
 
 The colours are load-bearing, not decorative:
 
 ```
    amber capsules  ← the physics. The ring's segments; what the numbers describe.
    grey shell 40%  ← decoration. The shape the physics stands for.
+   white shell     ← the robot's real body. Also decoration; the ghost box under
+                     it is what actually collides, belly strikes included.
 ```
+
+Two honesty notes on the shell. Its **axle stubs** run from the side plates into the
+simulated wheels' hubs — that is where the external wheels actually mount, and the stub
+axes are what the mesh is registered by. And the shell's overhang is **asymmetric** —
+~105 mm at the nose against ~71 mm at the tail, where the contact box models a centred
+88/88 — so on a nose-in run the shell visibly leads the box. The box is the physics; the
+mismatch is the measured gap between the platform model and the machine, drawn rather than
+hidden.
 
 Amber was chosen to read against the grey floor, the brown step and the translucent shell.
 Before that, `ring_bodies` emitted no `rgba` at all, so the capsules took MuJoCo's built-in
@@ -335,20 +364,21 @@ the one carrying the result.
 ## Reading the result
 
 ```
-robot: rover-400x300, 8.8 kg chassis + 4 x 300 g wheels, 400x300x200 mm
-       wheelbase 260 mm, track 350 mm, R 85 mm, ride 170 mm
-drive: 4.0 N·m stall x4 at 1.00 throttle, 14.0 rad/s free (1.19 m/s)
+robot: piperobot-426x231, 8.0 kg chassis + 4 x 300 g wheels, 426x231x157 mm
+       wheelbase 250 mm, track 157 mm, R 85 mm, ride 171 mm
+drive: 6.0 N·m stall x4 at 1.00 throttle, 6.6 rad/s free (0.56 m/s)
        NOTE meta.frozen is false — these are estimates, not a measured robot
 -> simulating 6.0 s at a 60 mm obstacle
    0.6s  (climbed)
 
 obstacle 60 mm (0.71 R)
   climbed            True
-  travelled          5432 mm
-  final clearance    170.0 mm (standing is 170 mm)
-  peak pitch / roll  14.2° / 0.22°
+  travelled          2565 mm
+  final clearance    171.0 mm (standing is 171 mm)
+  peak pitch / roll  13.9° / 0.33°
+  stability margin   +0.72 (1 = level; 0 = CG over the wheel line; crit 49°/36° pitch/roll)
   chassis hit step   False
-  axle work          31.5 J
+  axle work          16.6 J
 ```
 
 That `meta.frozen is false` line is not noise. The chassis envelope is a requirement, but its
@@ -523,7 +553,7 @@ python scripts/run_rover.py --radius 85 --sweep
 # over them, filmed. Needs CalculiX for the ring and build123d for the overlay.
 python scripts/run_rover.py --compliant --stl --radius 60 --rim-thickness 0 --spokes 12 \
     --thickness 6 --claw-taper 0.6 --spoke-phase -90 --plane-strain \
-    --law claw --tangential hinge --obstacle-height 50 --render --no-gif
+    --law claw --tangential hinge --obstacle-height 40 --render --no-gif
 ```
 
 ```bash

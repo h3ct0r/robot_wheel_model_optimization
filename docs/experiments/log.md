@@ -3816,3 +3816,165 @@ made the old ones read as a different experiment, which is what they now are). U
 noted as held back per the user (#39 stays open, unscheduled).
 
 **Gates.** Suite 828 green after the re-pins, ruff at the standing 71.
+
+---
+
+## 2026-08-11 — The rover wears its own shell, and the shell disagrees with the box by 17 mm
+
+`run_rover.py` now draws `configs/robot_piperobot.stl` over the chassis by default
+(`--no-chassis-stl` for the plain box). Same contract as the wheel overlay, enforced by the
+same class of test: zero mass, zero collision, every reported number byte-identical with and
+without it (`tests/test_rover.py::TestChassisMesh`). **The box remains the contact geom**,
+faded to a ghost rather than removed, for two reasons that are physics rather than taste: the
+STL contains the robot's original r 22.5 mm wheels, which must never touch the ground; and
+MuJoCo collides a mesh by its convex hull, which would replace the measured flat belly — the
+surface the nose-in regime lives on — with the hull of a pipe.
+
+### Placing it: by the axle line, measured twice
+
+The STL's frame is (lateral, vertical, longitudinal) spanning 231 × 187 × 426 mm. Bottom-
+touch-constrained arc fits on the four wheels put the axle stations at **110.7 / 360.6 mm**
+along the long axis — wheelbase **249.9 mm against the adopted 250**, the cross-check — with
+midpoint 235.6 mm; the floor contact patches agree on that midpoint to 0.1 mm (they read the
+wheelbase 2.6 mm short from flat-spot bias, which is why the arcs decide). Axle height
+24.6 mm above the model's floor (ground plane at 2.07 plus r 22.5). The constants live on
+`rover.CHASSIS_MESH_AXLE_MM` / `CHASSIS_MESH_QUAT`; the placement depth is
+`−(axle_to_belly + h/2)` below the chassis centre, radius-independent because clearance is
+`R + 7.5` on this machine. Verified against the artefact, not the constants: a test loads the
+real STL through the compiled geom pose and asserts the four lowest vertex clusters straddle
+the sim's own wheel mounts within 10 mm. Rendered and eyeballed: the pipe shell stands on the
+sim wheels, horns outboard, old wheels hidden inside any R ≥ 40 design.
+
+### The finding on the way: the overhang is asymmetric, and the box flatters the nose
+
+Placed by axle line, the shell's front overhang measures **~105 mm and the tail ~72**, where
+the centred contact box models **88/88**. So the real machine noses into a wall ~17 mm
+*earlier* than every nose-in number quoted so far — the 100 mm nose-in regime measured at
+R 85 used the box's 88. The render now shows the gap honestly (the white shell leads the
+ghost box); whether the box should become an offset box is a platform-model question for the
+freeze (com_offset is also still an estimate), not a decoration question, and it is noted in
+`docs/run_rover.md` rather than silently absorbed.
+
+**Gates.** `tests/test_rover.py` 67/67 (8 new); full suite below.
+
+---
+
+## 2026-08-11 — The simplified shell arrives with axle stubs, and the track becomes wheel-dependent
+
+The user split the model: `pipebot_detailed.stl` (the 156k-triangle original, renamed from
+`robot_piperobot.stl`) and a new `pipebot_simplified.stl` / `.step` (8k triangles) built for
+the simulation. The simplified model has **no wheels and explicit axle stubs** — r 7.5 mm
+cylinders, confirmed in the STEP's own surfaces — and the sim now draws it by default in
+place of the detailed shell. Registration is by the stubs, no arc-fitting needed: stations
+y = 103.48/353.51 (**wheelbase 250.03 against the platform's 250**, the cross-check),
+midpoint 228.49, height z = 24.50 — identical to the detailed model's measured axle height,
+which is the two files agreeing about the machine. Frame is x-lateral/y-long/z-vertical, a
++90° z rotation into the body; `TestChassisMesh` re-pinned, including a test that maps the
+real STL through the compiled geom pose and lands all four stubs on the sim's axles.
+
+### The stubs settle where candidate wheels mount, and it is not where the originals are
+
+The stubs emerge at x = +97/−98 about a midline of −0.5 — **±97.5 mm exactly** — and run to
+the model's full width. The original r 22.5 wheels tuck UNDER the shell at track 157; no
+candidate wheel (R 40–90) can, and the user confirmed external mounting at the plates. So:
+
+- `robot.yaml` gains `drivetrain.wheel_mount_face: 0.0975`; `track_width: 0.157` stays as
+  the original wheels' reference measurement.
+- `PlatformSpec.track_for(width)` = 2·(0.0975 + w/2) = **195 mm + width** — the same shape
+  as `ground_clearance_for`: the second platform quantity that turned out to be
+  wheel-dependent, on the second axis, in one day. `wheel_mounts` and `build_rover_mjcf`
+  take the width; `tipover_angles_rad` takes the actual track, because an external wheel's
+  width genuinely moves the contact line (unlike radius, which stays a fixed yardstick).
+- **Roll is still the tight axis, but barely, and the optimiser can now trade on it**:
+  46.1° at a 30 mm wheel against 49.0° pitch (was 35.9° at track 157). Width buys roll
+  margin at ~0.3°/mm around the default — a real objective-5 coupling that did not exist
+  under the fixed track.
+
+### Consequences swallowed deliberately
+
+`wheel_mount_face_m` enters `PlatformSpec.digest()`, so run identity moved: all three CI
+manifests regenerated at R 45/65/85 and verified bit-identical (exit 0). Found on the way:
+`run_s1.py --manifest-out` was still judged by the threshold fit — unusable on the 3-rung CI
+ladder by design — so `write && verify` chains broke on exit 1; manifest-out now counts as a
+gate run, same argument as `--manifest`. Every rover number before this entry was measured
+at track 157 with the wheels in a place they cannot physically be; the standing re-run of
+the corpus (#30/#33 residue) covers this too.
+
+**Gates.** Suite 839 green (platform 3 new, rover re-pinned), ruff at the standing 71,
+manifest gates 3/3 exit 0. Renders verified by eye: wheels outboard of the plates, stubs
+into the hubs, dome nose forward.
+
+---
+
+## 2026-08-11 — The chassis as primitives: the simplified model turns out to be exact, and the dome changes the nose-in story
+
+`run_rover.py --chassis-collision primitives` replaces the calibrated box with the shapes
+read off `pipebot_simplified.stl`: the r 72.5 pipe cylinder, the **r 55 hemispherical nose**
+(10 673 mesh vertices within 1 mm of one sphere), and the eight bracket plates/webs below
+it. The set is **lossless, not an approximation** — every non-stub vertex of the mesh lies
+ON or INSIDE the primitive union, p100 = 0.00 mm — because the user CAD-authored the
+simplified model from exactly these solids. A test pins that at 0.5 mm, so a re-exported
+model that no longer matches the primitives fails by name. Everything shares the one
+axle-stub registration (`CHASSIS_MESH_AXLE_MM`), so physics and picture cannot drift apart.
+`chassis_hit_step` now watches the whole chassis geom set rather than a geom literally
+named "body".
+
+### Measured on the R 85 ladder, box against primitives
+
+- **60 and 80 mm: byte-identical.** The plates clear the 60 mm step by 2 mm, and at 80 the
+  wheels pitch the chassis up before the plates can reach the riser — the chassis never
+  touches, and the flat-ground equality property (also pinned by test) holds in the wild.
+- **100 mm: the same verdict, a different machine.** The box hard-stops flat against the
+  riser at **0.9° pitch, 587 mm**; the dome **rides the step edge** to **24.6° pitch,
+  800 mm**, ending 43 mm higher. The box was pessimistic about *how* a nose meets a wall —
+  a dome converts a dead stop into a (failed) climb attempt. Neither clears, so no standing
+  climb number moves at these heights, but any scenario that reads peak pitch, stability
+  margin or travelled distance near the nose-in boundary will read differently.
+
+### What this does NOT settle
+
+The plates' points sit **23 mm below the axle line** (30.5 mm below the box belly) — at the
+original r 22.5 wheels that is 0.5 mm off the floor, which is either a real skid the robot
+lives on or CAD convenience. Until that is confirmed on hardware, `box` stays the default
+and the two are never mixed in one comparison; the flag exists precisely so both can be run
+on identical scenarios.
+
+**Gates.** Suite 846 green (7 new), ruff at the standing 71. Filmed: the dome resting on
+the 100 mm step corner at full pitch.
+
+---
+
+## 2026-08-11 — "The wheels turn backwards and it will not climb": one illusion, one real de-saturation
+
+A filmed run of the twelve-claw wheel at a 50 mm step (`--render`, default 25 fps) shows the
+wheels apparently spinning backwards while the robot drives forward, and the climb failing.
+Both were chased to ground.
+
+**The backwards wheels are the camera, measured.** Axles rotate **+6.8 rad/s** while the
+chassis moves **+0.41 m/s** — physics forward, both signs checked in the running sim. But
+12 claws x 1.08 rev/s = **13.0 claw-passes/s against a 25 fps video**, whose Nyquist rate
+for a 12-fold pattern is 12.5 Hz: the pattern advances 0.52 of a claw pitch per frame and
+the eye reads it as retreating 0.48 — the wagon-wheel effect, almost exactly on its worst
+frequency. At the wall, slip spins the wheels toward no-load and holds them there. Remedy
+recorded in `--fps` help: film claw wheels at 60 fps.
+
+**The failed climb is real, and it de-saturates the rover step metric.** On the measured
+platform the R 60 rigid cylinder clears **40 mm (0.67 R)** — `[####........]` — not the
+1.00 R that made #33 declare the rover sweep unable to rank wheels. That old ceiling
+belonged to the fictional platform, which hit the step at 1.19 m/s against the measured
+0.40: the saturation was momentum. The claw wheel also clears 40 and also fails 50, so at
+50 mm nothing is wrong with the run — the suggested height was stale intuition from the
+saturated era (examples in CLAUDE.md / run_rover.py / run_rover.md moved 50 → 40).
+Chassis model is irrelevant here: box and primitives give byte-identical numbers at 50 mm
+(the chassis never touches).
+
+**How each wheel fails 50 mm differs, and the claw's failure is outside the model's
+validity.** Rigid: a genuine attempt — 11.7 deg of pitch, 854 mm travelled, 42.6 J. Claw:
+2.4 deg, parks at the riser and grinds **303 J** into slip with **69% multi-claw sharing**
+— deep inside the regime where the elements straddle the FEA by +75/−46% (#31) — and the
+run's own banner says "the law did not pass its gate; this is a picture, not a number".
+Whether a real claw wheel hooks a 50 mm edge is precisely what the ROM cannot yet say and
+the bench robot can.
+
+Follow-up worth its own run: with the ladder de-saturated, re-run the #33 four-design
+comparison — the rover step sweep may now rank wheels after all.
