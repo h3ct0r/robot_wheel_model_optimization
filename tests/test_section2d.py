@@ -39,10 +39,10 @@ try:  # gmsh is an optional extra; the pure checks below must run without it
 except ImportError:  # pragma: no cover - environment dependent
     HAVE_GMSH = False
 
-TINY = dict(
-    outer_radius_mm=60.0, width_mm=30.0, n_spokes=6,
-    spoke_thickness_mm=5.0, hub_radius_mm=20.0,
-)
+TINY = {
+    "outer_radius_mm": 60.0, "width_mm": 30.0, "n_spokes": 6,
+    "spoke_thickness_mm": 5.0, "hub_radius_mm": 20.0,
+}
 BANDED = WheelParams(**TINY, rim_thickness_mm=3.0)
 BANDLESS = WheelParams(
     **TINY, rim_thickness_mm=0.0, spoke_phase_deg=phase_for_tip_contact(6)

@@ -16,8 +16,9 @@ vector, and a reviewer can zoom into the spoke root without it turning to mush.
 
 from __future__ import annotations
 
+from collections.abc import Sequence
 from pathlib import Path
-from typing import TYPE_CHECKING, Any, Sequence
+from typing import TYPE_CHECKING, Any
 
 import numpy as np
 
@@ -30,9 +31,9 @@ if TYPE_CHECKING:  # pragma: no cover
     from .fea.results import FeaResult
 
 __all__ = [
-    "MissingPlotting",
     "CASE_COLOURS",
     "TREAD_GROOVES",
+    "MissingPlotting",
     "draw_wheel_profile",
     "draw_wheel_section",
     "write_design_pdf",
@@ -105,11 +106,11 @@ def _style(ax: Any) -> None:
         ax.spines[side].set_visible(False)
 
 
-def _colour(result: "FeaResult") -> str:
+def _colour(result: FeaResult) -> str:
     return CASE_COLOURS.get(result.load_case.kind.value, _FILL)
 
 
-def _label(result: "FeaResult") -> str:
+def _label(result: FeaResult) -> str:
     return result.load_case.kind.value.replace("_", " ")
 
 
@@ -184,8 +185,8 @@ def draw_wheel_section(
         direction = np.array([np.cos(phi), np.sin(phi)])
         ax.annotate(
             "", xy=tuple(direction * outer_r), xytext=tuple(direction * params.hub_radius_mm),
-            arrowprops=dict(arrowstyle="<->", color=_MUTED, linewidth=0.8,
-                            shrinkA=0, shrinkB=0),
+            arrowprops={"arrowstyle": "<->", "color": _MUTED, "linewidth": 0.8,
+                        "shrinkA": 0, "shrinkB": 0},
             zorder=6,
         )
         label_at = direction * (params.hub_radius_mm + outer_r) * 0.5
@@ -383,7 +384,7 @@ def _draw_table(
 # metrics
 
 
-def _plot_load_curve(ax: Any, results: Sequence["FeaResult"]) -> None:
+def _plot_load_curve(ax: Any, results: Sequence[FeaResult]) -> None:
     for result in results:
         curve = result.curve
         if curve is None:
@@ -412,7 +413,7 @@ def _plot_load_curve(ax: Any, results: Sequence["FeaResult"]) -> None:
     _style(ax)
 
 
-def _plot_stiffness(ax: Any, results: Sequence["FeaResult"]) -> None:
+def _plot_stiffness(ax: Any, results: Sequence[FeaResult]) -> None:
     for result in results:
         curve = result.curve
         if curve is None:
@@ -430,7 +431,7 @@ def _plot_stiffness(ax: Any, results: Sequence["FeaResult"]) -> None:
     _style(ax)
 
 
-def _plot_contact(ax: Any, results: Sequence["FeaResult"]) -> None:
+def _plot_contact(ax: Any, results: Sequence[FeaResult]) -> None:
     plotted = False
     for result in results:
         patch = result.patch
@@ -451,7 +452,7 @@ def _plot_contact(ax: Any, results: Sequence["FeaResult"]) -> None:
     _style(ax)
 
 
-def _plot_loaded_radius(ax: Any, results: Sequence["FeaResult"]) -> None:
+def _plot_loaded_radius(ax: Any, results: Sequence[FeaResult]) -> None:
     for result in results:
         curve, radius = result.curve, result.loaded_radius_m
         if curve is None or radius is None:
@@ -467,7 +468,7 @@ def _plot_loaded_radius(ax: Any, results: Sequence["FeaResult"]) -> None:
     _style(ax)
 
 
-def _result_summary(result: "FeaResult") -> list[tuple[str, str]]:
+def _result_summary(result: FeaResult) -> list[tuple[str, str]]:
     curve = result.curve
     rows: list[tuple[str, str]] = [("status", result.status.value)]
     if curve is not None:
@@ -544,7 +545,7 @@ def write_report_pdf(
     path: Path | str,
     params: WheelParams,
     material: MaterialSpec,
-    results: Sequence["FeaResult"],
+    results: Sequence[FeaResult],
 ) -> Path:
     """Multi-page report: the design, then the metrics, then a per-case summary.
 

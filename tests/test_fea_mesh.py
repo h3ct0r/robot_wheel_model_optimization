@@ -12,13 +12,13 @@ import unittest
 
 import numpy as np
 
+from wheelopt.cad.params import WheelParams
+from wheelopt.fea.loadcase import MeshSpec
 from wheelopt.fea.mesh import (
     GMSH_TO_ABAQUS_TET10,
     _min_quadratic_jacobian,
     classify_nodes,
 )
-from wheelopt.cad.params import WheelParams
-from wheelopt.fea.loadcase import MeshSpec
 
 
 def straight_tet10(corners: np.ndarray) -> np.ndarray:

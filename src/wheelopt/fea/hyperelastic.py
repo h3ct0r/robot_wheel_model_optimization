@@ -22,13 +22,13 @@ from dataclasses import dataclass
 from ..cad.materials import InfillPattern, MaterialSpec
 
 __all__ = [
-    "HyperelasticModel",
-    "SOLID_TPU_FITS",
-    "PATTERN_EXPONENT",
     "DEFAULT_POISSON_EFFECTIVE",
-    "stiffness_knockdown",
-    "for_material",
+    "PATTERN_EXPONENT",
+    "SOLID_TPU_FITS",
+    "HyperelasticModel",
     "UnknownMaterial",
+    "for_material",
+    "stiffness_knockdown",
 ]
 
 
@@ -115,7 +115,7 @@ class HyperelasticModel:
             return 0.5
         return (3.0 * k - 2.0 * mu) / (2.0 * (3.0 * k + mu))
 
-    def scaled(self, factor: float) -> "HyperelasticModel":
+    def scaled(self, factor: float) -> HyperelasticModel:
         """Scale stiffness by ``factor``, preserving the shape of the stress-strain curve.
 
         Every C coefficient has units of stress, so multiplying them all by one number
@@ -132,7 +132,7 @@ class HyperelasticModel:
             source=f"{self.source} x{factor:.4f}",
         )
 
-    def with_poisson(self, nu: float) -> "HyperelasticModel":
+    def with_poisson(self, nu: float) -> HyperelasticModel:
         """Set the compressibility terms from an effective Poisson ratio.
 
         D1 = 2/K with K = 2 mu (1 + nu) / (3 (1 - 2 nu)).

@@ -81,6 +81,14 @@ def build_parser() -> argparse.ArgumentParser:
                    help="compare this ladder against a reference manifest written elsewhere "
                         "with --manifest-out. Exit 1 on any disagreement — a metric, a "
                         "status, a missing run or a version skew")
+    p.add_argument("--tolerance", choices=("exact", "cross-machine"), default="exact",
+                   help="how --manifest compares numbers. 'exact' is bit-identical — the "
+                        "same-machine gate, where anything less is a bug. 'cross-machine' "
+                        "allows the measured floating-point drift between platforms "
+                        "(store.CROSS_MACHINE_RTOL: 0.5%% default, 20%% on energy_j — the "
+                        "gate's first x86-64-vs-arm64 verdict, 2026-08-12, measured energy "
+                        "drift of 3.6%% through contact-rich stalls). Verdicts, statuses "
+                        "and run identity stay exact in both modes")
     return p
 
 
@@ -168,7 +176,11 @@ def main(argv: list[str] | None = None) -> int:
     if args.manifest_out is not None or args.manifest is not None:
         import json
 
-        from wheelopt.store import compare_manifests, manifest_from_records
+        from wheelopt.store import (
+            CROSS_MACHINE_RTOL,
+            compare_manifests,
+            manifest_from_records,
+        )
 
         manifest = manifest_from_records(outcome.records)
         if args.manifest_out is not None:
@@ -177,9 +189,10 @@ def main(argv: list[str] | None = None) -> int:
             print(f"\nmanifest: {len(manifest['rows'])} run(s) -> {args.manifest_out}")
         if args.manifest is not None:
             reference = json.loads(args.manifest.read_text())
-            problems = compare_manifests(reference, manifest)
+            rtol = CROSS_MACHINE_RTOL if args.tolerance == "cross-machine" else None
+            problems = compare_manifests(reference, manifest, rtol=rtol)
             print(f"\ncross-machine gate against {args.manifest.name}: "
-                  f"{len(manifest['rows'])} run(s) compared")
+                  f"{len(manifest['rows'])} run(s) compared, tolerance {args.tolerance}")
             if problems:
                 print(f"  FAIL — {len(problems)} disagreement(s):")
                 for line in problems[:20]:
@@ -187,7 +200,10 @@ def main(argv: list[str] | None = None) -> int:
                 if len(problems) > 20:
                     print(f"    ... and {len(problems) - 20} more")
                 return 1
-            print("  PASS — bit-identical with the reference, on this machine.")
+            print("  PASS — " + ("bit-identical with the reference, on this machine."
+                                 if rtol is None else
+                                 "agrees with the reference within the measured "
+                                 "cross-platform drift (verdicts and statuses exact)."))
 
     # A gate run is judged by the gate. The threshold fit on a deliberately small CI ladder
     # is honestly unusable — 3 rungs cannot locate P=0.9 — and failing the job for that would

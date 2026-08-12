@@ -28,15 +28,15 @@ from pathlib import Path
 REPO_ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(REPO_ROOT / "src"))
 
-import numpy as np  # noqa: E402
+import numpy as np
 
-from wheelopt.cad.materials import TPU95A  # noqa: E402
-from wheelopt.cad.params import WheelParams  # noqa: E402
-from wheelopt.fea.hyperelastic import HyperelasticModel, for_material  # noqa: E402
-from wheelopt.fea.loadcase import LoadCase, LoadCaseKind, MeshSpec, SolverSpec  # noqa: E402
-from wheelopt.fea.parse import parse_dat  # noqa: E402
+from wheelopt.cad.materials import TPU95A
+from wheelopt.cad.params import WheelParams
+from wheelopt.fea.hyperelastic import HyperelasticModel, for_material
+from wheelopt.fea.loadcase import LoadCase, LoadCaseKind, MeshSpec, SolverSpec
+from wheelopt.fea.parse import parse_dat
 from wheelopt.fea.results import common_force_n
-from wheelopt.fea.runner import find_ccx, run_load_case  # noqa: E402
+from wheelopt.fea.runner import find_ccx, run_load_case
 
 PASS, FAIL = "PASS", "FAIL"
 
@@ -96,7 +96,7 @@ def uniaxial_patch(ccx: Path, hyper: HyperelasticModel, eps: float = 1e-4):
     workdir = Path(tempfile.mkdtemp())
     (workdir / "patch.inp").write_text("\n".join(lines) + "\n")
     subprocess.run([str(ccx), "patch"], cwd=workdir, capture_output=True,
-                   text=True, timeout=180)
+                   text=True, timeout=180, check=False)
     dat = workdir / "patch.dat"
     if not dat.exists():
         return None

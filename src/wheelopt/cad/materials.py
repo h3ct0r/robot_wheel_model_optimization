@@ -17,7 +17,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from enum import Enum
 
-__all__ = ["InfillPattern", "MaterialSpec", "BASE_DENSITIES_KG_M3", "TPU95A", "PLA", "PETG"]
+__all__ = ["BASE_DENSITIES_KG_M3", "PETG", "PLA", "TPU95A", "InfillPattern", "MaterialSpec"]
 
 
 class InfillPattern(str, Enum):

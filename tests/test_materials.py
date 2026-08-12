@@ -91,9 +91,8 @@ class TestMaterialValidation(unittest.TestCase):
 
     def test_rejects_out_of_range_infill(self):
         for bad in (-0.1, 1.5):
-            with self.subTest(value=bad):
-                with self.assertRaises(ValueError):
-                    MaterialSpec(name="PLA", infill_density=bad)
+            with self.subTest(value=bad), self.assertRaises(ValueError):
+                MaterialSpec(name="PLA", infill_density=bad)
 
     def test_rejects_zero_walls(self):
         with self.assertRaises(ValueError):
@@ -152,7 +151,9 @@ class TestParams(unittest.TestCase):
         self.assertNotEqual(a.design_hash(), b.design_hash())
 
     def test_params_are_immutable(self):
-        with self.assertRaises(Exception):
+        import dataclasses
+
+        with self.assertRaises(dataclasses.FrozenInstanceError):
             WheelParams().outer_radius_mm = 99.0  # type: ignore[misc]
 
     def test_bounding_box(self):

@@ -17,8 +17,8 @@ from .params import PARAM_BOUNDS, SpokeProfile, WheelParams
 __all__ = [
     "add_geometry_args",
     "add_material_args",
-    "params_from_args",
     "material_from_args",
+    "params_from_args",
 ]
 
 

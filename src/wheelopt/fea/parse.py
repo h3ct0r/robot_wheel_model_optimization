@@ -24,7 +24,7 @@ from dataclasses import dataclass, field
 
 import numpy as np
 
-__all__ = ["DatBlock", "parse_dat", "parse_sta", "StaSummary", "collect"]
+__all__ = ["DatBlock", "StaSummary", "collect", "parse_dat", "parse_sta"]
 
 _TIME_RE = re.compile(r"time\s*[= ]\s*([-+0-9.eEdD]+)")
 _NUMBER_RE = re.compile(r"[-+]?(?:\d+\.?\d*|\.\d+)(?:[eEdD][-+]?\d+)?")

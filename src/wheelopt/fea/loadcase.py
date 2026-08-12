@@ -15,12 +15,12 @@ from dataclasses import dataclass
 from enum import Enum
 
 __all__ = [
-    "LoadCaseKind",
+    "CONTACT_ANGLE_DEG",
     "IndenterSpec",
     "LoadCase",
+    "LoadCaseKind",
     "MeshSpec",
     "SolverSpec",
-    "CONTACT_ANGLE_DEG",
     "phase_for_tip_contact",
 ]
 

@@ -23,14 +23,14 @@ from pathlib import Path
 REPO_ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(REPO_ROOT / "src"))
 
-from wheelopt.cad.cli import (  # noqa: E402
+from wheelopt.cad.cli import (
     add_geometry_args,
     add_material_args,
     material_from_args,
     params_from_args,
 )
-from wheelopt.cad.constraints import check_design, is_feasible  # noqa: E402
-from wheelopt.fea.loadcase import (  # noqa: E402
+from wheelopt.cad.constraints import check_design, is_feasible
+from wheelopt.fea.loadcase import (
     IndenterSpec,
     LoadCase,
     LoadCaseKind,

@@ -273,6 +273,11 @@ higher speed, and the metric orders rigid > 3-claw > 12-claw the right way round
 travels with it: 20–53% of those runs have two claws sharing (the #31 element gap), so the
 **sign** is the result and the second digit is not. Still open here: the amplitude x wavelength
 *sweep* S7 specifies (this measured one amplitude), and terrain seeds over it.
+**Amendment 2026-08-12: the amplitude × wavelength sweep is measured** — 3 × 4 grid on
+the adopted platform, rigid/claw ratios 1.7–4.9x, compliant wins every cell at equal or
+higher speed, and the claw wheel's harshness is nearly flat across the grid (its ride is
+its own tip-passing, not the terrain). Log entry of that date. Remaining here: terrain
+seeds over the grid, aggregated with CVaR (invariant 7).
 **Amendment 2026-08-11 (adoption):** the "step climb cannot rank" premise softened — the
 measured platform de-saturates the ladder (rigid 0.67 R, claws 1.00 R, see #30), so the step
 sweep now separates compliant from rigid. What it still cannot do is rank *within* the claw

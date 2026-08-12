@@ -22,7 +22,7 @@ from dataclasses import dataclass
 
 import numpy as np
 
-__all__ = ["MassProperties", "mass_properties", "check_against_brep_volume"]
+__all__ = ["MassProperties", "check_against_brep_volume", "mass_properties"]
 
 
 @dataclass(frozen=True, slots=True)
@@ -111,8 +111,8 @@ def mass_properties(
     fz = _subexpressions(p0[:, 2], p1[:, 2], p2[:, 2])
 
     f1x, f2x, f3x, g0x, g1x, g2x = fx
-    f1y, f2y, f3y, g0y, g1y, g2y = fy
-    f1z, f2z, f3z, g0z, g1z, g2z = fz
+    _f1y, f2y, f3y, g0y, g1y, g2y = fy
+    _f1z, f2z, f3z, g0z, g1z, g2z = fz
 
     d0, d1, d2 = d[:, 0], d[:, 1], d[:, 2]
 

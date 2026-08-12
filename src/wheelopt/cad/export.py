@@ -24,14 +24,14 @@ if TYPE_CHECKING:  # pragma: no cover
     from .materials import MaterialSpec
 
 __all__ = [
+    "ANGULAR_TOLERANCE_RAD",
+    "PIPELINE_VERSION",
     "ExportPaths",
     "export",
     "is_watertight",
-    "weld_vertices",
     "remesh",
+    "weld_vertices",
     "wheel_stl",
-    "ANGULAR_TOLERANCE_RAD",
-    "PIPELINE_VERSION",
 ]
 
 #: Vertices closer than this (metres) are the same vertex. Five orders of magnitude below
@@ -46,7 +46,7 @@ ANGULAR_TOLERANCE_RAD = 0.1
 
 
 def remesh(
-    part: "Part",
+    part: Part,
     tolerance_mm: float,
     angular_tolerance_rad: float = ANGULAR_TOLERANCE_RAD,
 ) -> None:
@@ -147,7 +147,7 @@ def is_watertight(faces: np.ndarray) -> tuple[bool, int]:
 
 
 def export(
-    part: "Part",
+    part: Part,
     params: WheelParams,
     out_dir: Path,
     *,

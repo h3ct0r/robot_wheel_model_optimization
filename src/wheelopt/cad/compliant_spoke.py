@@ -32,7 +32,7 @@ from .params import WheelParams
 if TYPE_CHECKING:  # pragma: no cover
     from build123d import Part
 
-__all__ = ["BuildResult", "build_wheel", "tessellate", "MissingCadKernel"]
+__all__ = ["BuildResult", "MissingCadKernel", "build_wheel", "tessellate"]
 
 
 class MissingCadKernel(ImportError):
@@ -48,7 +48,7 @@ class BuildResult:
     (invariant 3).
     """
 
-    part: "Part | None"
+    part: Part | None
     violations: list[Violation]
     brep_volume_m3: float | None
 
@@ -161,7 +161,7 @@ def build_wheel(
     return BuildResult(part=wheel, violations=violations, brep_volume_m3=brep_volume_m3)
 
 
-def _cut_tread(bd: Any, wheel: "Part", params: WheelParams) -> "Part":
+def _cut_tread(bd: Any, wheel: Part, params: WheelParams) -> Part:
     """Cut circumferential tread grooves into the outer surface.
 
     Straight circumferential grooves, deliberately: they are printable without support in
@@ -185,7 +185,7 @@ def _cut_tread(bd: Any, wheel: "Part", params: WheelParams) -> "Part":
 
 
 def tessellate(
-    part: "Part",
+    part: Part,
     tolerance_mm: float = 0.05,
     angular_tolerance_rad: float = ANGULAR_TOLERANCE_RAD,
 ) -> tuple[np.ndarray, np.ndarray]:

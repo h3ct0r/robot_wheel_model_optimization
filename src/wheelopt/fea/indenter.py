@@ -23,7 +23,7 @@ import numpy as np
 
 from .loadcase import IndenterSpec, LoadCaseKind
 
-__all__ = ["IndenterMesh", "build_indenter", "CONTACT_FACE", "CONTACT_FACE_2D"]
+__all__ = ["CONTACT_FACE", "CONTACT_FACE_2D", "IndenterMesh", "build_indenter"]
 
 #: Local CPE4 face carrying the contact surface. CalculiX numbers plane-element faces by
 #: their edges: S1 = 1-2, S2 = 2-3, S3 = 3-4, S4 = 4-1. Nodes 1 and 2 are the two profile

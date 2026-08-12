@@ -37,6 +37,7 @@ split `rom.ring` and `rom.mjcf` already use.
 from __future__ import annotations
 
 import json
+import math
 import os
 from collections.abc import Iterable, Mapping, Sequence
 from dataclasses import dataclass, field
@@ -48,6 +49,7 @@ from typing import Any
 from .hashing import content_digest, plain
 
 __all__ = [
+    "CROSS_MACHINE_RTOL",
     "STORE_SCHEMA_VERSION",
     "ExperimentStore",
     "RunRecord",
@@ -390,13 +392,32 @@ def manifest_from_records(records: Iterable[RunRecord]) -> dict[str, Any]:
     return {"schema": STORE_SCHEMA_VERSION, "versions": versions, "rows": rows}
 
 
+#: Per-metric relative tolerances for the CROSS-MACHINE gate, measured rather than chosen
+#: (2026-08-12, the gate's first Linux x86-64 run against this machine's arm64 manifests —
+#: the log entry of that date has the numbers). Bit-identical cross-platform is FALSE for
+#: MuJoCo trajectories: different libm and SIMD move contact-rich dynamics. Measured relative
+#: spreads: stability_margin ~2e-12, distance ~1e-5, clearances ~6e-4, and **energy up to
+#: 3.6%** — the time-integral of slip friction through grinding stalls, the most chaotic
+#: number in the row. Tolerances are those spreads with ~5x headroom; anything exceeding
+#: them is a real cross-platform finding, not noise. Same-machine gates keep rtol=None:
+#: on one binary the trajectories are bit-identical and anything less is a bug.
+CROSS_MACHINE_RTOL: dict[str, float] = {"default": 5.0e-3, "energy_j": 0.2}
+
+
 def compare_manifests(reference: Mapping[str, Any],
-                      candidate: Mapping[str, Any]) -> list[str]:
+                      candidate: Mapping[str, Any],
+                      rtol: Mapping[str, float] | None = None) -> list[str]:
     """Every way ``candidate`` disagrees with ``reference``, as human-readable lines.
 
     Empty means the gate passed. Ordered so the most structural problem is named first: a
     version skew explains every numeric difference after it, so reporting the numbers first
     would send someone debugging arithmetic that was never run on the same code.
+
+    ``rtol=None`` (the default) is **bit-exact** — the same-machine determinism gate.
+    A mapping of metric name to relative tolerance (``"default"`` for the rest) is the
+    cross-machine gate: run identity, statuses and non-numeric values stay exact, numeric
+    metrics may differ by floating-point drift the platforms genuinely disagree on. Pass
+    :data:`CROSS_MACHINE_RTOL` rather than inventing numbers.
     """
     problems: list[str] = []
     for key, ref in sorted(reference.get("versions", {}).items()):
@@ -419,7 +440,19 @@ def compare_manifests(reference: Mapping[str, Any],
         for name in sorted(set(ref_row["metrics"]) | set(cand_row["metrics"])):
             a = ref_row["metrics"].get(name)
             b = cand_row["metrics"].get(name)
-            if a != b:
+            if a == b:
+                continue
+            # Tolerance applies only where both sides are real numbers; a missing metric,
+            # a NaN, a bool or a string disagreeing is structural under any tolerance.
+            # (`bool` is an `int` in Python, so it is excluded by name: a verdict that
+            # flipped between platforms must never be absorbed as a small number.)
+            allowed = 0.0
+            if (rtol is not None
+                    and isinstance(a, (int, float)) and isinstance(b, (int, float))
+                    and not isinstance(a, bool) and not isinstance(b, bool)
+                    and math.isfinite(a) and math.isfinite(b)):
+                allowed = rtol.get(name, rtol.get("default", 0.0)) * max(abs(a), abs(b))
+            if a is None or b is None or abs(b - a) > allowed:
                 problems.append(f"{run_id}: {name} = {b!r} against {a!r}")
     return problems
 

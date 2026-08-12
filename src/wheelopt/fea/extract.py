@@ -22,15 +22,15 @@ from .parse import DatBlock, collect
 from .results import ContactPatch, LoadCurve
 
 __all__ = [
-    "build_load_curve",
+    "CONTACT_PRESSURE_FRACTION",
+    "TPU_FATIGUE_LIMIT_PA",
     "build_contact_patch",
-    "loaded_radius",
+    "build_load_curve",
     "detect_buckling",
+    "fea_violations",
+    "loaded_radius",
     "loop_area_fraction",
     "spoke_stress",
-    "fea_violations",
-    "TPU_FATIGUE_LIMIT_PA",
-    "CONTACT_PRESSURE_FRACTION",
 ]
 
 #: TPU fatigue limit, Pa. docs/plan/07-materials.md, Polymers 2023. Reported rather than

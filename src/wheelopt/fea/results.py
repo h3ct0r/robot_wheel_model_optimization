@@ -30,11 +30,11 @@ from ..cad.constraints import Violation
 from .loadcase import LoadCase
 
 __all__ = [
-    "FeaStatus",
-    "SolverDiagnostics",
-    "LoadCurve",
     "ContactPatch",
     "FeaResult",
+    "FeaStatus",
+    "LoadCurve",
+    "SolverDiagnostics",
     "common_force_n",
 ]
 

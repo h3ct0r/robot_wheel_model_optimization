@@ -35,7 +35,7 @@ from . import FEA_PIPELINE_VERSION
 from .hyperelastic import HyperelasticModel
 from .loadcase import LoadCase, MeshSpec, SolverSpec
 
-__all__ = ["fea_cache_key", "cache_dir_for", "SOLVER_UNKNOWN", "SOLVER_TIMING_ONLY"]
+__all__ = ["SOLVER_TIMING_ONLY", "SOLVER_UNKNOWN", "cache_dir_for", "fea_cache_key"]
 
 #: Placeholder solver identity used when no binary is present. Deck generation and key
 #: computation must work without CalculiX installed — that is what makes the unit tests

@@ -41,7 +41,7 @@ from .loadcase import LoadCase, MeshSpec, SolverSpec
 from .parse import parse_dat, parse_sta
 from .results import FeaResult, FeaStatus, SolverDiagnostics, failure
 
-__all__ = ["find_ccx", "solver_identity", "run_load_case", "REPO_CACHE_ROOT"]
+__all__ = ["REPO_CACHE_ROOT", "find_ccx", "run_load_case", "solver_identity"]
 
 REPO_CACHE_ROOT = Path(__file__).resolve().parents[3] / "data" / "cache" / "fea"
 
@@ -103,7 +103,7 @@ def solver_identity(ccx: Path | None) -> str:
         return SOLVER_UNKNOWN
     try:
         out = subprocess.run(
-            [str(ccx), "-v"], capture_output=True, text=True, timeout=30
+            [str(ccx), "-v"], capture_output=True, text=True, timeout=30, check=False
         )
         text = (out.stdout + out.stderr).strip().splitlines()
         version = next((ln.strip() for ln in text if "ersion" in ln), "")
@@ -111,10 +111,10 @@ def solver_identity(ccx: Path | None) -> str:
     except (OSError, subprocess.SubprocessError):
         return SOLVER_UNKNOWN
     try:
-        import gmsh  # noqa: F401
+        import gmsh
 
         gmsh_version = gmsh.__version__  # type: ignore[attr-defined]
-    except Exception:  # pragma: no cover - gmsh optional
+    except Exception:  # noqa: BLE001 - any import failure means the same: no gmsh
         gmsh_version = "none"
     return f"ccx-{version}+gmsh-{gmsh_version}"
 

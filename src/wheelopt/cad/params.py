@@ -16,7 +16,7 @@ import math
 from dataclasses import asdict, dataclass
 from enum import Enum
 
-__all__ = ["SpokeProfile", "WheelParams", "PARAM_BOUNDS"]
+__all__ = ["PARAM_BOUNDS", "SpokeProfile", "WheelParams"]
 
 
 class SpokeProfile(str, Enum):

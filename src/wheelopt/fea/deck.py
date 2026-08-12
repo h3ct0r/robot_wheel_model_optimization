@@ -41,7 +41,7 @@ from .indenter import IndenterMesh
 from .loadcase import LoadCase, SolverSpec
 from .mesh import FeaMesh
 
-__all__ = ["DeckError", "DeckBundle", "build_deck"]
+__all__ = ["DeckBundle", "DeckError", "build_deck"]
 
 #: Young's modulus and Poisson ratio for the indenter. It is inside a ``*RIGID BODY``, so
 #: these are never used to compute anything; CalculiX simply requires every element to

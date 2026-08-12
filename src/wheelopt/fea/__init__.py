@@ -38,15 +38,15 @@ from .runner import find_ccx, run_load_case
 
 __all__ = [
     "FEA_PIPELINE_VERSION",
-    "run_load_case",
-    "find_ccx",
+    "ContactPatch",
     "FeaResult",
     "FeaStatus",
-    "LoadCurve",
-    "ContactPatch",
+    "IndenterSpec",
     "LoadCase",
     "LoadCaseKind",
+    "LoadCurve",
     "MeshSpec",
     "SolverSpec",
-    "IndenterSpec",
+    "find_ccx",
+    "run_load_case",
 ]

@@ -14,11 +14,11 @@ import numpy as np
 from .params import SpokeProfile, WheelParams
 
 __all__ = [
+    "OVERLAP_FRACTION",
+    "attachment_overlap_mm",
+    "min_gap_between_spokes",
     "spoke_centreline",
     "spoke_outline",
-    "min_gap_between_spokes",
-    "attachment_overlap_mm",
-    "OVERLAP_FRACTION",
 ]
 
 #: Spokes are buried this fraction of their own thickness into the hub and shear band, so
@@ -160,8 +160,8 @@ def _append_hook(params: WheelParams, leg: np.ndarray, theta: float) -> np.ndarr
 
     # The foot, from the circle's tangent point onward along the running surface.
     beta = abs(params.tip_hook_mm) / r_c
-    n_foot = max(2, int(round(params.spoke_samples * beta * r_c
-                              / max(np.linalg.norm(leg[-1] - leg[0]), 1e-9))))
+    n_foot = max(2, round(params.spoke_samples * beta * r_c
+                          / max(np.linalg.norm(leg[-1] - leg[0]), 1e-9)))
     angles = theta + sign * (delta + np.linspace(0.0, beta, n_foot + 1)[1:])
     foot = r_c * np.stack([np.cos(angles), np.sin(angles)], axis=1)
 

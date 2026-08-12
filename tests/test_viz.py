@@ -81,7 +81,7 @@ class TestImportHygiene(unittest.TestCase):
             [sys.executable, "-c", code],
             capture_output=True, text=True,
             cwd=str(Path(__file__).resolve().parents[1]),
-        )
+        check=False, )
         self.assertEqual(out.returncode, 0, out.stderr)
         self.assertEqual(out.stdout.strip(), "", "viz pulled in a heavy dependency at import")
 
@@ -121,7 +121,7 @@ class TestDesignPdf(unittest.TestCase):
             out = subprocess.run(
                 [sys.executable, "-c", code], capture_output=True, text=True,
                 cwd=str(Path(__file__).resolve().parents[1]),
-            )
+            check=False, )
             self.assertEqual(out.returncode, 0, out.stderr)
             self.assertIn("False", out.stdout)
 
@@ -189,6 +189,7 @@ class TestSectionDrawing(unittest.TestCase):
 
         matplotlib.use("Agg")
         import matplotlib.pyplot as plt
+
         from wheelopt.viz import draw_wheel_section
 
         for n in (6, 12, 20):

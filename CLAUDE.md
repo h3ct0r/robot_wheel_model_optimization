@@ -219,10 +219,14 @@ Full statement and sub-questions: `docs/plan/02-research-questions.md`
   #36 records the three bullets deliberately not built — `T0` CAD, CoACD, Hydra — each with a
   named trigger). `.github/workflows/ci.yml`: unit suite + ruff, no kernels, and a
   `determinism-gate` job that re-runs three designs' S1 ladders on Linux x86-64 against
-  manifests committed from this arm64 machine, **bit for bit** (`run_s1.py
-  --manifest-out/--manifest`, `store.compare_manifests`). If that job fails while tests pass,
-  it is the gate *finding something* — cross-platform FP moving a trajectory — not a broken
-  build. The gate caught a real bug on day one: `rung_name` carried only the height, so
+  manifests committed from this arm64 machine (`run_s1.py --manifest-out/--manifest`,
+  `store.compare_manifests`). **Its first verdict (2026-08-12): bit-identical is FALSE
+  across platforms** — measured drift ~1e-5 on positions, up to 3.6% on energy through
+  contact-rich stalls — so the cross-machine leg now runs `--tolerance cross-machine`
+  (`store.CROSS_MACHINE_RTOL`, the measured drift with ~5x headroom; verdicts, statuses and
+  run identity stay exact under any tolerance). Same-machine gates remain bit-exact. If the
+  job fails now, a platform exceeds its own measured drift or a verdict flipped — a finding
+  either way, not a broken build. The gate caught a real bug on day one: `rung_name` carried only the height, so
   `--duration 5` collided into the 6-second reference's run_ids with different numbers inside
   — invariant 5 violated quietly since S1 was built. The rung name now digests everything
   that shapes the run, with `n_seeds` and `heights_m` excluded by name. Also that day:

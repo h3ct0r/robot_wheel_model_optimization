@@ -20,7 +20,7 @@ import numpy as np
 from ..cad.params import WheelParams
 from .loadcase import MeshSpec
 
-__all__ = ["FeaMesh", "MeshStats", "MeshFailure", "mesh_step", "GMSH_TO_ABAQUS_TET10"]
+__all__ = ["GMSH_TO_ABAQUS_TET10", "FeaMesh", "MeshFailure", "MeshStats", "mesh_step"]
 
 #: gmsh orders TET10 mid-side nodes as (0,1) (1,2) (0,2) (0,3) (2,3) (1,3); Abaqus C3D10
 #: expects (1,2) (2,3) (3,1) (1,4) (2,4) (3,4). The first four agree, and so do the first

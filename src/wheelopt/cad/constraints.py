@@ -20,7 +20,7 @@ from .centreline import min_gap_between_spokes
 from .materials import MaterialSpec
 from .params import PARAM_BOUNDS, WheelParams
 
-__all__ = ["Severity", "Violation", "PlatformLimits", "check_design", "is_feasible"]
+__all__ = ["PlatformLimits", "Severity", "Violation", "check_design", "is_feasible"]
 
 
 class Severity(str, Enum):

@@ -25,11 +25,11 @@ from pathlib import Path
 REPO_ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(REPO_ROOT / "src"))
 
-import numpy as np  # noqa: E402
+import numpy as np
 
-from wheelopt.cad.constraints import check_design, is_feasible  # noqa: E402
-from wheelopt.cad.materials import PLA, TPU95A  # noqa: E402
-from wheelopt.cad.params import SpokeProfile, WheelParams  # noqa: E402
+from wheelopt.cad.constraints import check_design, is_feasible
+from wheelopt.cad.materials import PLA, TPU95A
+from wheelopt.cad.params import SpokeProfile, WheelParams
 
 PASS, FAIL, SKIP = "PASS", "FAIL", "SKIP"
 

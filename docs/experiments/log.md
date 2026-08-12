@@ -4006,3 +4006,60 @@ now in the ladder's own units. Tangentially-rigid claws hook the edge; hinged cl
 backward and grind. Which one the printed wheel does is exactly what the bench press and a
 step-edge hardware test decide (ADR-0008), and until then a rover claw-climb number is
 quoted with its element.
+
+---
+
+## 2026-08-12 — The cross-machine gate's first verdict: bit-identical is false across platforms, by a measured margin
+
+The first push reached GitHub and the determinism gate did the thing it was built for: it
+**failed while the unit suite passed**. Linux x86-64 re-ran the three committed ladders
+against this machine's arm64 manifests and disagreed on 48 of 48 numeric comparisons — none
+of them on a verdict, a status, a run identity or a version. Measured relative drift:
+`stability_margin` ~2e-12, `distance_m` ~1e-5, clearances up to ~6e-4, and **`energy_j` up
+to 3.6%** (65.54 against 63.21 J) — the time-integral of slip friction through grinding
+stalls, the most chaotic number in the row. So `docs/plan/11-phases.md`'s "identical θ →
+identical score on two machines" is **false at the bit level for MuJoCo trajectories**:
+different libm and SIMD move contact-rich dynamics, and a stalled wheel integrates the
+difference. That is a *result*, recorded here per the workflow's own instructions.
+
+**The gate's meaning is now split in two, deliberately.** Same-machine (`--gate`,
+`--manifest` default): bit-exact, unchanged — one binary that disagrees with itself is a
+bug. Cross-machine (`--tolerance cross-machine`, which CI now passes):
+`store.CROSS_MACHINE_RTOL` = 0.5% default / 20% on `energy_j` — the measured drift with
+~5x headroom — while **verdicts, statuses, booleans and run identity stay exact under any
+tolerance** (a `climbed` flip must never read as a small number; the comparison excludes
+bools from the float path by type, tested). A future failure of this job means a platform
+disagrees beyond its own measured drift or a verdict flipped: a finding either way.
+
+Also in this batch: **ruff is actually clean now** — the "standing 71" the project had been
+stepping around failed CI's lint job the moment an outside machine ran it. 58 auto-fixes
+(import sorting, `__all__` order, quoted annotations, stale noqa) plus the six by hand:
+`check=False` made explicit on four deliberate no-raise `subprocess.run` calls, three
+scripts made executable to match their shebangs, `FrozenInstanceError` instead of a blind
+`assertRaises(Exception)`, two `dict()` literals, and one blind except given the noqa and
+the reason it deserved. Zero errors, 849 tests green.
+
+---
+
+## 2026-08-12 — S7's full grid on the measured platform: the sign reversal is uniform, and the claw wheel is flat
+
+The amplitude × wavelength sweep #33 asked for, on the adopted platform (R 60 twelve-claw
+radial vs rigid cylinder, 3 amplitudes × 4 wavelengths, 24 runs). Rigid/claw harshness
+ratios:
+
+| A \ λ | 60 mm | 100 mm | 200 mm | 400 mm |
+|---|---|---|---|---|
+| 5 mm  | 3.5 | 3.1 | 2.3 | 1.7 |
+| 10 mm | 4.3 | 3.3 | 3.3 | 2.4 |
+| 20 mm | 4.7 | 4.0 | 4.9 | 3.0 |
+
+**The compliant wheel wins every cell, at equal or higher speed.** The pre-adoption
+single-amplitude ratios (4.8–6.9x) shrink to 1.7–4.9x on the measured robot — slower
+robot, gentler forcing — but the sign never flips. The structural finding is the *shape*:
+the claw wheel's absolute harshness is nearly flat across the whole grid (5.9–8.4 m/s²,
+tips passing at 13–15 Hz) while the rigid wheel's scales with amplitude and against
+wavelength (9.9–33.7). The compliant wheel's ride is dominated by its own tip-passing,
+not by the terrain — it has decoupled from the corrugation, which is what compliance is
+for, measured. Caveats: 9–27% multi-claw sharing (#31's regime, printed per run), and no
+terrain seeds yet — the grid is one deterministic corrugation per cell; seeds × CVaR
+remain #33's residue.

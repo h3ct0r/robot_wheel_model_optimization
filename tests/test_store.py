@@ -267,6 +267,41 @@ class TestManifest(unittest.TestCase):
         self.assertTrue(problems)
         self.assertTrue(all("energy_j" in line for line in problems), problems)
 
+    def test_cross_machine_tolerance_absorbs_measured_drift_and_nothing_more(self):
+        """The gate's first x86-64 verdict (2026-08-12): trajectories are NOT bit-identical
+        across platforms — energy drifted up to 3.6% through contact-rich stalls. The
+        cross-machine mode absorbs exactly that class of difference and still fails on
+        anything larger, so it remains a gate rather than a shrug."""
+        from wheelopt.store import CROSS_MACHINE_RTOL
+
+        reference = manifest_from_records(self.rows(energy=63.2))
+        drifted = manifest_from_records(self.rows(energy=65.5))       # the measured worst
+        self.assertTrue(compare_manifests(reference, drifted))        # exact mode still fails
+        self.assertEqual(
+            compare_manifests(reference, drifted, rtol=CROSS_MACHINE_RTOL), [])
+        way_off = manifest_from_records(self.rows(energy=80.0))       # 27% is not drift
+        self.assertTrue(
+            compare_manifests(reference, way_off, rtol=CROSS_MACHINE_RTOL))
+
+    def test_tolerance_never_absorbs_a_flipped_verdict(self):
+        """`climbed` is 0-or-1 and 1 is within 500%% of 0 under any relative tolerance —
+        so booleans and integer verdicts are compared exactly by name of their type, never
+        through the float path. A verdict that flips between platforms is the loudest thing
+        the gate can find and must never read as small."""
+        from wheelopt.store import CROSS_MACHINE_RTOL
+
+        def rows_with(climbed) -> list[RunRecord]:
+            return [RunRecord(design_hash="d1", scenario="S1_step/h=0.040@abcd1234", seed=s,
+                              material_realisation=0,
+                              metrics={"climbed": climbed, "energy_j": 12.5})
+                    for s in (0, 1)]
+
+        reference = manifest_from_records(rows_with(True))
+        flipped = manifest_from_records(rows_with(False))
+        problems = compare_manifests(reference, flipped, rtol=CROSS_MACHINE_RTOL)
+        self.assertTrue(problems)
+        self.assertTrue(all("climbed" in line for line in problems), problems)
+
     def test_a_version_skew_is_reported_first(self):
         """A version skew explains every numeric difference after it; reporting the numbers
         first sends someone debugging arithmetic that never ran on the same code."""
