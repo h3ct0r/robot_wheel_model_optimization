@@ -13,6 +13,12 @@
 | **S7 Washboard** | sinusoidal ripple, amplitude and wavelength | **RMS chassis acceleration — where compliance wins** |
 | **S8 Sustained load** | nominal + 2× load, long duration | Sag, buckling margin, predicted fatigue cycles |
 
+**Build status 2026-08-12**: S1, S2, S3, S4, S6 (as the spin proxy, quarantined by #38)
+and S7 all run in `sim/rover.py` / `run_rover.py`, and S5's cost of transport is computed on
+every run that moves; what S5 still lacks is the dedicated 10 m sprint protocol, and S8
+remains FEA-side constraints only. Terrain seeds exist for S4 (`rubble_seed`); the
+seeds-times-CVaR aggregation over the suite is Phase 2's remaining half.
+
 **S5 and S8 are the anti-degenerate scenarios for compliance.** Without S5 the optimiser makes
 everything maximally soft; without S8 it makes everything soft enough to collapse.
 

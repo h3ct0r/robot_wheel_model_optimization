@@ -249,6 +249,17 @@ Full statement and sub-questions: `docs/plan/02-research-questions.md`
   two claws sharing (#31's unvalidated regime) and the run prints exactly that. A step plus a
   washboard is refused — S1 is the step, S7 the corrugation, nothing defines the mixture.
   Still open under #33: the amplitude × wavelength sweep proper, and terrain seeds for CVaR.
+- **The scenario suite is built: S2–S6 landed 2026-08-12** (`sim/rover.py`, one scenario
+  per run, exclusivity refused by name). S2 slope tilts *gravity* (no ramp transient; rigid
+  R 60 holds 10° at 0.38 m/s, backslides at 40° — traction-limited). S3 gap replaces the
+  floor with two slabs and a 150 mm trench (40 mm crossed, 200 mm swallows a wheel). S4
+  rubble is a procedural 1.2 m rock field where the seed IS the terrain (bit-identical per
+  seed; rocks buried and height-capped by test). S5 cost of transport `E/mgd` is computed
+  on every run that moves (0.01 flat, 0.18 at 10°; compliant CoT inherits the
+  `TPU_LOSS_FACTOR` caveat). S6 is the spin-in-place proxy — yaw rate + scrub energy,
+  **quarantined by #38** until the lateral checks land. Remaining for the full suite:
+  S5's 10 m sprint protocol, S8's duration/fatigue half, and seeds×CVaR aggregation
+  (Phase 2).
 - **#31: a tip is a corner, the onset now has a closed form, and it was never the problem**
   (2026-08-11, `rom-0.7.0`, `TODO.md` #31 partly closed). A claw's deepest material sits half a
   tip thickness off its own axis, so its reach is `R cos θ + h sin|θ|` and a side claw engages

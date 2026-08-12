@@ -155,6 +155,26 @@ def build_parser() -> argparse.ArgumentParser:
     run.add_argument("--wavelength", type=float, default=100.0, metavar="MM",
                      help="wavelength of that corrugation, mm. Harshness is a resonance "
                           "question, so quote every S7 number with both of these")
+    run.add_argument("--slope", type=float, default=0.0, metavar="DEG",
+                     help="scenario S2: uphill gradient, degrees (tilts gravity, so there "
+                          "is no ramp-entry transient). Needs --obstacle-height 0; the "
+                          "metric is sustained speed, and a sweep over gradients finds the "
+                          "max sustained gradient")
+    run.add_argument("--gap", type=float, default=0.0, metavar="MM",
+                     help="scenario S3: width of a trench in the ground, mm. Needs "
+                          "--obstacle-height 0. A wheel that drops in stays in; 'crossed' "
+                          "requires the whole body at ride height on the far side")
+    run.add_argument("--rubble", type=float, default=0.0, metavar="MM",
+                     help="scenario S4: tallest rock of a procedural 1.2 m rubble strip, "
+                          "mm. Needs --obstacle-height 0; the field derives from "
+                          "--rubble-seed alone, so a seed IS a terrain")
+    run.add_argument("--rubble-seed", type=int, default=0,
+                     help="seed for the S4 rock field. Same seed, same field, to the bit")
+    run.add_argument("--spin", action="store_true",
+                     help="scenario S6 (spin-in-place proxy): left and right sides driven "
+                          "in opposite directions; reports yaw rate and the energy it "
+                          "costs. QUARANTINED by TODO #38 — tip scrub is validated against "
+                          "nothing, so this ranks designs only after those checks land")
     run.add_argument("--sweep", action="store_true",
                      help="instead of one run, sweep 10 mm to 2.1 R in 10 mm buckets and "
                           "report the tallest cleared plus the profile. Quote the answer as "
@@ -595,7 +615,10 @@ def main(argv: list[str] | None = None) -> int:
                              approach_deg=args.approach, duration_s=args.duration,
                              throttle=args.throttle,
                              washboard_amplitude_m=args.washboard * 1e-3,
-                             washboard_wavelength_m=args.wavelength * 1e-3)
+                             washboard_wavelength_m=args.wavelength * 1e-3,
+                             slope_deg=args.slope, gap_width_m=args.gap * 1e-3,
+                             rubble_height_m=args.rubble * 1e-3,
+                             rubble_seed=args.rubble_seed, spin=args.spin)
         except ValueError as exc:
             print(f"scenario: {exc}")
             raise SystemExit(1) from None
@@ -636,6 +659,11 @@ def main(argv: list[str] | None = None) -> int:
     else:
         what = (f"a {args.washboard:.0f} x {args.wavelength:.0f} mm washboard (S7)"
                 if flat and args.washboard > 0.0 else
+                f"a {args.slope:.0f} deg gradient (S2)" if args.slope else
+                f"a {args.gap:.0f} mm gap (S3)" if args.gap > 0.0 else
+                f"{args.rubble:.0f} mm rubble, seed {args.rubble_seed} (S4)"
+                if args.rubble > 0.0 else
+                "a spin in place (S6 proxy)" if args.spin else
                 "flat ground, measuring ride harshness" if flat else
                 f"a {args.obstacle_height:.0f} mm obstacle")
         with Stage(f"simulating {scenario.duration_s:.1f} s at {what}",
@@ -652,6 +680,22 @@ def main(argv: list[str] | None = None) -> int:
     if flat and args.washboard > 0.0:
         print(f"\nwashboard {args.washboard:.0f} mm x {args.wavelength:.0f} mm "
               "(08-metrics.md S7, objective 3)")
+    elif args.slope:
+        print(f"\nslope {args.slope:.0f}° uphill (08-metrics.md S2)")
+        print(f"  sustained speed    {result.mean_speed_m_s:.2f} m/s over the steady "
+              "window — the S2 verdict; a sweep over gradients finds where this dies")
+    elif args.gap > 0.0:
+        print(f"\ngap {args.gap:.0f} mm (08-metrics.md S3)")
+        print(f"  crossed            {result.crossed}")
+    elif args.rubble > 0.0:
+        print(f"\nrubble {args.rubble:.0f} mm, seed {args.rubble_seed} "
+              "(08-metrics.md S4; one seed is ONE terrain — sweep seeds before believing)")
+        print(f"  crossed            {result.crossed}")
+    elif args.spin:
+        print("\nspin in place (08-metrics.md S6 proxy — QUARANTINED, TODO #38: tip "
+              "scrub is validated against nothing)")
+        print(f"  yaw rate           {np.degrees(result.yaw_rate_rad_s):.1f} °/s steady")
+        print(f"  scrub energy       {result.energy_j:.1f} J over the run")
     elif flat:
         print("\nflat ground — no obstacle (08-metrics.md S5, objective 3)")
     else:
@@ -671,11 +715,17 @@ def main(argv: list[str] | None = None) -> int:
     if not flat:
         print(f"  chassis hit step   {result.chassis_hit_step}")
     print(f"  axle work          {result.energy_j:.1f} J")
+    if result.cost_of_transport > 0.0:
+        print(f"  cost of transport  {result.cost_of_transport:.2f} (E/mgd, objective 2"
+              + (", inherits TPU_LOSS_FACTOR's caveat wholesale)" if args.compliant
+                 else ")"))
     _report_validity(args, result)
     _report_harshness(platform, args, result, flat=flat)
     for path in [*written, sheet]:
         if path is not None:
             print(f"  {path}")
+    if args.gap > 0.0 or args.rubble > 0.0:
+        return 0 if result.crossed else 1
     return 0 if (flat or result.climbed) else 1
 
 

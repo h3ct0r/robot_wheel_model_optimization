@@ -249,6 +249,16 @@ Two failure modes worth naming, because both read as innocuous:
 | `--approach` | `0.0`° | Heading yaw. Refused at ±90 and beyond. |
 | `--washboard` | `0.0` mm | S7: peak-to-trough height of a sinusoidal corrugation. Needs `--obstacle-height 0`; refused alongside a step. |
 | `--wavelength` | `100.0` mm | The corrugation's wavelength. Quote every S7 number with both. |
+| `--slope` | `0.0` ° | **S2**: uphill gradient, implemented by tilting *gravity* — same physics as an infinite ramp, no entry transient. Metric: sustained speed; sweep gradients for the max sustained gradient. Rigid R 60 holds 10° at 0.38 m/s and backslides at 40° (traction-limited, μ = 1). |
+| `--gap` | `0.0` mm | **S3**: a 150 mm-deep trench across the ground, near edge at `step_x`. The floor plane becomes two slabs (a plane cannot have a hole). `crossed` needs the whole body at ride height on the far side; a wheel that drops in stays in. |
+| `--rubble` | `0.0` mm | **S4**: tallest rock of a procedural 1.2 m strip; every rock is buried (no floating steps) and none exceeds the asked height, by test. `--rubble-seed` **is** the terrain — same seed, same field, to the bit. One seed is one terrain: sweep seeds before believing a number. Needs `--duration` ≥ ~8 s to reach the far side at this drivetrain's speed. |
+| `--spin` | off | **S6 proxy**: left and right sides driven opposite; reports steady yaw rate and scrub energy. **Quarantined by TODO #38** — the ring is laterally quasi-rigid by structure, but tip-level scrub is validated against nothing, so this ranks designs only after #38's checks land. |
+
+Every scenario flag needs `--obstacle-height 0`, and exactly one scenario per run — any
+pair is refused by name (`RoverSpec` exclusivity; the suite scores S1–S8 as separate rows).
+On any run that travels ≥ 0.2 m the result also carries **`cost_of_transport`** (S5,
+objective 2): `E/(m·g·d)` over the driving phase — 0.01 for the rigid cylinder on the flat,
+0.18 climbing 10°. On compliant wheels it inherits `TPU_LOSS_FACTOR`'s caveat wholesale.
 | `--sweep` | off | Instead of one run, ladder 10 mm to 2.1 R in 10 mm buckets. |
 
 The drive is the platform's own linear torque–speed curve, clipped so a motor never brakes:

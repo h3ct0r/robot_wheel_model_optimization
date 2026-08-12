@@ -574,6 +574,110 @@ class TestChassisMesh(unittest.TestCase):
                 self.assertLess(abs(stub[:, 2].mean() - dz_axle), 0.003)
 
 
+class TestScenarios(unittest.TestCase):
+    """S2 slope, S3 gap, S4 rubble, S5 cost of transport, S6 spin — built 2026-08-12.
+    Each scenario's defining property, plus the exclusivity rule that keeps a run about
+    exactly one of them."""
+
+    @property
+    def SMALL(self) -> dict:
+        return {"wheel_radius_m": 0.060, "wheel_width_m": 0.030, "wheel_mass_kg": 0.30}
+
+    def xml(self, scenario: RoverSpec, **kwargs) -> str:
+        return build_rover_mjcf(PLATFORM, scenario, **{**self.SMALL, **kwargs})
+
+    def test_two_scenarios_in_one_run_are_refused_by_name(self):
+        for kwargs in ({"slope_deg": 10.0, "gap_width_m": 0.05},
+                       {"step_height_m": 0.05, "spin": True},
+                       {"rubble_height_m": 0.03, "washboard_amplitude_m": 0.01}):
+            with self.subTest(kwargs=kwargs), self.assertRaises(ValueError) as ctx:
+                RoverSpec(step_height_m=kwargs.pop("step_height_m", 0.0), **kwargs)
+            self.assertIn("scenario nothing defines", str(ctx.exception))
+
+    def test_the_slope_is_gravity_not_a_ramp(self):
+        """Tilting gravity has no ramp-entry transient — the whole run is on-grade, so the
+        steady window measures the gradient rather than the doorstep."""
+        text = self.xml(RoverSpec(step_height_m=0.0, slope_deg=10.0))
+        gx = -9.81 * np.sin(np.deg2rad(10.0))
+        self.assertIn(f'gravity="{gx:.9g} 0 ', text)
+        self.assertNotIn('name="ramp"', text)
+        with self.assertRaises(ValueError):
+            RoverSpec(step_height_m=0.0, slope_deg=50.0)
+
+    def test_the_gap_replaces_the_floor_because_a_plane_has_no_hole(self):
+        text = self.xml(RoverSpec(step_height_m=0.0, gap_width_m=0.08))
+        self.assertNotIn('name="floor"', text)
+        for name in ("ground_near", "ground_far", "gap_bottom"):
+            self.assertIn(f'name="{name}"', text)
+        self.assertIn('name="floor"', self.xml(RoverSpec(step_height_m=0.0)))
+
+    def test_a_rubble_seed_is_a_terrain(self):
+        """Invariant 7's terrain axis: the same seed must be the same field to the bit, and
+        a different seed a different field — otherwise seeds sample nothing."""
+        spec = {"step_height_m": 0.0, "rubble_height_m": 0.030}
+        self.assertEqual(self.xml(RoverSpec(**spec, rubble_seed=3)),
+                         self.xml(RoverSpec(**spec, rubble_seed=3)))
+        self.assertNotEqual(self.xml(RoverSpec(**spec, rubble_seed=3)),
+                            self.xml(RoverSpec(**spec, rubble_seed=4)))
+
+    def test_every_rock_is_buried_and_none_stands_taller_than_asked(self):
+        """A floating rock is a step with nothing under it, and a rock taller than
+        `rubble_height_m` makes the scenario lie about its own difficulty."""
+        text = self.xml(RoverSpec(step_height_m=0.0, rubble_height_m=0.030))
+        rocks = [x for x in text.splitlines() if 'name="rock' in x]
+        self.assertGreater(len(rocks), 10)
+        for line in rocks:
+            z = float(line.split('pos="')[1].split('"')[0].split()[2])
+            half_z = float(line.split('size="')[1].split('"')[0].split()[2])
+            self.assertLess(z - half_z, 0.0, "rock bottom must sit below grade")
+            self.assertLessEqual(z + half_z, 0.030 + 1e-9, "rock top exceeds rubble_height")
+
+    @unittest.skipUnless(HAVE_MUJOCO, "MuJoCo not installed")
+    def test_the_gradient_separates_a_grade_it_holds_from_one_it_loses(self):
+        gentle = observe_rover(PLATFORM, RoverSpec(step_height_m=0.0, slope_deg=10.0,
+                                                   duration_s=3.0), **self.SMALL)
+        steep = observe_rover(PLATFORM, RoverSpec(step_height_m=0.0, slope_deg=40.0,
+                                                  duration_s=3.0), **self.SMALL)
+        self.assertTrue(gentle.ok and steep.ok)
+        self.assertGreater(gentle.mean_speed_m_s, 0.2)      # holds and climbs
+        self.assertLess(steep.mean_speed_m_s, 0.0)          # traction-limited backslide
+
+    @unittest.skipUnless(HAVE_MUJOCO, "MuJoCo not installed")
+    def test_a_wheel_sized_gap_is_crossed_and_a_body_sized_one_is_not(self):
+        small = observe_rover(PLATFORM, RoverSpec(step_height_m=0.0, gap_width_m=0.04,
+                                                  duration_s=5.0), **self.SMALL)
+        wide = observe_rover(PLATFORM, RoverSpec(step_height_m=0.0, gap_width_m=0.20,
+                                                 duration_s=5.0), **self.SMALL)
+        self.assertTrue(small.ok and wide.ok)
+        self.assertTrue(small.crossed)
+        self.assertFalse(wide.crossed)
+        self.assertLess(wide.distance_m, small.distance_m)   # it is IN the trench
+
+    @unittest.skipUnless(HAVE_MUJOCO, "MuJoCo not installed")
+    def test_spin_yaws_where_straight_does_not_and_goes_nowhere(self):
+        spin = observe_rover(PLATFORM, RoverSpec(step_height_m=0.0, spin=True,
+                                                 duration_s=3.0), **self.SMALL)
+        straight = observe_rover(PLATFORM, RoverSpec(step_height_m=0.0,
+                                                     duration_s=3.0), **self.SMALL)
+        self.assertTrue(spin.ok and straight.ok)
+        self.assertGreater(spin.yaw_rate_rad_s, 0.05)
+        self.assertLess(straight.yaw_rate_rad_s, 0.02)
+        self.assertLess(spin.distance_m, 0.1)
+        self.assertGreater(spin.energy_j, 1.0)               # scrub is not free
+
+    @unittest.skipUnless(HAVE_MUJOCO, "MuJoCo not installed")
+    def test_climbing_costs_more_transport_than_the_flat(self):
+        """S5's number moving the way physics says it must: E/mgd on a 10 deg grade
+        exceeds the flat's, which for a rigid cylinder on a plane is nearly free."""
+        flat = observe_rover(PLATFORM, RoverSpec(step_height_m=0.0, duration_s=3.0),
+                             **self.SMALL)
+        grade = observe_rover(PLATFORM, RoverSpec(step_height_m=0.0, slope_deg=10.0,
+                                                  duration_s=3.0), **self.SMALL)
+        self.assertTrue(flat.ok and grade.ok)
+        self.assertGreater(flat.cost_of_transport, 0.0)
+        self.assertGreater(grade.cost_of_transport, 2.0 * flat.cost_of_transport)
+
+
 class TestChassisCollision(unittest.TestCase):
     """`chassis_collision="primitives"`: the pipe, the dome nose and the bracket plates as
     real contact geoms, against the calibrated box. A physics switch, not a rendering one —

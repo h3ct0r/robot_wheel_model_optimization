@@ -290,6 +290,29 @@ class RoverSpec:
     #: resonance question, so amplitude alone says nothing — what matters is the wavelength
     #: against the wheel's own diameter and the tip-passing pitch.
     washboard_wavelength_m: float = 0.10
+    #: Scenario **S2**: uphill gradient, degrees, positive = climbing. Implemented by
+    #: tilting **gravity**, not the floor: for a robot driving straight up a plane the two
+    #: are the same physics, and a tilted-floor version would spend its run on the ramp's
+    #: entry transient — the same argument as the washboard's trough entry, resolved by
+    #: having no entry at all. The metric is sustained speed at the gradient; the sweep
+    #: over gradients finds S2's "max sustained gradient".
+    slope_deg: float = 0.0
+    #: Scenario **S3**: width of a gap in the ground, metres. The floor becomes two ground
+    #: boxes with a 150 mm-deep trench between them, near edge at ``step_x_m``. Exactly 0
+    #: means no gap. A wheel that drops in stays in — that is the failure being measured.
+    gap_width_m: float = 0.0
+    #: Scenario **S4**: characteristic rock size of a procedural rubble strip, metres,
+    #: measured as the tallest protrusion above grade. Exactly 0 means no rubble. The
+    #: field is generated from ``rubble_seed`` alone, so a seed **is** a terrain
+    #: (invariant 7's terrain axis) and the same seed is bit-identical across runs.
+    rubble_height_m: float = 0.0
+    rubble_seed: int = 0
+    #: Scenario **S6** (the spin-in-place proxy, decision 2026-08-11): command the left
+    #: and right sides in opposite directions and measure yaw rate and the energy it
+    #: costs. **Quarantined by #38**: the ring is laterally quasi-rigid by structure
+    #: (``(w/t)²``) but patch-level scrub of discrete tips is validated against nothing,
+    #: so this number ranks designs only after #38's checks land.
+    spin: bool = False
     #: Ground friction. 1.0 is TPU on concrete — generous, deliberately: a climb that fails
     #: on traction says nothing about the wheel.
     friction: float = 1.0
@@ -343,6 +366,28 @@ class RoverSpec:
                     "climbing would be about the step (see the flat-ground note on "
                     "harshness_rms_m_s2). Run them separately"
                 )
+        if not -45.0 <= self.slope_deg <= 45.0:
+            raise ValueError(
+                f"slope_deg {self.slope_deg} is outside ±45°: S2's sweep stops at 40° and "
+                "past 45 the 'floor' is more wall than ground — nothing here means that"
+            )
+        if self.gap_width_m < 0.0 or self.rubble_height_m < 0.0:
+            raise ValueError("gap_width_m and rubble_height_m must be non-negative")
+        # One scenario per run. The suite scores S1-S8 as separate rows (invariant 7);
+        # a mixture is a scenario nothing defines and its metrics would be about neither.
+        active = [name for name, on in (
+            ("S1 step", self.step_height_m > 0.0),
+            ("S2 slope", self.slope_deg != 0.0),
+            ("S3 gap", self.gap_width_m > 0.0),
+            ("S4 rubble", self.rubble_height_m > 0.0),
+            ("S6 spin", self.spin),
+            ("S7 washboard", self.washboard_amplitude_m > 0.0),
+        ) if on]
+        if len(active) > 1:
+            raise ValueError(
+                f"{' + '.join(active)} in one run is a scenario nothing defines; the suite "
+                "scores them separately. Drop all but one"
+            )
 
     def motor_torque_n_m(self, platform: PlatformSpec, axle_rate_rad_s: float) -> float:
         """The platform's own linear torque-speed curve, clipped to forward drive.
@@ -422,7 +467,19 @@ class RoverResult:
     #: question: how far past its measured range the segment law was asked to extrapolate.
     peak_compression_m: float = 0.0
     #: (time, x, z, pitch, roll, vertical acceleration) per step.
-    history: np.ndarray = field(default_factory=lambda: np.empty((0, 6)))
+    #: Scenario S3/S4: whether the chassis traversed the gap or the rubble strip and stands
+    #: at ride height on the far side. False on every other scenario — the step has
+    #: ``climbed``, and a flat run has nothing to have crossed.
+    crossed: bool = False
+    #: Scenario S6: mean |yaw rate| over the steady window, rad/s. 0 on straight runs.
+    yaw_rate_rad_s: float = 0.0
+    #: Scenario S5 (objective 2): dimensionless cost of transport over the driving phase,
+    #: ``E / (m g d)``. 0 when the robot moved too little for the ratio to mean anything
+    #: (< 0.2 m). On compliant wheels this inherits the `TPU_LOSS_FACTOR` caveat wholesale:
+    #: the loss factor is a literature midpoint, so quote CoT comparisons, not absolutes.
+    cost_of_transport: float = 0.0
+    #: (time, x, z, pitch, roll, vertical acceleration, yaw) per step.
+    history: np.ndarray = field(default_factory=lambda: np.empty((0, 7)))
 
 
 #: Boxes per washboard wavelength. Eight puts the sampling error at
@@ -471,6 +528,83 @@ def _washboard_geoms(scenario: RoverSpec, reach_m: float, half_width_m: float) -
             f'{half_h:.9f}" contype="1" conaffinity="{GROUND_CONAFFINITY}" '
             'material="stepmat"/>'
         )
+    return geoms
+
+
+#: Depth of S3's trench, metres. Deeper than any wheel in the envelope (R ≤ 90 mm), so a
+#: wheel that drops in cannot climb back out — falling in IS the failure being measured,
+#: and a shallow trench would let momentum disguise it as a bump.
+GAP_DEPTH_M = 0.15
+
+#: S4's rubble strip length, metres, and its rock spacing as a multiple of rock size.
+#: 1.2 m is 4–5 body lengths — enough that a lucky line through the field does not exist —
+#: and spacing 2.5 keeps rocks distinct rather than merging into a second washboard.
+RUBBLE_STRIP_M = 1.2
+RUBBLE_SPACING = 2.5
+
+
+def _gap_geoms(scenario: RoverSpec, reach_m: float, half_width_m: float) -> list[str]:
+    """S3: the floor as two ground slabs with a trench between them.
+
+    Replaces the infinite floor plane entirely (a plane cannot have a hole in it). The near
+    slab runs from behind the robot to the gap's near edge at ``step_x_m``; the far slab
+    from the far edge to beyond reach; a trench bottom sits ``GAP_DEPTH_M`` down so a wheel
+    that drops in lands on something and the failure is a robot in a trench, not a fall
+    through the world.
+    """
+    if scenario.gap_width_m <= 0.0:
+        return []
+    near_edge, far_edge = scenario.step_x_m, scenario.step_x_m + scenario.gap_width_m
+    slab_h = 0.05
+    near_half = 0.5 * (near_edge + 1.0)
+    far_half = 0.5 * (reach_m + 1.0)
+    return [
+        (f'    <geom name="ground_near" type="box" pos="{near_edge - near_half:.9f} 0 '
+         f'{-slab_h:.9f}" size="{near_half:.9f} {half_width_m:.9f} {slab_h:.9f}" '
+         f'contype="1" conaffinity="{GROUND_CONAFFINITY}" material="floormat"/>'),
+        (f'    <geom name="ground_far" type="box" pos="{far_edge + far_half:.9f} 0 '
+         f'{-slab_h:.9f}" size="{far_half:.9f} {half_width_m:.9f} {slab_h:.9f}" '
+         f'contype="1" conaffinity="{GROUND_CONAFFINITY}" material="floormat"/>'),
+        (f'    <geom name="gap_bottom" type="box" pos="{0.5 * (near_edge + far_edge):.9f} 0 '
+         f'{-GAP_DEPTH_M - slab_h:.9f}" size="{0.5 * scenario.gap_width_m:.9f} '
+         f'{half_width_m:.9f} {slab_h:.9f}" contype="1" '
+         f'conaffinity="{GROUND_CONAFFINITY}" material="stepmat"/>'),
+    ]
+
+
+def _rubble_geoms(scenario: RoverSpec, half_width_m: float) -> list[str]:
+    """S4: a procedural rock field, generated from ``rubble_seed`` and nothing else.
+
+    Rocks are randomly sized, yawed and half-buried boxes on a jittered grid over a
+    ``RUBBLE_STRIP_M`` strip starting at ``step_x_m``. Everything comes from one
+    ``default_rng(seed)`` in one fixed draw order, so the same seed is the same terrain
+    to the bit (the terrain axis of invariant 7), and the XML string still IS the model.
+    ``rubble_height_m`` is the tallest protrusion above grade; individual rocks draw
+    0.3–1.0 of it.
+    """
+    h = scenario.rubble_height_m
+    if h <= 0.0:
+        return []
+    rng = np.random.default_rng(scenario.rubble_seed)
+    pitch = RUBBLE_SPACING * h
+    n_x = max(2, int(RUBBLE_STRIP_M / pitch))
+    n_y = max(2, int(2.0 * half_width_m / pitch))
+    geoms = []
+    for i in range(n_x):
+        for j in range(n_y):
+            cx = scenario.step_x_m + (i + 0.5) * pitch + rng.uniform(-0.3, 0.3) * pitch
+            cy = -half_width_m + (j + 0.5) * pitch + rng.uniform(-0.3, 0.3) * pitch
+            half = rng.uniform(0.3, 0.5, size=3) * h
+            # Protrusion above grade: a fraction of the rock's own height, so the bottom is
+            # always buried (a floating rock would be a step with no support under it).
+            proud = rng.uniform(0.3, 0.9) * 2.0 * half[2]
+            yaw = rng.uniform(0.0, np.pi)
+            geoms.append(
+                f'    <geom name="rock{i}_{j}" type="box" pos="{cx:.9f} {cy:.9f} '
+                f'{proud - half[2]:.9f}" size="{half[0]:.9f} {half[1]:.9f} '
+                f'{half[2]:.9f}" euler="0 0 {yaw:.6f}" contype="1" '
+                f'conaffinity="{GROUND_CONAFFINITY}" material="stepmat"/>'
+            )
     return geoms
 
 
@@ -590,7 +724,13 @@ def build_rover_mjcf(
     parts = [
         '<mujoco model="rover">',
         '  <compiler angle="radian"/>',
-        ('  <option gravity="0 0 -9.81" integrator="implicitfast" '
+        # S2 tilts GRAVITY rather than the floor: driving up an infinite plane and driving
+        # on flat ground under rotated gravity are the same physics, and this version has
+        # no ramp-entry transient to contaminate the steady window. Positive slope_deg
+        # means climbing, so gravity leans BACKWARD (-x).
+        (f'  <option gravity="{-9.81 * np.sin(np.deg2rad(scenario.slope_deg)):.9g} 0 '
+         f'{-9.81 * np.cos(np.deg2rad(scenario.slope_deg)):.9g}" '
+         'integrator="implicitfast" '
          f'timestep="{scenario.timestep_s:.9g}"/>'),
         "  <default>",
         (f'    <geom friction="{scenario.friction:.4g} 0.005 0.0001" '
@@ -625,8 +765,16 @@ def build_rover_mjcf(
         "  <worldbody>",
         '    <light pos="0 -2 3" dir="0 0.4 -1" directional="true" diffuse="0.7 0.7 0.7"/>',
         '    <light pos="2 -1.5 2" dir="-0.5 0.3 -1" diffuse="0.35 0.35 0.35"/>',
-        (f'    <geom name="floor" type="plane" size="8 3 0.1" contype="1" '
-         f'conaffinity="{GROUND_CONAFFINITY}" material="floormat"/>'),
+        # S3 replaces the floor entirely: a plane is infinite and cannot have a hole in it,
+        # so the gap scenario builds its ground from two slabs plus a trench bottom.
+        *([(f'    <geom name="floor" type="plane" size="8 3 0.1" contype="1" '
+            f'conaffinity="{GROUND_CONAFFINITY}" material="floormat"/>')]
+          if scenario.gap_width_m <= 0.0 else
+          _gap_geoms(scenario, reach, step_half_width)),
+        # The rubble strip is narrower than the step's safety width: rock count grows as
+        # 1/size², and 0.45 m half-width covers the widest track plus the ±15° drift over
+        # the strip's own length without emitting rocks nothing can reach.
+        *_rubble_geoms(scenario, min(step_half_width, 0.45)),
         # The step runs to beyond anything the robot can reach in the time allowed, so it is
         # an upper *ground* rather than a platform. Sized rather than fixed at 2 m: a robot
         # doing 1.15 m/s for 6 s covers 6.9 m, and a 4 m step let it climb, cross, and drive
@@ -904,7 +1052,11 @@ def observe_rover(
 
     n_steps = int(scenario.duration_s / scenario.timestep_s)
     settle_steps = int(scenario.settle_s / scenario.timestep_s)
-    history = np.zeros((n_steps, 6), dtype=np.float64)
+    history = np.zeros((n_steps, 7), dtype=np.float64)
+    # +1 drives forward; S6 flips the right side. `WheelMount.side` is +1 left / -1 right,
+    # so a positive spin command yaws the robot toward +z (left turn), matching the sign
+    # convention `yaw` is read with below.
+    drive_signs = np.array([float(m.side) if scenario.spin else 1.0 for m in mounts])
     energy = 0.0
     hit_step = False
     # The ROM's validity envelope, counted rather than assumed (TODO #31). A segment only
@@ -933,8 +1085,15 @@ def observe_rover(
             if k < settle_steps:
                 torques = np.zeros(len(mounts))
             else:
-                torques = np.array([scenario.motor_torque_n_m(platform, float(w))
-                                    for w in rates])
+                # S6 spins in place: each side is commanded in its own direction, so the
+                # motor curve sees the rate THROUGH that side's sign — a left wheel doing
+                # +6 rad/s and a right wheel doing -6 rad/s are both at full working speed,
+                # and passing the raw rate would drive the reversed side at stall torque
+                # forever (its curve would read -6 rad/s as 190% headroom, clipped to 1).
+                torques = np.array([
+                    drive * scenario.motor_torque_n_m(platform, drive * float(w))
+                    for drive, w in zip(drive_signs, rates)
+                ])
             data.ctrl[:] = torques
             mujoco.mj_step(model, data)
             if observer is not None:
@@ -946,9 +1105,10 @@ def observe_rover(
             rot = data.xmat[chassis].reshape(3, 3)
             pitch = float(np.arctan2(-rot[2, 0], np.hypot(rot[2, 1], rot[2, 2])))
             roll = float(np.arctan2(rot[2, 1], rot[2, 2]))
+            yaw = float(np.arctan2(rot[1, 0], rot[0, 0]))
             history[k] = (data.time, float(data.xpos[chassis, 0]),
                           float(data.xpos[chassis, 2]), pitch, roll,
-                          float(data.qacc[root_z_dof]))
+                          float(data.qacc[root_z_dof]), yaw)
             if segmented and k >= settle_steps:
                 # `qpos` is signed and a compressed segment sits at negative coordinate, the
                 # same convention `qfrc_applied` is written with above.
@@ -981,13 +1141,14 @@ def observe_rover(
     return _summarise(platform, scenario, history, settle_steps, energy, hit_step,
                       n_tips=0 if spec is None else spec.n_segments,
                       wheel_radius_m=wheel_radius_m, wheel_width_m=wheel_width_m,
+                      wheel_mass_kg=wheel_mass_kg,
                       multi_contact_fraction=multi_contact_steps / driving_steps,
                       peak_compression_m=peak_compression)
 
 
 def _summarise(platform, scenario, history, settle_steps, energy_j, hit_step, *,
                n_tips: int = 0, wheel_radius_m: float = 0.0, wheel_width_m: float = 0.0,
-               multi_contact_fraction: float = 0.0,
+               wheel_mass_kg: float = 0.0, multi_contact_fraction: float = 0.0,
                peak_compression_m: float = 0.0) -> RoverResult:
     """Turn the history into the handful of numbers worth quoting."""
     x, z = history[:, 1], history[:, 2]
@@ -1033,10 +1194,39 @@ def _summarise(platform, scenario, history, settle_steps, energy_j, hit_step, *,
     # and reporting `climbed=True` for it would be true of a sentence nobody asked. There is
     # no obstacle, so there is nothing to have climbed.
     climbed = bool(np.any(on_top[driving])) and scenario.step_height_m > 0.0
+
+    # S3/S4: traversed means the whole body is past the far edge of the hazard AND standing
+    # at ride height — the same two-part predicate as `climbed`, because the same two lies
+    # are available (a nose over the gap; a robot perched on a rock at the strip's end).
+    far_edge = scenario.step_x_m + (scenario.gap_width_m if scenario.gap_width_m > 0.0
+                                    else RUBBLE_STRIP_M)
+    past = ((x > far_edge + 0.5 * platform.chassis_length_m)
+            & (np.abs(z - ride) < 0.2 * ride))
+    crossed = (bool(np.any(past[driving]))
+               and (scenario.gap_width_m > 0.0 or scenario.rubble_height_m > 0.0))
+
+    # S6: mean |yaw rate| over the steady window, from the unwrapped yaw trace — a spin
+    # accumulates many revolutions, and a naive diff would count each ±π crossing as a
+    # 2π jerk in the other direction.
+    yaw_rate = 0.0
+    if span_s > 0.0 and len(history) > steady_from + 1:
+        yaw_unwrapped = np.unwrap(history[steady, 6])
+        yaw_rate = float(abs(yaw_unwrapped[-1] - yaw_unwrapped[0]) / span_s)
+
+    # S5, objective 2: cost of transport E/(m g d) over the whole driving phase. Distance
+    # uses net forward progress; below 0.2 m the ratio measures the launch squat, not the
+    # wheel, and is reported as 0 rather than as a large plausible number.
+    distance = float(np.max(x) - x[settle_steps])
+    total_kg = platform.chassis_mass_kg + 4.0 * wheel_mass_kg
+    cot = (float(energy_j) / (total_kg * 9.81 * distance)
+           if distance > 0.2 and total_kg > 0.0 else 0.0)
     return RoverResult(
         ok=True,
         climbed=climbed,
-        distance_m=float(np.max(x) - x[settle_steps]),
+        crossed=crossed,
+        yaw_rate_rad_s=yaw_rate,
+        cost_of_transport=cot,
+        distance_m=distance,
         final_clearance_m=clearance,
         peak_pitch_rad=peak_pitch,
         peak_roll_rad=peak_roll,

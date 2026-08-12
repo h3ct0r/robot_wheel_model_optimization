@@ -4063,3 +4063,39 @@ not by the terrain — it has decoupled from the corrugation, which is what comp
 for, measured. Caveats: 9–27% multi-claw sharing (#31's regime, printed per run), and no
 terrain seeds yet — the grid is one deterministic corrugation per cell; seeds × CVaR
 remain #33's residue.
+
+---
+
+## 2026-08-12 — The scenario suite arrives: S2 slope, S3 gap, S4 rubble, S5 CoT, S6 spin
+
+Phase 2's first line item ("all scenarios") built early, on `sim/rover.py`, following S7's
+pattern: one scenario per run, any mixture refused by name. First measurements, all rigid
+R 60 at the platform's own drivetrain:
+
+- **S2 (slope)** tilts **gravity**, not the floor — same physics as an infinite ramp with
+  no entry transient to contaminate the steady window. Holds 10° at 0.38 m/s; at 40° it is
+  a **traction-limited backslide** (−10 m/s runaway: stall tractive force is 400 N but
+  μ·mg·cosθ is ~69 N, the wheels saturate and spin). The sweep for "max sustained
+  gradient" sits between; μ is the scenario's real variable.
+- **S3 (gap)**: the floor becomes two slabs and a 150 mm trench (a plane cannot have a
+  hole). 40 mm crossed; 200 mm swallows a wheel and the run ends in the trench — falling
+  in IS the failure, and the trench is deeper than any wheel in the envelope so momentum
+  cannot disguise it.
+- **S4 (rubble)**: a procedural 1.2 m rock field where **the seed is the terrain** —
+  bit-identical per seed, different per seed, by test; every rock buried and none taller
+  than asked (a floating rock is a step with nothing under it). Rigid R 60 traverses
+  30 mm rubble at 0.41–0.43 m/s on two seeds; needs ~8+ s of run to reach the far side.
+- **S5 (cost of transport)**: `E/mgd` on every run that moves ≥ 0.2 m. Rigid on flat:
+  **0.01** (a cylinder on a plane is nearly free, as it must be — the anti-soft floor);
+  climbing 10°: **0.18**. Compliant CoT inherits `TPU_LOSS_FACTOR`'s caveat wholesale.
+- **S6 (spin proxy)**: opposite-side drive through each side's own motor curve (the sign
+  goes through the curve too, or the reversed side reads 190% headroom and stalls at full
+  torque forever). Rigid R 60 at track 225: **6.8°/s** steady yaw for 45.6 J of scrub —
+  slow, as skid-steer on μ=1 with wheelbase > track should be. **Quarantined by #38**: the
+  number is real physics of the friction cone, and the friction cone is exactly what is
+  unvalidated.
+
+Found on the way: history gained a yaw column (7 wide now), and `motor_torque_n_m` is
+applied through each wheel's drive sign so a reversed side sees its own speed. What the
+suite still lacks: S5's dedicated 10 m sprint protocol, S8's duration/fatigue half, and
+the seeds×CVaR aggregation over scenarios — Phase 2's remaining half. Suite 858 green.
