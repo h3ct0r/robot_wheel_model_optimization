@@ -178,7 +178,7 @@ def main(argv: list[str] | None = None) -> int:
               f"      the platform's {nominal:.1f} N per wheel sits at {where}")
 
     fit_max = float(np.max(fit.delta_m))
-    # Sit the wheel at half its fitted indentation. Loading it to the platform's 24.5 N when
+    # Sit the wheel at half its fitted indentation. Loading it to the platform's ~20 N when
     # the fit only reaches a few newtons would make every number below an extrapolation, and
     # the run would be answering a question about the cubic rather than about compliance.
     design_delta = 0.5 * fit_max

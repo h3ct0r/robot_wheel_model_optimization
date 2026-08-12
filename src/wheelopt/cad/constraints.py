@@ -448,7 +448,7 @@ def check_design(
         # wheel's range, and the answer came out the *opposite* way to the one anticipated:
         # a passive claw wheel wants **more** claws, not fewer.
         #
-        # Measured 2026-08-09 on R 85 mm at the platform's 24.5 N, two claws an order of
+        # Measured 2026-08-09 on R 85 mm at the then-nominal 24.5 N, two claws an order of
         # magnitude apart in stiffness (3.7 and 13.5 N/mm): the axle's peak-to-peak movement
         # over one pitch reaches the wheel's own static deflection — i.e. the trailing claw
         # leaves the ground entirely once per pitch — at **n = 10 to 12** on both, and needs

@@ -1,8 +1,9 @@
 # robot_wheel_model_optimization
 
-Automatic optimisation of the 3D layout of **compliant (TPU) wheels** for a mobile
-terrestrial robot — a 400 × 300 × 200 mm, ~10 kg four-wheel skid-steer platform carrying
-24.5 N per wheel.
+Automatic optimisation of the 3D layout of wheels — **rigid (PLA/PETG) and compliant
+(TPU), both candidates** — for a real, measured mobile robot: a 426 × 231 × 187 mm, 8.5 kg
+four-wheel skid-steer pipe robot on Dynamixel MX-64 servos, carrying 20.6 N per wheel
+(`configs/pipebot_detailed.stl`; `configs/robot.yaml` is the spec).
 
 A parametric CAD model generates candidate wheels. Each is characterised by offline FEA,
 reduced to a fast lumped-parameter ring model, and evaluated in closed-loop dynamic
@@ -17,8 +18,10 @@ with a glossary of every acronym. No prior knowledge assumed.
 built. Current family is the `T7` compliant claw. The headline that matters now is the
 **washboard**: a compliant twelve-claw wheel beats the rigid cylinder **4.8–6.9×** on ride
 harshness at every wavelength tested, at equal speed. (The spike's old "50 mm vs 20 mm" step
-number was superseded twice — it was a banded design on a single-wheel rig, and on the full
-four-wheel robot the step metric saturates; see `docs/plan/TODO.md` #30/#33.) The ROM's
+number was superseded twice — it was a banded design on a single-wheel rig.) On the
+measured platform the rover's step ladder separates compliant from rigid (claws 1.00 R
+against the cylinder's 0.67 R) but not claw counts from each other; within the family,
+harshness ranks — see `docs/plan/TODO.md` #30/#33. The ROM's
 validity envelope is measured and printed on every run. Open items are numbered in
 [`docs/plan/TODO.md`](docs/plan/TODO.md).
 
@@ -27,7 +30,7 @@ validity envelope is measured and printed on every run. Open items are numbered 
 ```bash
 source /opt/homebrew/Caskroom/miniforge/base/etc/profile.d/conda.sh
 conda activate conda3.12
-python -m unittest discover -s tests -t .          # 824 tests, ~50 s
+python -m unittest discover -s tests -t .          # ~850 tests, ~50 s
 python scripts/explore.py --spokes 8 --no-sim      # a design → one HTML page
 ```
 
@@ -159,8 +162,9 @@ python scripts/gen_wheel.py --radius 85 --spokes 12 --profile curved --out data/
 python scripts/run_fea.py --dry-run --tiny --case flat --case step_edge
 
 # FEA on the fast 2-D screening tier. Seconds, not hours.
+# (the softened contact penalty this tier once needed by hand is the default since #12)
 python scripts/run_fea.py --plane-strain --size-spoke 0.0025 --size-rim 0.003 \
-    --size-hub 0.002 --contact-stiffness 5 --case flat --plot-pdf
+    --size-hub 0.002 --case flat --plot-pdf
 
 # Fit the segmented ring to the FEA curve, and optionally press it in MuJoCo.
 python scripts/run_rom.py --tiny --mujoco
@@ -168,8 +172,13 @@ python scripts/run_rom.py --tiny --mujoco
 # Drive the fitted ring at a step beside a rigid wheel; judge the five signatures.
 python scripts/run_step.py --tiny --sweep
 
-# The whole robot — chassis, four driven wheels — at an obstacle, filmed.
+# The whole robot — chassis, four driven wheels, its own shell drawn over the
+# contact box — at an obstacle, filmed. --chassis-collision primitives swaps the
+# calibrated box for the shapes of the simplified model (a physics change).
 python scripts/run_rover.py --obstacle-height 80 --radius 85 --render
+
+# Scenario S7: a washboard, where compliance beats rigid on harshness.
+python scripts/run_rover.py --obstacle-height 0 --washboard 10 --wavelength 100 --radius 60
 
 # Render the step climb: GIF plus a compliant-vs-rigid contact sheet.
 python scripts/render_step.py --tiny

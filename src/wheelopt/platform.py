@@ -299,7 +299,7 @@ class PlatformSpec:
         the stated CG offset. The stability objective (`08-metrics.md` objective 5) scores
         peak excursions against these.
 
-        **Chassis-only, and that is the conservative side.** The wheels (~1.2 kg of a 10 kg
+        **Chassis-only, and that is the conservative side.** The wheels (~1.2 kg of a ~9 kg
         robot) sit at axle height, below the chassis CG, so the true combined CG is lower and
         the true critical angles larger than these. A margin computed against this pair
         under-reports safety rather than over-reporting it.

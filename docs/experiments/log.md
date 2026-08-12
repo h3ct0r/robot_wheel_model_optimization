@@ -3978,3 +3978,31 @@ the bench robot can.
 
 Follow-up worth its own run: with the ladder de-saturated, re-run the #33 four-design
 comparison — the rover step sweep may now rank wheels after all.
+
+---
+
+## 2026-08-11 — The de-saturated ladder ranks compliance, still not claw count — and the element is worth a full bucket pair
+
+Re-ran the #33 four-design comparison on the measured platform's step ladder (R 60, radial
+element for every compliant design, since the hinge geometrically cannot exist below ~12
+segments — a refusal which, on the way, was found escaping `observe_rover` as a raw
+ValueError and now returns a typed failure, invariant 4, test pinned).
+
+| design | tallest cleared | validity at the ceiling |
+|---|---|---|
+| rigid cylinder | **40 mm (0.67 R)** | clean |
+| 3-claw, radial | ≥ 50 tested | EXTRAPOLATED 2.4× — unquotable |
+| 6-claw, radial | **60 mm (1.00 R)** | peak compression 10.99 < 12.0 mm — inside the law |
+| 12-claw, radial | **60 mm (1.00 R)** | 60 mm rung extrapolated 1.6× |
+| 12-claw, hinge | **40 mm** (stalls at 50, 303 J, 69% sharing) | outside every bound |
+
+Three sentences of result. **Compliance now separates from rigid on the rover** — +20 mm,
+0.33 R, and the 6-claw does it inside its measured law, the first rover-level claw-vs-rigid
+gap that survives the project's own validity rules. **Claw count still does not separate**
+(6 and 12 tie at 60, both fail 70): ranking within the family remains harshness/washboard
+work. And **the element is worth the whole gap**: the same 12-claw wheel reads 60 mm on
+radial slides and 40 mm on root hinges — the sharpest expression yet of #31's straddle,
+now in the ladder's own units. Tangentially-rigid claws hook the edge; hinged claws fold
+backward and grind. Which one the printed wheel does is exactly what the bench press and a
+step-edge hardware test decide (ADR-0008), and until then a rover claw-climb number is
+quoted with its element.

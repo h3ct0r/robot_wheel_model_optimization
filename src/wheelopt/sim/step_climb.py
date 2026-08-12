@@ -124,8 +124,8 @@ class RigSpec:
     #: the wheel 41 m away at 3 s and still accelerating, which makes cost of transport
     #: meaningless and every contact metric a measurement of a wheel in flight. A real motor
     #: also stalls at its stall torque against an obstacle, which is exactly the quantity the
-    #: climbing question is about. ``configs/robot.yaml`` gives 14 rad/s at the output on the
-    #: nominal wheel, i.e. 1.19 m/s; 0.4 is the platform's stated target speed.
+    #: climbing question is about. ``configs/robot.yaml`` gives 6.6 rad/s at the output —
+    #: 0.40 m/s on an R 60 wheel, 0.56 at R 85 — so 0.4 is the drivetrain's real scale.
     no_load_speed_m_s: float = 0.4
     #: Ground friction. 1.0 is TPU on concrete, which is generous and deliberately so: a
     #: climb that fails on traction says nothing about compliance.

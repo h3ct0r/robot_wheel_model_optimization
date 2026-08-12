@@ -132,6 +132,19 @@ These arrived with the `T7` redirection on 2026-08-08 and are listed in that log
 
 ### #30 — Re-run the compliant-versus-rigid comparison on the rover, not the test rig
 
+**Update 2026-08-11, after the platform adoption: the re-run happened and the ladder now
+separates compliance — but not the element.** The measured platform de-saturated the sweep
+(the old all-designs-clear-1.00R was the fictional robot's 1.19 m/s of momentum; the
+measured 0.40 m/s robot's rigid cylinder clears **40 mm, 0.67 R**). On that ladder, at
+matched mass/radius/inertia: the claw family clears **60 mm (1.00 R)** on radial slides —
+the 6-claw inside its measured law (10.99 < 12.0 mm) — so **compliance buys +0.33 R on the
+rover**, the first rover-level gap that survives the validity rules. Two things keep this
+item open rather than closed: claw *count* still does not separate (6 and 12 tie; ranking
+within the family stays with harshness/washboard), and the **element is worth the whole
+gap** — the same 12-claw wheel reads 60 mm radial and 40 mm hinged (stalls at 50 grinding
+303 J at 69% sharing). That 20 mm is #31's straddle expressed in ladder buckets; the
+hardware step-edge test decides it. Log entry of the same date.
+
 Opened 2026-08-10 by the four-wheel rigid rover, which climbs **three times** what the same
 rigid wheel climbs on the single-wheel rig: 1.00 R against 0.33 R at R 60 mm, and 1.06-1.18 R
 at R 85 mm. Nothing about the wheel changed; three other driven wheels push while one climbs.
@@ -260,6 +273,11 @@ higher speed, and the metric orders rigid > 3-claw > 12-claw the right way round
 travels with it: 20–53% of those runs have two claws sharing (the #31 element gap), so the
 **sign** is the result and the second digit is not. Still open here: the amplitude x wavelength
 *sweep* S7 specifies (this measured one amplitude), and terrain seeds over it.
+**Amendment 2026-08-11 (adoption):** the "step climb cannot rank" premise softened — the
+measured platform de-saturates the ladder (rigid 0.67 R, claws 1.00 R, see #30), so the step
+sweep now separates compliant from rigid. What it still cannot do is rank *within* the claw
+family, which remains this item's harshness/washboard job. Pre-adoption S7 ratios were
+measured on the fictional platform and need re-measuring with the sweep.
 
 Original statement follows.
 

@@ -14,8 +14,9 @@ python scripts/run_rover.py --help
 > **Read the climb number next to the single-wheel rig's, not instead of it.**
 > `run_step.py` asks what one wheel does with a dead weight on it; this asks what four driven
 > wheels and a rigid chassis do together. The second flatters a rigid wheel enormously,
-> because three wheels push while one climbs. A rigid wheel clears **1.00 R** here against
-> **0.33 R** on the rig — see `docs/plan/TODO.md` #30.
+> because three wheels push while one climbs. A rigid wheel clears **0.67 R** here against
+> **0.33 R** on the rig (it was 1.00 R on the pre-adoption platform, whose 1.19 m/s of
+> approach momentum saturated the ladder) — see `docs/plan/TODO.md` #30.
 
 ---
 
@@ -404,8 +405,8 @@ half-length past the face *and* within a fifth of its ride height of where it wo
   standing on the step; near minus the obstacle height means it never left the floor.
 - **`peak roll`** should be ~0 on a square approach. Non-zero there means the solver, not the
   terrain.
-- **`chassis hit step`** is bellying out rather than climbing — a real outcome at 70 mm of
-  ground clearance, not an error.
+- **`chassis hit step`** is bellying out (or nosing in) rather than climbing — a real
+  outcome for a belly at `R + 7.5 mm`, not an error.
 
 Exit codes: `0` cleared (or `--sweep` finished), `1` did not clear or the run failed, `2` a
 dependency or a config file is missing.
@@ -413,7 +414,7 @@ dependency or a config file is missing.
 ### `--sweep`
 
 ```
-  rigid           60 mm  [######......] 10-120 mm  (1.00 R)
+  rigid           40 mm  [####........] 10-120 mm  (0.67 R)
                           │└──────────── did not clear
                           └───────────── cleared
                                           ↑ ladder span, then the answer as a fraction of R
@@ -433,8 +434,10 @@ value is at least the reported one.
 
 `--obstacle-height 0` emits **no obstacle at all** and measures **objective 3** from
 `docs/plan/08-metrics.md`: RMS vertical chassis acceleration. It exists because the step-climb
-number on this robot does not discriminate between wheels — three driven wheels push while one
-climbs, and a 3-claw wheel, a 12-claw wheel and a plain rigid cylinder all clear 1.00 R.
+number on this robot discriminates only coarsely — three driven wheels push while one
+climbs. On the measured platform the ladder separates compliant from rigid (claws 1.00 R
+against the cylinder's 0.67 R, 2026-08-11) but still not claw counts from each other: 6 and
+12 claws tie. Within the family, harshness is the axis.
 
 A bandless wheel runs on discrete tips, so it is a **polygon**, and the axle rises and falls
 once per tip. That is the cost compliance is supposed to buy back:
@@ -562,12 +565,14 @@ python scripts/run_rover.py --compliant --radius 60 --rim-thickness 0 --spokes 3
     --thickness 6 --claw-taper 0.6 --spoke-phase -90 --plane-strain --law claw --sweep
 ```
 
-That last one clears **exactly what a 12-claw wheel and a plain rigid cylinder clear** —
-1.00 R for all three. That is not a null result about wheel design; it is the rover's
-step-climb metric saturating, because three driven wheels push while one climbs. It is the
-same effect recorded as TODO #30, and it is why the single-wheel rig still exists — and why
-the same three wheels are separated 4.5× by [flat ground](#flat-ground-the-harshness-scenario)
-instead.
+On the pre-adoption platform that last one cleared **exactly what a 12-claw wheel and a
+plain rigid cylinder clear** — 1.00 R for all three, the step-climb metric saturating on
+approach momentum. The measured platform (2026-08-11) de-saturated it: the rigid cylinder
+drops to 0.67 R and the claws hold 1.00 R, so compliant-vs-rigid now separates — but 3, 6
+and 12 claws still tie with each other (and the 3-claw number is 2.4× extrapolated past its
+law). Ranking *within* the family is still the job of
+[flat ground](#flat-ground-the-harshness-scenario) and the washboard, which separate the
+same wheels 4.5×. TODO #30 has the full table.
 
 ---
 

@@ -75,7 +75,7 @@ __all__ = [
 #: trap. MuJoCo excludes contacts between a body and its *parent*, so a rigid tyre — a child of
 #: the chassis — never touches it. A segment's parent is the wheel and the wheel's parent is the
 #: chassis, which is a *grandparent* relationship and is **not** excluded. With R 60 mm wheels
-#: under 70 mm of ground clearance the top half of every wheel sits inside the chassis box, so
+#: with the belly at R + 7.5 mm the top of every wheel stands well inside the box, so
 #: every segment jammed against it and the axles could not turn: 28 contacts, 0.01 rad/s, and a
 #: robot that had settled to exactly the right ride height with exactly the right compression.
 #:
@@ -495,7 +495,7 @@ def build_rover_mjcf(
 
     ``spec`` alone gives **rigid** wheels carrying the *ring's* rotational inertia rather than
     a solid cylinder's — a solid cylinder has half a ring's, and four wheels' worth is a real
-    share of a 10 kg robot's resistance to acceleration, so the fairness argument the
+    share of a ~9 kg robot's resistance to acceleration, so the fairness argument the
     single-wheel rig makes matters more here rather than less. ``spec=None`` gives an honest
     solid cylinder, which is a different vehicle and should be labelled as one.
 
@@ -522,9 +522,9 @@ def build_rover_mjcf(
     system instead is precisely what ADR-0002 exists to prevent.
 
     The chassis is a box of the platform's own dimensions with the platform's own inertia,
-    on a free joint. It is a **contact geom**, not a decoration: a box with 70 mm of ground
-    clearance will belly out on a step taller than that, and watching it do so is most of why
-    this model exists.
+    on a free joint. It is a **contact geom**, not a decoration: a box whose belly rides at
+    `R + 7.5 mm` will belly out on a step taller than that, and watching it do so is most of
+    why this model exists.
 
     ``chassis_collision`` picks which chassis collides. ``"box"`` (the default) is the
     calibrated flat-bellied box above. ``"primitives"`` replaces it with the shapes read off
@@ -760,6 +760,37 @@ def build_rover_mjcf(
     return "\n".join(parts)
 
 
+def _segment_dynamics(platform, scenario, spec, law, tangential_law, element,
+                      wheel_mass_kg) -> tuple[float, float, RoverSpec]:
+    """Damping coefficients and the tightened timestep for four segmented rings.
+
+    ``(radial_damping, tangential_damping, scenario)``. May raise — the hinge arm does not
+    exist for every ring (too few segments puts the pivot beyond the axle) — and the caller
+    turns that into a typed ``RoverResult``, per invariant 4.
+    """
+    arm = hinge_arm_m(spec) if element == "hinge" else 0.0
+    # A hinge's coordinate is an angle, so the timestep bound and the damping equivalence
+    # are both applied to the law referred to the *tip* and the damping referred back.
+    equivalent_law = (TipEquivalentLaw(tangential_law, arm) if element == "hinge"
+                      else tangential_law)
+    segment_mass = (wheel_mass_kg - HUB_MASS_KG) / max(spec.n_segments, 1)
+    # `qfrc_applied` is an external force, so `implicitfast` integrates it explicitly and a
+    # stiff segment law diverges at the rover's default step. Tightened before the model is
+    # built, because the scenario carries the timestep into the MJCF.
+    scenario = replace(scenario, timestep_s=stable_timestep_s(
+        [law, equivalent_law], segment_mass, scenario.timestep_s))
+    # The payload one wheel carries: the whole robot on four wheels.
+    per_wheel_kg = (platform.chassis_mass_kg + 4.0 * wheel_mass_kg) / 4.0
+    radial_damping = segment_damping_n_s_per_m(
+        law, spec, per_wheel_kg, scenario.loss_factor)
+    tan_damping = 0.0 if tangential_law is None else tangential_damping(
+        spec, element,
+        segment_damping_n_s_per_m(equivalent_law, spec, per_wheel_kg,
+                                  scenario.loss_factor),
+    )
+    return radial_damping, tan_damping, scenario
+
+
 def observe_rover(
     platform: PlatformSpec,
     scenario: RoverSpec,
@@ -806,27 +837,17 @@ def observe_rover(
     element = resolve_tangential_element(tangential_law, tangential_element)
 
     radial_damping = tan_damping = 0.0
-    if segmented:
-        arm = hinge_arm_m(spec) if element == "hinge" else 0.0
-        # A hinge's coordinate is an angle, so the timestep bound and the damping equivalence
-        # are both applied to the law referred to the *tip* and the damping referred back.
-        equivalent_law = (TipEquivalentLaw(tangential_law, arm) if element == "hinge"
-                          else tangential_law)
-        segment_mass = (wheel_mass_kg - HUB_MASS_KG) / max(spec.n_segments, 1)
-        # `qfrc_applied` is an external force, so `implicitfast` integrates it explicitly and a
-        # stiff segment law diverges at the rover's default step. Tightened before the model is
-        # built, because the scenario carries the timestep into the MJCF.
-        scenario = replace(scenario, timestep_s=stable_timestep_s(
-            [law, equivalent_law], segment_mass, scenario.timestep_s))
-        # The payload one wheel carries: the whole robot on four wheels.
-        per_wheel_kg = (platform.chassis_mass_kg + 4.0 * wheel_mass_kg) / 4.0
-        radial_damping = segment_damping_n_s_per_m(
-            law, spec, per_wheel_kg, scenario.loss_factor)
-        tan_damping = 0.0 if tangential_law is None else tangential_damping(
-            spec, element,
-            segment_damping_n_s_per_m(equivalent_law, spec, per_wheel_kg,
-                                      scenario.loss_factor),
-        )
+    # Inside the same invariant-4 boundary as the build below: the hinge geometry can
+    # legitimately not exist (a 3-segment R 60 wheel's capsule radius exceeds its own claw
+    # root, so the pivot would sit beyond the axle), and that refusal reached a campaign as
+    # a raw ValueError from this very block on 2026-08-11. A design the ROM cannot realise
+    # is a typed failure, not a crash.
+    try:
+        radial_damping, tan_damping, scenario = _segment_dynamics(
+            platform, scenario, spec, law, tangential_law, element,
+            wheel_mass_kg) if segmented else (0.0, 0.0, scenario)
+    except Exception as exc:  # noqa: BLE001 - an unrealisable ring is a result
+        return RoverResult(ok=False, message=f"{type(exc).__name__}: {exc}")
 
     try:
         xml = build_rover_mjcf(platform, scenario, wheel_radius_m=wheel_radius_m,

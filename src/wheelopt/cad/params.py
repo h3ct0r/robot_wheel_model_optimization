@@ -42,9 +42,9 @@ class WheelParams:
     """
 
     # --- primary geometry -------------------------------------------------------------
-    #: Defaults are the *nominal* design for the platform in ``configs/robot.yaml``: a
-    #: 400 x 300 x 200 mm, 10 kg four-wheel skid-steer rover carrying 24.5 N per wheel.
-    #: They are sized to survive that load, not to be optimal — see the note on
+    #: Defaults are the *nominal* design for the platform in ``configs/robot.yaml``: the
+    #: measured 426 x 231 x 187 mm, 8.5 kg pipe robot carrying 20.6 N per wheel on MX-64
+    #: horns. They are sized to survive that load, not to be optimal — see the note on
     #: ``spoke_thickness_mm``.
     outer_radius_mm: float = 85.0
     width_mm: float = 45.0
@@ -61,8 +61,8 @@ class WheelParams:
     # --- spoke structure --------------------------------------------------------------
     n_spokes: int = 12
     #: 7 mm is thick for a "compliant" spoke, and it is what the load demands. Euler
-    #: buckling of one spoke goes as t^3/L^2, so at a 60 mm span the 24.5 N wheel load —
-    #: 61 N at the 2.5x margin the buckling constraint asks for — needs 6-8 mm. Thickening
+    #: buckling of one spoke goes as t^3/L^2, so at a 60 mm span the 20.6 N wheel load —
+    #: ~52 N at the 2.5x margin the buckling constraint asks for — needs 6-8 mm. Thickening
     #: also *lowers* the effective modulus (a thicker feature has a smaller shell fraction,
     #: so more of it is infill void), which eats some of the gain back. FEA is the arbiter;
     #: this default is only a defensible starting point.
@@ -456,8 +456,8 @@ PARAM_BOUNDS: dict[str, tuple[float, float]] = {
     # The lower bound sits *below* the minimum printable TPU wall (1.6 mm) on purpose, so
     # that `spoke_min_wall` stays a live check rather than being made unreachable by the
     # range; `rim_thickness_mm` shares the rationale, and it is stated once with its measured
-    # cost in `04-design-space.md` §Constraints (#34). The upper bound is set by buckling at
-    # 24.5 N — see WheelParams.
+    # cost in `04-design-space.md` §Constraints (#34). The upper bound is set by buckling
+    # at the nominal per-wheel load — see WheelParams.
     "spoke_thickness_mm": (1.2, 8.0),
     "spoke_curvature_1_per_mm": (-0.03, 0.03),
     # 1.0 is a uniform strut. The lower bound is not a printability limit — `spoke_min_wall`

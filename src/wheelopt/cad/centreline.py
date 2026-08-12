@@ -35,7 +35,7 @@ def attachment_overlap_mm(params: WheelParams) -> float:
 
     That second condition used to hold by luck. At a 2 mm spoke the naive
     ``0.75 * thickness`` is 1.5 mm against a 3 mm shear band, which is exactly the cap
-    below. At the 7 mm spoke the 24.5 N platform needs, it is 5.25 mm against the same
+    below. At the 7 mm spoke the then-24.5 N platform needed, it is 5.25 mm against the same
     3 mm band — so the spokes ran straight through the running surface and the wheel came
     out 175 mm across while reporting an 85 mm radius. Mass, inertia and the FEA tread node
     set were all wrong together, and every other check still passed.

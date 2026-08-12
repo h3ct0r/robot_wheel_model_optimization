@@ -204,16 +204,17 @@ Full statement and sub-questions: `docs/plan/02-research-questions.md`
 - **The whole robot now exists, on rigid wheels, and it changes how the headline reads**
   (2026-08-10, `wheelopt.sim.rover`, `scripts/run_rover.py`, `TODO.md` #30). A free-jointed
   chassis box with `configs/robot.yaml`'s own mass, dimensions, inertia, wheelbase, track and
-  motor curve, on four driven hinge axles. **A rigid wheel on the robot climbs three times what
-  the same rigid wheel climbs on the single-wheel rig** — 1.00 R against 0.33 R at R 60 mm,
-  1.06–1.18 R at R 85 mm — because three other wheels push while one climbs and a rigid chassis
-  levers the front axle up. So the spike's "compliant 60 mm against rigid 20 mm" is a *rig*
-  ratio, and most of it may be the rig's missing wheels rather than compliance. **Do not quote
-  that 3x as a property of compliance until it is re-measured on the rover** (#30). Profiles are
-  monotone at both radii; at the failing heights the robot rears to 90° and the chassis box
-  strikes the riser, which is modelled because ground clearance is 70 mm and the body is a real
-  contact geom. The platform loader now reads the seven vehicle fields that sat unread in the
-  YAML, and `ring_bodies`/`coupling_tendons` take a `prefix` so four wheels can coexist.
+  motor curve, on four driven hinge axles. A rigid wheel on the robot climbs more than the
+  same wheel on the single-wheel rig, because three other wheels push while one climbs — so a
+  rig ratio is never a property of compliance until re-measured here (#30). **Measured on the
+  adopted platform 2026-08-11**: rigid R 60 clears **0.67 R** (the pre-adoption 1.00 R was
+  approach momentum — 1.19 m/s against the measured 0.40) and the claw family clears
+  **1.00 R** on radial slides, the 6-claw inside its measured law — the first rover-level
+  compliant-vs-rigid gap that survives the validity rules. **The element is worth the whole
+  gap**: the same 12-claw wheel reads 60 mm radial and 40 mm hinged (#31's straddle in ladder
+  buckets; hardware decides). Claw counts still tie each other — within-family ranking stays
+  with harshness/washboard. The body is a real contact geom (belly at `R + 7.5`), and
+  `ring_bodies`/`coupling_tendons` take a `prefix` so four wheels can coexist.
 - **Phase 0 is closed, and the determinism gate is cross-machine now** (2026-08-11, `TODO.md`
   #36 records the three bullets deliberately not built — `T0` CAD, CoACD, Hydra — each with a
   named trigger). `.github/workflows/ci.yml`: unit suite + ruff, no kernels, and a
@@ -282,19 +283,19 @@ Full statement and sub-questions: `docs/plan/02-research-questions.md`
   foot meshes and solves, 90 increments, buckling limit point 30.9 N. **The ring ROM refuses it
   by name** — every segment element carries contact at a point on its own radius, so a fitted
   ring would describe a plain radial claw of the same length. That is #31 arriving by design.
-- **Step climb on the rover cannot rank wheels; flat ground can** (2026-08-10, `TODO.md` #33
-  opened, #30 amended). On `run_rover.py --sweep` a 3-claw wheel, a 6-claw, a 12-claw and a
-  plain rigid cylinder **all clear exactly 1.00 R** at R 60 mm — four wheels, one answer, in
-  10 mm buckets. The metric is saturated by the rover's own four-wheel push, not by the
-  wheels. `--obstacle-height 0` is now a *scenario* (no step geom is emitted at all) measuring
+- **Step climb on the rover ranks compliance now, but still not claw count; flat ground
+  ranks the family** (2026-08-10, amended 2026-08-11 — the "all clear exactly 1.00 R"
+  saturation was the fictional platform's momentum; the measured robot's ladder reads rigid
+  0.67 R / claws 1.00 R, see the rover bullet above and `TODO.md` #30/#33).
+  `--obstacle-height 0` is a *scenario* (no step geom is emitted at all) measuring
   objective 3, RMS vertical chassis acceleration from `qacc` on the chassis free joint over
   the second half of the driving phase — the first half is the launch squat, which is about
   the motor. The same four designs separate **22.64 / 10.31 / 5.00 / 0.00 m/s²**, and axle
   work separates them 12×. Two checks from outside the sim track it: the closed-form polygon
   drop `R(1−cos π/n)` and `ring.ride_height_ripple_m`. Compliance cuts the ripple 25% below
   the rigid polygon at 12 claws and **3% at 3**, because a wheel only rides smoother than its
-  own polygon if it deflects comparably to the drop, and 24.5 N gives ≈1 mm against a 30 mm
-  drop. **Few-clawed numbers are extrapolated and cannot be un-extrapolated**: the law is
+  own polygon if it deflects comparably to the drop, and the ~22 N per-wheel load gives
+  ≈1 mm against a 30 mm drop. **Few-clawed numbers are extrapolated and cannot be un-extrapolated**: the law is
   measured to `--delta-max` (12 mm) and a 3-tip R 60 wheel needs 30; the run prints
   `EXTRAPOLATED` with the ratio, widening to 18 mm moved the answer 8%, and 35 mm diverges at
   10 cutbacks. **The metric has no counter-pressure of its own** — it ranks 36 claws above 12

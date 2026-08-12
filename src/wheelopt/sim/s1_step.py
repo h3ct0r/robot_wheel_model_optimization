@@ -160,7 +160,7 @@ def run_s1(
         wheel_radius_m, wheel_width_m, wheel_mass_kg: the wheel under test.
         spec: when given, the wheels get the **ring's** rotational inertia rather than a solid
             cylinder's. See ``rover.build_rover_mjcf`` — a solid cylinder has half a ring's,
-            and four wheels' worth is a real share of a 10 kg robot's inertia.
+            and four wheels' worth is a real share of a ~9 kg robot's inertia.
         material_realisation: index into the sampled material population. Part of a row's
             identity (invariant 7), not of what it measured.
         params: extra provenance to carry on every row — the design's own parameters, the

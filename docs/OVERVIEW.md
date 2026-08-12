@@ -10,9 +10,11 @@ territory.
 
 ## 1. What we are building, in one paragraph
 
-We are designing **squishy 3D-printed wheels** for a four-wheeled robot about the size of
-a large toolbox — 400 × 300 × 200 mm, roughly 10 kg — that drives over doorsteps, kerbs
-and rubble. Each wheel carries about 24.5 N and comes out around 170 mm across.
+We are designing **3D-printed wheels — both stiff plastic and squishy TPU, the optimiser
+picks** — for a real four-wheeled pipe-inspection robot about the size of a large toolbox:
+426 × 231 × 187 mm, 8.5 kg, on four Dynamixel servos, measured off its own 3D model
+(`configs/pipebot_detailed.stl`). Each wheel carries about 20.6 N, bolts to the servo's
+53 mm horn, and comes out 80–180 mm across.
 Instead of guessing a good wheel shape, we let a computer try thousands of shapes, simulate each one driving at obstacles, and pick
 the best. The hard part is not the searching. The hard part is **simulating squishiness fast
 enough to search at all**. Most of this project is the machinery that makes that possible.
@@ -158,18 +160,19 @@ actual result.
 
 ## 5. Where the project is right now
 
-Roughly **week 1 of a 60-week plan**, and deliberately so: the first week is a
-[feasibility spike](plan/16-first-week.md) that tests the riskiest assumption before building
-infrastructure that depends on it.
+**Phase 0 (foundations) closed 2026-08-11; Phase 1's FEA→ROM pipeline is substantially
+built**, well ahead of the original [one-week spike](plan/16-first-week.md) whose steps the
+table below tracks — all six answered yes. The ground truth is now printed hardware
+(ADR-0008), and the next gate is a bench press test of a printed wheel.
 
 | Step | What | Status |
 |---|---|---|
-| 1 | Freeze the robot specification | sized to the real 400 × 300 × 200 mm platform, still not frozen |
-| 2 | CAD: shape → 3-D solid | **done**, 48/48 checks |
-| 3 | FEA: solid → stiffness curve | **done**, 20/20 checks (re-running at the new load) |
-| 4 | ROM: fit the spring-ring | **next** |
-| 5 | Drive it at a step edge vs a rigid wheel | not started |
-| 6 | Look hard at the result, decide whether to continue | not started |
+| 1 | Freeze the robot specification | measured robot adopted 2026-08-11; frozen once CoM/inertia arrive |
+| 2 | CAD: shape → 3-D solid | **done**, 60/60 checks |
+| 3 | FEA: solid → stiffness curve | **done**, 30/30 checks, plus a fast 2-D screening tier |
+| 4 | ROM: fit the spring-ring | **done** — and for claw wheels the law is *measured*, not fitted |
+| 5 | Drive it at a step edge vs a rigid wheel | **done** — 5/5 signatures; the whole 4-wheel robot runs too |
+| 6 | Look hard at the result, decide whether to continue | **yes** — compliance beats rigid on the washboard and on the rover's step ladder |
 
 **What we already know works.** A test wheel (60 mm radius, 6 spokes, TPU) pressed into an
 obstacle behaves correctly: it gets stiffer the more you squash it, its contact patch

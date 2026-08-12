@@ -681,6 +681,21 @@ class TestChassisCollision(unittest.TestCase):
                 self.assertEqual(getattr(box, field_name), getattr(prim, field_name))
 
     @unittest.skipUnless(HAVE_MUJOCO, "MuJoCo not installed")
+    def test_an_unrealisable_hinge_is_a_result_and_not_a_crash(self):
+        """Invariant 4, caught in the field 2026-08-11: a 3-segment R 60 ring's capsule
+        radius exceeds its own claw root, so the hinge pivot would sit beyond the axle —
+        a legitimate refusal that escaped `observe_rover` as a raw ValueError and killed
+        the run instead of returning a typed failure."""
+        from wheelopt.rom.ring import RingSpec, TabulatedLaw
+
+        spec = RingSpec(radius_m=0.060, n_segments=3, root_radius_m=0.022)
+        law = TabulatedLaw(knots_m=np.array([0.0, 0.01]), slopes_n_per_m=np.array([1e4]))
+        result = run_rover(PLATFORM, RoverSpec(duration_s=1.5), spec=spec, law=law,
+                           tangential_law=law, tangential_element="hinge", **self.SMALL)
+        self.assertFalse(result.ok)
+        self.assertIn("3 segments is too few", result.message)
+
+    @unittest.skipUnless(HAVE_MUJOCO, "MuJoCo not installed")
     def test_the_dome_meets_a_tall_step_and_the_strike_is_detected(self):
         """At a 100 mm step on R 60 wheels the dome's leading surface protrudes past the
         wheels (226 mm from the chassis centre at riser-top height against the wheel's

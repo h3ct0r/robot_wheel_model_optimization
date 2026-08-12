@@ -28,6 +28,10 @@ geometry is pending the open questions below.
 
 
 Ordered by leverage: the first three touch every number in the project.
+**The table predates the 2026-08-11 arrival and is kept as the method reference** — its
+"current" column shows the old estimates the measurements replaced. Still genuinely open:
+`com_offset`, `inertia` (both want the 3D model with component masses assigned), and the
+per-corner masses.
 
 | Field | Current (estimate) | How to measure | Effort |
 |---|---|---|---|
