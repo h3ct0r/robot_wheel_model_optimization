@@ -48,16 +48,18 @@ Two things about that box are deliberate and occasionally surprising:
   `--duration × no-load speed × --radius`, so the robot cannot climb it, cross it and drive
   off the far end — which used to end with a final frame at exactly the ride height, reading
   as "never climbed" when the truth was the opposite.
-- **The chassis is a collision geom, not a decoration.** The belly rides a fixed 7.5 mm
-  above the axle line, so clearance is `R + 7.5 mm`; a step taller than that gets bellied
-  out on, and `chassis_hit_step` reports it. Watching that happen is most of why this model
-  exists.
+- **The chassis is a collision geom, not a decoration.** The *ride height* formula is
+  `R + 7.5 mm` (the axle-to-belly bracket geometry), but what actually collides is the
+  primitive set by default: its bracket plates reach 23 mm *below* the axle line and its
+  nose is a dome that rides step edges. `chassis_hit_step` reports any chassis-terrain
+  strike, and watching one happen is most of why this model exists.
 - **What you see standing on the wheels is the robot's real shell**
   (`configs/pipebot_simplified.stl`), drawn over the box by default and placed by its
-  **axle stubs** — the r 7.5 mm cylinders the external wheels mount on. The box fades to a
-  ghost but **stays the contact geom**: MuJoCo would collide a mesh by its convex hull,
-  replacing the measured flat belly the nose-in regime depends on with the hull of a pipe.
-  `--no-chassis-stl` brings the plain box back; either way, every number is identical
+  **axle stubs** — the r 7.5 mm cylinders the external wheels mount on. The contact
+  chassis under it (the **primitive set** by default since 2026-08-12, the calibrated box
+  via `--chassis-collision box`) fades to a ghost but keeps colliding: MuJoCo would
+  collide the mesh itself by its convex hull, bridging the legs and belly into one wrong
+  underside. `--no-chassis-stl` drops the shell; either way, every number is identical
   (`tests/test_rover.py::TestChassisMesh`).
 - **The wheels mount externally, and the track follows the wheel** (2026-08-11): the inner
   face seats against the side plates at ±97.5 mm, so track = `195 mm + width` —
@@ -334,7 +336,7 @@ problem; it is the missing flank contact, filed as TODO #31.
 | `--stl` | off | Draw the real CAD geometry over each wheel, translucent grey. Needs build123d; the STL is cached under `data/wheels` by design hash. |
 | `--mesh-alpha` | `0.40` | 0 invisible, 1 solid. |
 | `--chassis-stl` | `configs/pipebot_simplified.stl` | The robot's shell, drawn over the chassis box and placed by its **axle stubs** (r 7.5 cylinders in the model, stations 103.5/353.5 mm — wheelbase 250.03 against the platform's 250, the cross-check). The box stays the contact geom, faded to a ghost. A missing file downgrades to the box with a note. |
-| `--chassis-collision` | `box` | **A physics switch, not a rendering one.** `box` is the calibrated flat-bellied box. `primitives` collides the shapes read off the simplified model instead — the r 72.5 pipe, the r 55 dome nose, and the bracket plates whose points reach **23 mm below the axle line** (the box belly sits 7.5 mm above it: 30.5 mm apart). Lossless: every non-stub mesh vertex lies on or inside the primitive union, pinned by test. Measured on the R 85 ladder: 60/80 mm byte-identical (the chassis never touches), 100 mm a different failure — the box hard-stops at 0.9° pitch where the dome rides the edge to 24.6°. Neither belly is confirmed on hardware; do not mix the two in one comparison. |
+| `--chassis-collision` | `primitives` | **A physics switch, not a rendering one.** `primitives` (the default since 2026-08-12) collides the shapes read off the simplified model — the r 72.5 pipe, the r 55 dome nose, and the bracket plates whose points reach **23 mm below the axle line**. Lossless: every non-stub mesh vertex lies on or inside the primitive union, pinned by test. `box` is the flat-bellied box calibrated to the hand-measured clearance (belly at R + 7.5), kept for comparison and pre-flip continuity. Measured on the R 85 ladder: 60/80 mm byte-identical (the chassis never touches), 100 mm a different failure — the box hard-stops at 0.9° pitch where the dome rides the edge to 24.6°. The plates' low points are CAD facts not yet confirmed on hardware; if the hand check contradicts them, the box's measurement wins. Never mix the two in one comparison. |
 | `--no-chassis-stl` | off | The plain chassis box, as before. |
 
 The colours are load-bearing, not decorative:

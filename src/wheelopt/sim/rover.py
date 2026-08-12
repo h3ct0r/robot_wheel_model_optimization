@@ -623,7 +623,7 @@ def build_rover_mjcf(
     visual_mesh: Path | str | None = None,
     visual_rgba: tuple[float, float, float, float] = CAD_OVERLAY_RGBA,
     chassis_mesh: Path | str | None = None,
-    chassis_collision: str = "box",
+    chassis_collision: str = "primitives",
 ) -> str:
     """MJCF for the whole robot, on rigid wheels or on four segmented rings.
 
@@ -660,21 +660,24 @@ def build_rover_mjcf(
     `R + 7.5 mm` will belly out on a step taller than that, and watching it do so is most of
     why this model exists.
 
-    ``chassis_collision`` picks which chassis collides. ``"box"`` (the default) is the
-    calibrated flat-bellied box above. ``"primitives"`` replaces it with the shapes read off
-    the simplified model (`CHASSIS_PRIMITIVES_MM`): the pipe cylinder, the hemispherical
-    nose, and the bracket plates whose points reach 23 mm below the axle line. **This is a
-    physics change, not a rendering one** — the primitives belly out ~30 mm earlier and
-    lower than the box, and the dome nose can ride a step edge the box's flat face
-    hard-stops against. It exists so the two chassis models can be compared on the same
-    runs; neither is validated against the machine yet (the plates' low points are in the
-    CAD, unconfirmed on hardware).
+    ``chassis_collision`` picks which chassis collides. ``"primitives"`` (the default,
+    promoted 2026-08-12) is the shapes read off the simplified model
+    (`CHASSIS_PRIMITIVES_MM`): the pipe cylinder, the hemispherical nose, and the bracket
+    plates whose points reach 23 mm below the axle line — a lossless representation of the
+    CAD, so the machine simulated is the machine drawn. ``"box"`` is the flat-bellied box
+    above, calibrated to the hand-measured clearance at the original wheels; it survives as
+    the comparison chassis and for continuity with pre-flip results. **The two are a
+    physics change apart, not a rendering one** — the primitives belly out ~30 mm earlier
+    and lower, and the dome nose rides a step edge the box's flat face hard-stops against
+    (0.9° vs 24.6° of pitch at a 100 mm step, R 85). One caveat travels with the default:
+    the plates' low points and the dome are CAD facts not yet confirmed on the physical
+    machine, and if the hardware check contradicts them the box's measurement wins.
 
     ``chassis_mesh`` draws the robot's **real shell** (``configs/pipebot_simplified.stl``)
-    over that box, under the same contract as ``visual_mesh``: zero mass, zero collision,
-    every number byte-identical with and without it. The box stays the contact geom and is
-    faded to a ghost rather than removed, because it is the surface a belly strike actually
-    happens on. The mesh must never become the physics: MuJoCo collides a mesh by its convex
+    over the contact chassis, under the same contract as ``visual_mesh``: zero mass, zero
+    collision, every number byte-identical with and without it. Whichever chassis collides
+    (the primitive set by default, the box on request) fades to a ghost rather than
+    disappearing, because it is the surface a belly strike actually happens on. The mesh must never become the physics: MuJoCo collides a mesh by its convex
     hull, which would replace the measured flat belly with the hull of a pipe shell. The mesh
     is placed by its **axle stubs** (`CHASSIS_MESH_AXLE_MM`), not its bounding box — so where
     the shell disagrees with the box, the shell is telling the truth: its overhang is
@@ -954,7 +957,7 @@ def observe_rover(
     visual_mesh: Path | str | None = None,
     visual_rgba: tuple[float, float, float, float] = CAD_OVERLAY_RGBA,
     chassis_mesh: Path | str | None = None,
-    chassis_collision: str = "box",
+    chassis_collision: str = "primitives",
 ) -> RoverResult:
     """Drive the robot straight at the step. ``observer(k, model, data)`` after every step.
 
@@ -1250,7 +1253,7 @@ def run_rover(platform: PlatformSpec | None = None, scenario: RoverSpec | None =
               visual_mesh: Path | str | None = None,
               visual_rgba: tuple[float, float, float, float] = CAD_OVERLAY_RGBA,
               chassis_mesh: Path | str | None = None,
-              chassis_collision: str = "box",
+              chassis_collision: str = "primitives",
               ) -> RoverResult:
     """Convenience entry point: load the platform, run one scenario, return the result."""
     return observe_rover(platform or load_platform(), scenario or RoverSpec(),

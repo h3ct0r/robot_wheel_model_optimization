@@ -62,6 +62,11 @@ class S1Config:
     approach_deg: float = 15.0
     duration_s: float = 6.0
     throttle: float = 1.0
+    #: Which chassis collides — `sim.rover`'s ``chassis_collision``. In the rung digest
+    #: because the 2026-08-12 default flip (box → primitives) moves every metric on a rung
+    #: the chassis touches, and a changed number under an unchanged run_id is exactly the
+    #: lie invariant 5 exists to prevent.
+    chassis_collision: str = "primitives"
 
     def __post_init__(self) -> None:
         if not self.heights_m:
@@ -99,6 +104,7 @@ class S1Config:
             "throttle": self.throttle,
             "friction_range": list(self.friction_range),
             "approach_deg": self.approach_deg,
+            "chassis_collision": self.chassis_collision,
         })[:8]
         return f"{S1_NAME}/h={height_m:.3f}@{digest}"
 
@@ -184,7 +190,7 @@ def run_s1(
             )
             result = run_rover(platform, scenario, wheel_radius_m=wheel_radius_m,
                                wheel_width_m=wheel_width_m, wheel_mass_kg=wheel_mass_kg,
-                               spec=spec)
+                               spec=spec, chassis_collision=config.chassis_collision)
             row_params = {
                 **(params or {}),
                 "step_height_m": float(height),

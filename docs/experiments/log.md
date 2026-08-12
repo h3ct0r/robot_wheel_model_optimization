@@ -4099,3 +4099,28 @@ Found on the way: history gained a yaw column (7 wide now), and `motor_torque_n_
 applied through each wheel's drive sign so a reversed side sees its own speed. What the
 suite still lacks: S5's dedicated 10 m sprint protocol, S8's duration/fatigue half, and
 the seeds×CVaR aggregation over scenarios — Phase 2's remaining half. Suite 858 green.
+
+---
+
+## 2026-08-12 — Primitives become the default chassis; the box retires to comparison duty
+
+User decision: the chassis that collides is now the primitive set read off
+`pipebot_simplified.stl` — the machine simulated is the machine drawn — with
+`--chassis-collision box` opting back into the calibrated flat-bellied box. What the flip
+touched, in invariant order:
+
+- **Run identity first**: `S1Config` gains `chassis_collision`, in the rung digest — the
+  default flip moves every metric on a rung the chassis touches, and a changed number
+  under an unchanged run_id is the lie invariant 5 exists for. All three CI manifests
+  regenerated and verified (gates 3/3, exit 0).
+- **Tests re-pinned, and the nose-in signature moved**: v4 of the pitch-regimes test —
+  80 mm at R 85 is bit-identical (nothing touches), but at 100 mm the strike remains
+  (`chassis_hit_step` True) while the pitch now climbs past 20° instead of parking at
+  0.9°, because the dome rides the edge the box hard-stopped against. The strike, not the
+  pitch collapse, is the nose-in signature now.
+- The README gallery re-rendered under the new default; docs and help text updated.
+
+**The caveat travels with the default**: the plates' low points (23 mm below the axle —
+0.5 mm off the floor at the original wheels) and the dome are CAD facts not yet confirmed
+on the physical machine. The hardware hand-check stays on the list; if it contradicts the
+CAD, the box's measurement wins and the default flips back, deliberately, the same way.

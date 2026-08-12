@@ -126,8 +126,11 @@ class TestMjcf(unittest.TestCase):
         """It must be able to belly out on a tall step. A decorative chassis would let the
         robot straddle obstacles taller than its own ground clearance."""
         text = self.xml()
-        self.assertIn('name="body" type="box"', text)
-        self.assertNotIn('name="body" type="box" contype="0"', text)
+        self.assertIn('name="chassis_col_shell"', text)
+        for line in (x for x in text.splitlines() if 'name="chassis_col_' in x):
+            self.assertNotIn('contype="0"', line)
+        self.assertIn('name="body" type="box"',
+                      self.xml(chassis_collision="box"))
 
     def test_the_step_outruns_the_robot(self):
         """The regression. A 4 m step and a 6.9 m run meant the robot climbed it, crossed it
@@ -246,7 +249,7 @@ class TestSegmentedWheels(unittest.TestCase):
         from wheelopt.sim.rover import GROUND_CONAFFINITY, SEGMENT_CONTYPE
 
         text = self.xml()
-        chassis = next(x for x in text.splitlines() if 'name="body" type="box"' in x)
+        chassis = next(x for x in text.splitlines() if 'name="chassis_col_shell"' in x)
         floor = next(x for x in text.splitlines() if 'name="floor"' in x)
         segment = next(x for x in text.splitlines() if 'name="fl_g0"' in x)
         # Chassis is on the default (1, 1); segments carry their own bit; ground carries both.
@@ -470,13 +473,13 @@ class TestChassisMesh(unittest.TestCase):
     def test_it_is_absent_unless_asked_for(self):
         text = self.xml()
         self.assertNotIn("cadchassis", text)
-        self.assertIn('name="body" type="box"', text)
-        self.assertIn('material="bodymat"', text)
+        self.assertIn('name="chassis_col_shell"', text)     # the default chassis
+        self.assertIn('name="body" type="box"', self.xml(chassis_collision="box"))
 
     def test_the_box_stays_the_contact_geom_and_only_fades(self):
         """The safety property. The shell is a picture; the box is the surface a belly strike
         happens on, and it must keep colliding — faded, never removed."""
-        text = self.xml(chassis_mesh=self.stl)
+        text = self.xml(chassis_mesh=self.stl, chassis_collision="box")
         box = next(x for x in text.splitlines() if 'name="body" type="box"' in x)
         self.assertNotIn('contype="0"', box)          # still collides
         self.assertIn('rgba=', box)                    # but only as a ghost
@@ -690,10 +693,15 @@ class TestChassisCollision(unittest.TestCase):
     def xml(self, **kwargs) -> str:
         return build_rover_mjcf(PLATFORM, RoverSpec(), **{**self.SMALL, **kwargs})
 
-    def test_the_default_is_the_calibrated_box(self):
+    def test_the_default_is_the_primitives(self):
+        """Promoted 2026-08-12: the machine simulated is the machine drawn. The box is
+        the opt-in comparison chassis, calibrated to the hand measurement."""
         text = self.xml()
-        self.assertIn('name="body" type="box"', text)
-        self.assertNotIn("chassis_col_", text)
+        self.assertIn("chassis_col_", text)
+        self.assertNotIn('name="body"', text)
+        box = self.xml(chassis_collision="box")
+        self.assertIn('name="body" type="box"', box)
+        self.assertNotIn("chassis_col_", box)
 
     def test_primitives_replace_the_box_entirely(self):
         """Both at once would collide the step against two overlapping chassis and count
@@ -889,7 +897,11 @@ class TestRuns(unittest.TestCase):
         the AXLE and the measured 30 mm belonged to the original r 22.5 wheels. v3, this
         one: with R 85 fitted the belly sits at 92.5 mm, so an 80 mm step is a genuine climb
         attempt (pitch ~20 deg, no belly) and a 100 mm step is a NOSE-IN — the chassis
-        overhangs the front axle by 88 mm and strikes the riser at under 1 deg of pitch."""
+        overhangs the front axle by 88 mm and strikes the riser at under 1 deg of pitch.
+        v4 (2026-08-12, primitives chassis default): 80 mm is unchanged to the bit (nothing
+        touches), but at 100 mm the DOME rides the step edge instead of hard-stopping —
+        the strike still registers, and the pitch climbs past 20 deg where the box parked
+        at 0.9. The strike, not the pitch collapse, is now the nose-in signature."""
         flat = observe_rover(PLATFORM, RoverSpec(step_height_m=0.001, duration_s=4.0), **WHEEL)
         climbing = observe_rover(PLATFORM, RoverSpec(step_height_m=0.08, duration_s=6.0),
                                  **WHEEL)
@@ -898,10 +910,9 @@ class TestRuns(unittest.TestCase):
         self.assertTrue(flat.ok and climbing.ok and nosing.ok)
         self.assertLess(np.degrees(flat.peak_pitch_rad), 3.0)
         self.assertGreater(np.degrees(climbing.peak_pitch_rad), 10.0)
-        self.assertFalse(climbing.chassis_hit_step, "80 mm is below the R85 belly line")
-        self.assertTrue(nosing.chassis_hit_step, "100 mm is above it: nose-in")
-        self.assertLess(np.degrees(nosing.peak_pitch_rad), 3.0,
-                        "a nose-in stops the robot before it can pitch")
+        self.assertFalse(climbing.chassis_hit_step, "80 mm reaches no chassis material")
+        self.assertTrue(nosing.chassis_hit_step, "100 mm meets the dome: nose engagement")
+        self.assertFalse(nosing.climbed, "riding the edge is still not a climb")
 
 
 class TestFlatGroundIsAScenario(unittest.TestCase):

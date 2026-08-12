@@ -249,6 +249,12 @@ Full statement and sub-questions: `docs/plan/02-research-questions.md`
   two claws sharing (#31's unvalidated regime) and the run prints exactly that. A step plus a
   washboard is refused — S1 is the step, S7 the corrugation, nothing defines the mixture.
   Still open under #33: the amplitude × wavelength sweep proper, and terrain seeds for CVaR.
+- **Primitives are the default chassis since 2026-08-12** (`--chassis-collision box`
+  opts back into the calibrated box). The machine simulated is the machine drawn; S1 run
+  identity carries `chassis_collision` in the rung digest and the CI manifests were
+  regenerated. The plates' low points (23 mm below the axle) and the dome nose remain CAD
+  facts pending the hardware hand-check — if that contradicts them, the box's measurement
+  wins and the default flips back deliberately.
 - **The scenario suite is built: S2–S6 landed 2026-08-12** (`sim/rover.py`, one scenario
   per run, exclusivity refused by name). S2 slope tilts *gravity* (no ramp transient; rigid
   R 60 holds 10° at 0.38 m/s, backslides at 40° — traction-limited). S3 gap replaces the

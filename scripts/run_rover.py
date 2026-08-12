@@ -179,13 +179,16 @@ def build_parser() -> argparse.ArgumentParser:
                      help="instead of one run, sweep 10 mm to 2.1 R in 10 mm buckets and "
                           "report the tallest cleared plus the profile. Quote the answer as "
                           "a bucket, not a millimetre")
-    run.add_argument("--chassis-collision", choices=("box", "primitives"), default="box",
-                     help="which chassis collides. 'box' is the calibrated flat-bellied "
-                          "box; 'primitives' is the pipe + dome nose + bracket plates read "
-                          "off pipebot_simplified.stl — a PHYSICS change: the plates reach "
-                          "23 mm below the axle and the dome can ride a step edge. For "
-                          "comparing the two chassis models on the same runs; neither low "
-                          "point is confirmed on hardware yet")
+    run.add_argument("--chassis-collision", choices=("box", "primitives"),
+                     default="primitives",
+                     help="which chassis collides. 'primitives' (default since 2026-08-12) "
+                          "is the pipe + dome nose + bracket plates read off "
+                          "pipebot_simplified.stl — lossless against the CAD; the plates "
+                          "reach 23 mm below the axle and the dome rides step edges. 'box' "
+                          "is the flat-bellied box calibrated to the hand-measured "
+                          "clearance, kept for comparison and continuity with pre-flip "
+                          "numbers. The two are a physics change apart; never mix them in "
+                          "one comparison")
 
     compliant = p.add_argument_group(
         "compliant wheels (TODO #30/#31 -- a picture, not a measurement)")
@@ -598,10 +601,10 @@ def main(argv: list[str] | None = None) -> int:
           f"({platform.no_load_speed_rad_s * args.radius * 1e-3:.2f} m/s)")
     if not platform.frozen:
         print("       NOTE meta.frozen is false — these are estimates, not a measured robot")
-    if args.chassis_collision == "primitives":
-        print("       chassis collision: PRIMITIVES from the simplified model — the belly "
-              "is the bracket points at R−23 mm and the nose is a dome. A physics change; "
-              "do not compare against box-chassis numbers")
+    if args.chassis_collision == "box":
+        print("       chassis collision: the LEGACY calibrated box — belly at R+7.5 mm, "
+              "flat nose. Not comparable with primitives-chassis numbers (the default "
+              "since 2026-08-12)")
 
     _resolve_chassis_stl(args)
     message = _build_the_rings(args) or _build_the_overlay(args)

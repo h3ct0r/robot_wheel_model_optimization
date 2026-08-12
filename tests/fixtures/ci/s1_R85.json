@@ -1,66 +1,6 @@
 {
  "rows": {
-  "02354dc1836a7b26": {
-   "metrics": {
-    "climbed": 1.0,
-    "distance_m": 2.2080503066002586,
-    "energy_j": 21.05101021409418,
-    "final_clearance_m": 0.17099941407362404,
-    "stability_margin": 0.8122560170754691
-   },
-   "status": "ok"
-  },
-  "1bf6ac6b3c925b25": {
-   "metrics": {
-    "climbed": 0.0,
-    "distance_m": 0.5870154523373441,
-    "energy_j": 61.30818494333513,
-    "final_clearance_m": 0.05105750273522669,
-    "stability_margin": 0.9954599016862575
-   },
-   "status": "ok"
-  },
-  "2115a01bc3e51ce5": {
-   "metrics": {
-    "climbed": 1.0,
-    "distance_m": 2.6429678904778964,
-    "energy_j": 11.959447495776063,
-    "final_clearance_m": 0.17100035052487547,
-    "stability_margin": 0.8042998918062705
-   },
-   "status": "ok"
-  },
-  "48d8455858200525": {
-   "metrics": {
-    "climbed": 0.0,
-    "distance_m": 0.5901645334250198,
-    "energy_j": 68.5039060548927,
-    "final_clearance_m": 0.09111950513048543,
-    "stability_margin": 0.9859156012590757
-   },
-   "status": "ok"
-  },
-  "50bf41e09a6945bd": {
-   "metrics": {
-    "climbed": 0.0,
-    "distance_m": 0.8129466118284943,
-    "energy_j": 60.533256338495285,
-    "final_clearance_m": 0.12653114737726956,
-    "stability_margin": 0.5987898901357647
-   },
-   "status": "ok"
-  },
-  "57893cc392e8e942": {
-   "metrics": {
-    "climbed": 0.0,
-    "distance_m": 0.5870160788118383,
-    "energy_j": 86.0523451167302,
-    "final_clearance_m": 0.05102001005763529,
-    "stability_margin": 0.9949617964401466
-   },
-   "status": "ok"
-  },
-  "647d00615cf5595d": {
+  "14540b5adb91cb8a": {
    "metrics": {
     "climbed": 0.0,
     "distance_m": 0.6034712170613007,
@@ -70,27 +10,17 @@
    },
    "status": "ok"
   },
-  "69fa5e722ff6f42f": {
-   "metrics": {
-    "climbed": 1.0,
-    "distance_m": 2.4776235724870412,
-    "energy_j": 15.514676060763723,
-    "final_clearance_m": 0.17099961693413354,
-    "stability_margin": 0.8122509031601425
-   },
-   "status": "ok"
-  },
-  "88aaac5ed1f6bca7": {
+  "2cdae73764e0af7b": {
    "metrics": {
     "climbed": 0.0,
-    "distance_m": 0.5901693876258983,
-    "energy_j": 58.58311561626394,
-    "final_clearance_m": 0.09110291105745726,
-    "stability_margin": 0.9833747880496032
+    "distance_m": 0.5766834857684056,
+    "energy_j": 42.05468142978458,
+    "final_clearance_m": 0.051067940241862425,
+    "stability_margin": 0.9841119642516899
    },
    "status": "ok"
   },
-  "a1c93c872050ec38": {
+  "3c5a56e917df1f4a": {
    "metrics": {
     "climbed": 0.0,
     "distance_m": 0.5901594896151785,
@@ -100,23 +30,93 @@
    },
    "status": "ok"
   },
-  "c4aece7639b32a2c": {
+  "5476ae6a87f72e7a": {
    "metrics": {
     "climbed": 0.0,
-    "distance_m": 0.5870194147572092,
-    "energy_j": 51.03134848220915,
-    "final_clearance_m": 0.051026740985782165,
-    "stability_margin": 0.9953732028054058
+    "distance_m": 0.5901693876258983,
+    "energy_j": 58.58311561626394,
+    "final_clearance_m": 0.09110291105745726,
+    "stability_margin": 0.9833747880496032
    },
    "status": "ok"
   },
-  "f53cfa66800fe757": {
+  "69c47f3618959697": {
+   "metrics": {
+    "climbed": 1.0,
+    "distance_m": 2.6429678904778964,
+    "energy_j": 11.959447495776063,
+    "final_clearance_m": 0.17100035052487547,
+    "stability_margin": 0.8042998918062705
+   },
+   "status": "ok"
+  },
+  "7d758c407a555f12": {
    "metrics": {
     "climbed": 0.0,
-    "distance_m": 0.5870122968757423,
-    "energy_j": 76.32013615711041,
-    "final_clearance_m": 0.05101154960434581,
-    "stability_margin": 0.9956204294396314
+    "distance_m": 0.5901645334250198,
+    "energy_j": 68.5039060548927,
+    "final_clearance_m": 0.09111950513048543,
+    "stability_margin": 0.9859156012590757
+   },
+   "status": "ok"
+  },
+  "9e00f093614baf94": {
+   "metrics": {
+    "climbed": 0.0,
+    "distance_m": 0.8129466118284943,
+    "energy_j": 60.533256338495285,
+    "final_clearance_m": 0.12653114737726956,
+    "stability_margin": 0.5987898901357647
+   },
+   "status": "ok"
+  },
+  "ab465a989678b12a": {
+   "metrics": {
+    "climbed": 0.0,
+    "distance_m": 0.5765606741629637,
+    "energy_j": 47.13321445170818,
+    "final_clearance_m": 0.05107473664294346,
+    "stability_margin": 0.9944856269502148
+   },
+   "status": "ok"
+  },
+  "c4917c7fdaa075af": {
+   "metrics": {
+    "climbed": 1.0,
+    "distance_m": 2.2080503066002586,
+    "energy_j": 21.05101021409418,
+    "final_clearance_m": 0.17099941407362404,
+    "stability_margin": 0.8122560170754691
+   },
+   "status": "ok"
+  },
+  "d63d5321367efa58": {
+   "metrics": {
+    "climbed": 0.0,
+    "distance_m": 0.5766685604710755,
+    "energy_j": 56.380782356707606,
+    "final_clearance_m": 0.05102891857728656,
+    "stability_margin": 0.9844181021760628
+   },
+   "status": "ok"
+  },
+  "e04075075d0f75bb": {
+   "metrics": {
+    "climbed": 0.0,
+    "distance_m": 0.5766042767676209,
+    "energy_j": 61.533126486622656,
+    "final_clearance_m": 0.05102795263446197,
+    "stability_margin": 0.9862919114158744
+   },
+   "status": "ok"
+  },
+  "fd2d60aed075eafc": {
+   "metrics": {
+    "climbed": 1.0,
+    "distance_m": 2.4776235724870412,
+    "energy_j": 15.514676060763723,
+    "final_clearance_m": 0.17099961693413354,
+    "stability_margin": 0.8122509031601425
    },
    "status": "ok"
   }

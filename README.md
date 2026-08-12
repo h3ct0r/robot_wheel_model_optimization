@@ -55,6 +55,56 @@ Full setup, and why the first line is needed, is in [Environment](#environment) 
 | `src/wheelopt/report.py` | The self-contained HTML report behind `scripts/explore.py` |
 | `scripts/` | Entry points. `explore.py` is the manual playground; `verify_*.py` are the gates |
 
+## The scenario suite
+
+Every design is scored over these scenarios (`docs/plan/08-metrics.md`), each a real
+`run_rover.py` run. The frames below are rendered from the simulation itself by
+`scripts/render_scenario_gallery.py` — rigid R 60 wheels, the measured platform, the
+robot's own shell — so they regenerate with the models they depict.
+
+<table>
+<tr>
+<td width="50%"><img src="docs/img/scenarios/s1_step.png" alt="S1 step"/><br/>
+<b>S1 — Step.</b> The obstacle ladder, 10–200 mm, swept over friction and approach-angle
+seeds. Metric: the step height cleared with P = 0.9. Rigid R 60 clears 0.67 R; the claw
+family 1.00 R.</td>
+<td width="50%"><img src="docs/img/scenarios/s2_slope.png" alt="S2 slope"/><br/>
+<b>S2 — Slope.</b> An uphill gradient, implemented by tilting <i>gravity</i> so there is no
+ramp-entry transient (the image is rotated by the same angle). Metric: max sustained
+gradient. Rigid R 60 holds 10°, backslides at 40° — traction-limited.</td>
+</tr>
+<tr>
+<td><img src="docs/img/scenarios/s3_gap.png" alt="S3 gap"/><br/>
+<b>S3 — Gap.</b> A 150 mm-deep trench across the ground; a wheel that drops in stays in
+(pictured). Metric: max gap crossed with the whole body at ride height on the far side.
+R 60 crosses 40 mm and is swallowed by 200.</td>
+<td><img src="docs/img/scenarios/s4_rubble.png" alt="S4 rubble"/><br/>
+<b>S4 — Rubble.</b> A procedural rock field where the <i>seed is the terrain</i> —
+bit-identical per seed, every rock buried and height-capped, by test. Metric: traverse
+success and mean speed over seeds.</td>
+</tr>
+<tr>
+<td><img src="docs/img/scenarios/s5_flat.png" alt="S5 flat"/><br/>
+<b>S5 — Flat / cost of transport.</b> The anti-soft scenario: <code>E/(m·g·d)</code> on
+flat ground, where a rigid cylinder is nearly free (0.01) and excess softness has to pay
+for itself. Also the ride-harshness floor (objective 3).</td>
+<td><img src="docs/img/scenarios/s6_spin.png" alt="S6 spin"/><br/>
+<b>S6 — Spin in place</b> (the path-track proxy). Left and right sides driven in
+opposition; metric: yaw rate and the scrub energy it costs (6.8 °/s for 45.6 J on rigid
+R 60). <i>Quarantined by TODO #38</i> until the lateral-scrub checks land.</td>
+</tr>
+<tr>
+<td><img src="docs/img/scenarios/s7_washboard.png" alt="S7 washboard"/><br/>
+<b>S7 — Washboard.</b> A sinusoidal corrugation, swept over amplitude × wavelength.
+Metric: RMS chassis acceleration — <b>where compliance wins</b>: the claw wheel beats the
+rigid cylinder in every cell, 1.7–4.9×, and decouples from the terrain.</td>
+<td><b>S8 — Sustained load</b> (no picture yet). Nominal + 2× load over long duration:
+sag, buckling margin, fatigue. The anti-collapse scenario. Today it exists as FEA-side
+constraints (<code>fea_static_sag</code>, <code>fea_buckling</code>); the duration and
+fatigue half wants the TPU coupon data from <code>docs/plan/07-materials.md</code>.</td>
+</tr>
+</table>
+
 ## Environment
 
 One conda environment, `conda3.12` (Python 3.12). Conda rather than a venv for two specific
